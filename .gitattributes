@@ -1,0 +1,10 @@
+# Normalize text files to LF in the repository
+* text=auto eol=lf
+
+# Binary files: never touch line endings
+*.xlsx binary
+*.parquet binary
+*.duckdb binary
+*.jpeg binary
+*.jpg binary
+*.png binary

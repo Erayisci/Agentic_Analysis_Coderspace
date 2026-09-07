@@ -1,0 +1,12 @@
+# Derived data - fully reproducible with: python -m pipeline.build
+data/
+
+# Excel lock files (created while a workbook is open)
+**/~$*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
