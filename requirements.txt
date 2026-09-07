@@ -1,0 +1,3 @@
+duckdb
+pytest
+flake8
