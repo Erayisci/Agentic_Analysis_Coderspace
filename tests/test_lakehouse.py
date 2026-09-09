@@ -4,12 +4,12 @@ Golden fixtures come from the research handoff (§22) and were independently
 verified against the raw June 2026 workbooks. If any of these fail after a
 code change or a data refresh, the data layer is not trustworthy.
 
-Run:  pytest tests/ -q          (requires a completed `python -m pipeline.build`)
+Run:  pytest tests/ -q          (requires a completed `python -m backend.lakehouse.build`)
 """
 import duckdb
 import pytest
 
-from pipeline.config import DUCKDB_PATH
+from backend.core.config import DUCKDB_PATH
 
 JUNE_2026 = "2026-06-01"
 
@@ -17,7 +17,7 @@ JUNE_2026 = "2026-06-01"
 @pytest.fixture(scope="module")
 def connection():
     if not DUCKDB_PATH.exists():
-        pytest.fail("lakehouse.duckdb not found - run `python -m pipeline.build` first")
+        pytest.fail("lakehouse.duckdb not found - run `python -m backend.lakehouse.build` first")
     con = duckdb.connect(str(DUCKDB_PATH), read_only=True)
     yield con
     con.close()
@@ -214,7 +214,7 @@ def test_tbb_rank_instability_handled_by_name_keys(connection):
 def test_period_coverage(connection):
     bddk_months = one_value(connection, "SELECT count(DISTINCT period) FROM observations WHERE source='BDDK'")
     tbb_months = one_value(connection, "SELECT count(DISTINCT period) FROM observations WHERE source='TBB_RM'")
-    assert bddk_months == 55  # 2022-01..2026-07
+    assert bddk_months == 67  # 2021-01..2026-07
     assert tbb_months == 54   # 2022-01..2026-06
 
 

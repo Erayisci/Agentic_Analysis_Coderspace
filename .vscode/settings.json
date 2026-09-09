@@ -10,10 +10,19 @@
         {
             "alias": "lakehouse",
             "type": "file",
-            "path": "c:\\Users\\ERAY\\Desktop\\Agentic_Analysis_Coderspace\\data\\lakehouse.duckdb",
+            "path": "${workspaceFolder}/data/lakehouse.duckdb",
             "readOnly": true,
-            "attached": true
+            "attached": false
         }
     ],
-    "duckdb.defaultDatabase": "lakehouse"
+    "duckdb.defaultDatabase": "lakehouse",
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "name": "duckdb_dataset_kkb",
+            "database": "${workspaceFolder}/data/lakehouse.duckdb"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
 }

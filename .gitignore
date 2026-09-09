@@ -1,10 +1,19 @@
-# Derived data - fully reproducible with: python -m pipeline.build
+# Derived data - fully reproducible with: python -m backend.lakehouse.build
 data/
 
-# Excel lock files (created while a workbook is open)
+# Spreadsheet lock files (created while a workbook is open)
 **/~$*.xlsx
+**/.~lock.*#
+
+# BDDK workbooks are a derived rendering of bddk_aylik_bulten/_raw_json/, which
+# is the source of truth and IS committed. Regenerate them without network via:
+#   python -m backend.ingestion.bddk_bulletin --from-cache
+bddk_aylik_bulten/*/*.xlsx
 
 # Python
+*.egg-info/
+build/
+dist/
 __pycache__/
 *.pyc
 .pytest_cache/

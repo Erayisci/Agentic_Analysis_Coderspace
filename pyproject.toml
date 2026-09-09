@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kkb-agentic-analytics"
+version = "0.1.0"
+description = "Agentic data analytics over Turkish banking-regulator data (KKB Hackathon 2026)"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.0.0",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "pyarrow>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "flake8>=6.0.0"]
+
+[project.scripts]
+kkb-build = "backend.lakehouse.build:main"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
