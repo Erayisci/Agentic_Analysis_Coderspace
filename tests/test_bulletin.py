@@ -196,5 +196,6 @@ def test_table_5_matches_the_dedicated_parser(bulletin):
 
 def test_units_are_declared_per_table():
     assert BY_SLUG["rasyolar"].unit is None          # mixes %, Bin TL, Gün, Kişi
-    assert BY_SLUG["tuketici_kredileri"].unit == "bin TL"
+    assert BY_SLUG["tuketici_kredileri"].unit == "milyon TL"
+    assert BY_SLUG["sektorel_kredi_dagilimi"].unit == "bin TL"
     assert BY_SLUG["diger_bilgiler"].unit == "Adet"

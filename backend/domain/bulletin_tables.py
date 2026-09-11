@@ -44,7 +44,7 @@ class Table(NamedTuple):
     row_kind: str
     rows_seen: int
     strict: bool = False
-    unit: Optional[str] = "bin TL"
+    unit: Optional[str] = "milyon TL"
     hierarchy: str = "leading"
 
 
@@ -53,7 +53,7 @@ TABLES: Tuple[Table, ...] = (
     Table(2, "kar_zarar", "Kar Zarar", "Kalem", 53),
     Table(3, "krediler", "Krediler", "Kredi Türü", 20),
     Table(4, "tuketici_kredileri", "Tüketici Kredileri", "Kalem", 41),
-    Table(5, "sektorel_kredi_dagilimi", "Sektörel Kredi Dağılımı", "Sektör", 70, True),
+    Table(5, "sektorel_kredi_dagilimi", "Sektörel Kredi Dağılımı", "Sektör", 70, True, unit="bin TL"),
     Table(6, "kobi_kredileri", "KOBİ Kredileri", "Kalem", 8),
     Table(7, "sendikasyon_sekuritizasyon", "Sendikasyon Sekuritizasyon Kredileri", "Kalem", 3),
     Table(8, "menkul_kiymetler", "Menkul Kıymetler", "Kalem", 29),
