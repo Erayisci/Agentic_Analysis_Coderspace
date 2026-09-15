@@ -22,3 +22,6 @@ venv/
 
 # Secrets (EVDS_API_KEY lives here; see backend/core/config.py)
 .env
+
+# Editor state: the DuckDB extension rewrites this with machine-specific paths
+.vscode/
