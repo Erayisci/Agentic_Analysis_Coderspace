@@ -9,23 +9,31 @@ import duckdb
 import pandas as pd
 
 from ..domain import canonical
-from ..transform import analytics
+from ..transform import analytics, macro
+from ..transform.bulletin import build_bulletin_metrics, check_decumulation, decumulate
 from ..validation import identities as validate
 from ..core.config import (
     ANALYTICS_DIR,
     DUCKDB_PATH,
+    EVDS_CATALOG_DIR,
     PROCESSED_DIR,
     RAW_BDDK_DIR,
     RAW_BDDK_JSON_DIR,
+    RAW_BDDK_WEEKLY_DIR,
+    RAW_EVDS_JSON_DIR,
     RAW_TBB_DIR,
     SCHEMA_CARD_PATH,
     UNIT,
 )
 from ..domain.bulletin_tables import TABLES as BULLETIN_TABLES
 from ..parsing.bddk_sectoral import parse_bddk_directory
-from ..parsing.bddk_bulletin import parse_bulletin_table
+from ..parsing.bddk_bulletin import parse_bulletin_footnotes, parse_bulletin_table
+from ..parsing.bddk_weekly import parse_weekly_archive
+from ..parsing.evds import load_catalogue, parse_archive
 from ..parsing.tbb import parse_tbb_directory
 from ..validation.continuity import run_bulletin_validations
+from ..validation.macro import check_macro_coverage, check_unit_resolution
+from ..validation.weekly import check_weekly_against_monthly, run_weekly_validations
 from .schema_card import write_schema_card
 
 
@@ -55,7 +63,10 @@ def build_dimension_tables(bddk_obs: pd.DataFrame, tbb_obs: pd.DataFrame):
         columns=["metric", "source", "name_turkish", "name_english"],
     )
     metrics["unit"] = UNIT
-    metrics["temporal_semantics"] = "period_end_stock"
+    # One vocabulary across the three series indexes (`metrics`,
+    # `bulletin_metrics`, `macro_series`): an agent that learns 'stock' from one
+    # must not miss these rows because they say 'period_end_stock' instead.
+    metrics["temporal_semantics"] = "stock"
 
     crosswalk_rows = []
     for canonical_id, name_en, bddk_codes, tbb_slugs, relation, confidence in canonical.CANONICAL_SECTORS:
@@ -82,11 +93,15 @@ def build_dimension_tables(bddk_obs: pd.DataFrame, tbb_obs: pd.DataFrame):
 
 
 def build_bulletin_tables():
-    """Parse and validate all 17 monthly-bulletin tables.
+    """Parse, validate and de-cumulate all 17 monthly-bulletin tables.
 
     Runs on every build so that a newly downloaded month cannot introduce an
     unregistered row change without failing loudly -- the whole reason the
-    continuity check exists.
+    continuity check exists. Validation is two checks now: entity continuity,
+    and each row's own label-stated identity ('Tüketici Kredileri (2+3+4)'),
+    which makes 60 arithmetic rules machine-derived rather than hand-curated.
+
+    Returns (observations, lifecycle_report, metric_catalog).
     """
     frames = []
     reports = []
@@ -95,11 +110,52 @@ def build_bulletin_tables():
         reports.append(run_bulletin_validations(observations, table.slug))
         frames.append(observations)
 
-    combined = pd.concat(frames, ignore_index=True)
+    combined = decumulate(pd.concat(frames, ignore_index=True))
     report = pd.concat([r for r in reports if len(r)], ignore_index=True) if any(
         len(r) for r in reports
     ) else pd.DataFrame(columns=["dataset", "check", "entity_key", "passed", "detail"])
-    return combined, report
+    return combined, report, build_bulletin_metrics(combined)
+
+
+def build_weekly_tables():
+    """Parse and validate the nine weekly-bulletin tables.
+
+    The weekly bulletin is the timely half of the BDDK corpus: it observes on
+    Fridays and publishes days later, where the monthly bulletin observes at
+    month end and publishes weeks later. It is validated the same way -- every
+    label's own arithmetic, every item's published lifecycle -- plus one check
+    the monthly path has no use for: a retired item and the item that replaced
+    it must agree wherever both publish, which is what licenses reading them as
+    one series.
+
+    Returns (observations, items, report).
+    """
+    observations, items = parse_weekly_archive(RAW_BDDK_WEEKLY_DIR)
+    reports = [run_weekly_validations(group, slug)
+               for slug, group in observations.groupby("dataset")]
+    report = pd.concat([r for r in reports if len(r)], ignore_index=True) if any(
+        len(r) for r in reports
+    ) else pd.DataFrame(columns=["dataset", "check", "entity_key", "passed", "detail"])
+    return observations, items, report
+
+
+def build_macro_tables():
+    """Parse the EVDS archive, align it to months, derive, and check coverage.
+
+    Returns (catalogue, native, monthly, coverage_report). The catalogue is
+    the agent's series index for this source: every row carries the declared
+    temporal semantics and monthly rule, so nothing reaches the agent unlabelled.
+    """
+    catalogue = load_catalogue(EVDS_CATALOG_DIR)
+    native = parse_archive(RAW_EVDS_JSON_DIR)
+    monthly = macro.align_monthly(native, catalogue)
+    monthly = macro.add_derived_series(monthly)
+    catalogue = macro.expand_derived_catalogue(catalogue, monthly)
+    coverage = pd.concat(
+        [check_unit_resolution(catalogue), check_macro_coverage(monthly, catalogue)],
+        ignore_index=True,
+    )
+    return catalogue, native, monthly, coverage
 
 
 def main() -> int:
@@ -127,9 +183,26 @@ def main() -> int:
     print(f"  {len(quality_report)} checks passed")
 
     print("Parsing BDDK bulletin tables...")
-    bulletin_obs, bulletin_report = build_bulletin_tables()
+    bulletin_obs, bulletin_report, bulletin_metrics = build_bulletin_tables()
+    bulletin_footnotes = parse_bulletin_footnotes(RAW_BDDK_JSON_DIR)
+    decumulation = pd.DataFrame(check_decumulation(bulletin_obs))
     print(f"  {len(bulletin_obs):,} observations across {bulletin_obs.dataset.nunique()} tables, "
-          f"{len(bulletin_report)} registered lifecycle(s)")
+          f"{len(bulletin_metrics)} metrics, {len(bulletin_footnotes)} published methodology note(s), "
+          f"{len(bulletin_report)} registered lifecycle/identity note(s)")
+
+    print("Parsing BDDK weekly bulletin tables...")
+    weekly_obs, weekly_items, weekly_report = build_weekly_tables()
+    weekly_vs_monthly = check_weekly_against_monthly(weekly_obs, bulletin_obs)
+    print(f"  {len(weekly_obs):,} observations across {weekly_obs.dataset.nunique()} tables, "
+          f"{len(weekly_items)} items ({int(weekly_items.retired_on.notna().sum())} retired, "
+          f"{int(weekly_items.is_informational.sum())} informational), "
+          f"{weekly_obs.period.nunique()} weeks, {len(weekly_report)} lifecycle/identity note(s), "
+          f"{len(weekly_vs_monthly)} cross-checks against the monthly bulletin passed")
+
+    print("Parsing TCMB EVDS archive...")
+    macro_series, macro_native, macro_monthly, macro_coverage = build_macro_tables()
+    print(f"  {len(macro_series):,} series, {len(macro_native):,} native observations, "
+          f"{len(macro_monthly):,} monthly rows, {len(macro_coverage)} coverage checks passed")
 
     print("Building dimension tables and crosswalk...")
     sectors, metrics, crosswalk = build_dimension_tables(bddk_obs, tbb_obs)
@@ -153,14 +226,27 @@ def main() -> int:
         "growth": growth,
         "ratios": ratios,
         "reconciliation_monitor": reconciliation,
-        "data_quality_report": quality_report,
+        "data_quality_report": pd.concat(
+            [quality_report, decumulation, weekly_vs_monthly, macro_coverage],
+            ignore_index=True),
         "bulletin_observations": bulletin_obs,
+        "bulletin_metrics": bulletin_metrics,
+        "bulletin_footnotes": bulletin_footnotes,
         "bulletin_lifecycle_report": bulletin_report,
+        "weekly_observations": weekly_obs,
+        "weekly_items": weekly_items,
+        "weekly_lifecycle_report": weekly_report,
+        "macro_series": macro_series,
+        "macro_observations": macro_monthly,
+        "macro_observations_native": macro_native,
     }
 
     print("Writing Parquet and DuckDB...")
     processed_names = {"observations", "sectors", "metrics", "sector_crosswalk",
-                       "bulletin_observations"}
+                       "bulletin_observations", "bulletin_metrics", "bulletin_footnotes",
+                       "weekly_observations", "weekly_items",
+                       "macro_series", "macro_observations",
+                       "macro_observations_native"}
     connection = duckdb.connect(str(DUCKDB_PATH))
     for name, frame in tables.items():
         target_dir = PROCESSED_DIR if name in processed_names else ANALYTICS_DIR

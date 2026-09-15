@@ -69,6 +69,12 @@ python -m backend.ingestion.bddk_bulletin --list        # what the 17 tables are
 
 # TBB Risk Merkezi sectoral distribution
 python -m backend.ingestion.riskmerkezi
+
+# TCMB EVDS: series catalogue, then data at native frequency. Needs EVDS_API_KEY
+# (environment or repo-root .env, gitignored). The archive under evds/_raw_json/
+# is committed, so this is only for refreshing.
+python -m backend.ingestion.evds --list
+python -m backend.ingestion.evds --catalog --fetch
 ```
 
 Downloads skip files already on disk, so an interrupted run is resumed by re-running the same command.
@@ -87,7 +93,7 @@ The brief's target corpus is **2021-01 through 2026-06**.
 | Source | Status |
 |---|---|
 | BDDK Aylık Bülten — all 17 tables | ✅ built, 2021-01..2026-07, 135,513 observations |
-| TCMB EVDS (`evds3.tcmb.gov.tr`) | ❌ not acquired — **highest priority**, the demo scenario needs it |
+| TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency) |
 | BDDK Haftalık Bülten | ❌ not acquired |
 | BDDK FinTürk (İllere Göre) | ❌ not acquired |
 | TBB Risk Merkezi sectoral | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
@@ -113,11 +119,11 @@ dataset that can silently disagree. Regenerate them any time with `--from-cache`
 ```
 backend/
 ├── core/         config, labels (shared key normalisation), errors
-├── domain/       bulletin_tables (17-table registry + lifecycles), canonical (sector graph)
-├── ingestion/    bddk_bulletin, riskmerkezi        — runnable CLIs, fetch only
-├── parsing/      bddk_sectoral, bddk_bulletin, tbb — raw files -> long frames
-├── validation/   identities, continuity            — abort the build on failure
-├── transform/    analytics                         — growth, ratios, reconciliation
+├── domain/       bulletin_tables (17-table registry + lifecycles), canonical (sector graph), evds_series
+├── ingestion/    bddk_bulletin, riskmerkezi, evds  — runnable CLIs, fetch only
+├── parsing/      bddk_sectoral, bddk_bulletin, tbb, evds — raw files -> long frames
+├── validation/   identities, continuity, macro     — abort the build on failure
+├── transform/    analytics, macro                  — growth, ratios, reconciliation, monthly alignment
 └── lakehouse/    build (orchestrator), schema_card
 ```
 
@@ -138,6 +144,7 @@ table 05, so the generic path cannot drift from the pinned one.
 | `observations` | BDDK sectoral + TBB sectoral, the pinned sector-grained corpus |
 | `sectors`, `metrics`, `sector_crosswalk` | Dimensions and the cross-source mapping |
 | `growth`, `ratios` | Month-over-month / year-over-year changes, derived ratios |
+| `macro_series`, `macro_observations`, `macro_observations_native` | TCMB EVDS series index, monthly-aligned values, and the native-frequency points |
 | `reconciliation_monitor` | BDDK vs TBB divergence with a mean ± 3σ band per series |
 | `data_quality_report`, `bulletin_lifecycle_report` | Validation evidence, persisted and quotable |
 
@@ -156,8 +163,10 @@ These are enforced in code and documented at length in [`CLAUDE.md`](CLAUDE.md).
 - **Row position is not an identifier.** Three bulletin tables reshuffle their rows mid-history. Rows are
   keyed on a normalised label qualified by parent; a series that starts or stops must be registered in
   `domain.bulletin_tables.KNOWN_LIFECYCLES` or the build fails.
-- **Every value is a period-end stock.** A month-over-month change is a net balance change (new lending
-  − repayments ± FX revaluation), never "new lending".
+- **Temporal semantics are per series, never assumed.** BDDK balances are period-end stocks (a
+  month-over-month change is a net balance change, never "new lending"), the BDDK income statement is
+  year-to-date, and every EVDS series declares `stock` / `flow` / `rate` / `index` plus the rule that
+  made it monthly. Read `metrics` / `macro_series` before differencing anything.
 
 ---
 
