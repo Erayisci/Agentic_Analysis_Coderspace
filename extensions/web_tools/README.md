@@ -1,27 +1,90 @@
-# Optional web search and webpage reading
+# Optional web tools: search, pages, files, OCR, and vision
 
 This extension adds `search_web` (your own SearXNG instance) and `read_url`
 (local Crawl4AI with Chromium). `WEB_TOOLS_ENABLED=false` is the default.
 The existing ingestion commands, lakehouse build, dependencies, data, and tests keep
 their original behavior. No web service or browser is required for the baseline.
 
+For optional PDF, XLSX/XLS, CSV, DOCX, image discovery, local OCR, and Kloudeks MIA
+vision/OCR, follow the [step-by-step file and image guide](ASSETS.md). Those features
+have independent switches, limits, and an additional isolated Docker image target.
+
+## Start here
+
+| Your goal | Read |
+| --- | --- |
+| Test the tools yourself, from Docker to saved results | [Testing walkthrough](TESTING.md) — commands, expected output, cache/limit checks, and shutdown |
+| Understand which tool to call and connect an AI agent | [AI and developer reference](AI_USAGE.md) — signatures, result contracts, evidence handling, and Python example |
+| Configure file/image formats, OCR, MIA, and all resource limits | [File/image configuration guide](ASSETS.md) |
+| Set up another developer's machine from a fresh clone | [Onboarding below](#recommended-wsl2-setup) |
+| See what has actually been tested | [Verification record](VERIFICATION.md) |
+| Review licenses and dependency pins | [Third-party notes](THIRD_PARTY.md) |
+
+All shell commands in these guides run from the repository root in **Ubuntu/WSL
+Bash**, unless labeled PowerShell. Reuse an existing checkout and its feature
+branch; do not clone again just to run the tools. Changing configuration requires
+`web-tools start` to apply it to Docker. The CLI reads its private `.env`; Python
+callers use an explicit configuration mapping or process environment.
+
+## What each tool does
+
+| CLI command | Python callable | Output / use | Extra switch |
+| --- | --- | --- | --- |
+| `search` | `search_web` | Ranked URLs, titles, snippets, and search engine availability | Master switch only |
+| `read` | `read_url` | HTML page text as Markdown, title, source URL, and fetch time | Master switch only |
+| `assets` | `get_page_assets` | File links and image URLs on a page; linked assets are not downloaded | `WEB_LINKS_ENABLED=true` |
+| `document` | `read_document` | PDF text/tables, XLSX/XLS/CSV rows, DOCX paragraphs/tables | `WEB_DOCUMENTS_ENABLED=true` |
+| `image` | `read_image` | Image metadata; text with OCR; interpretation with vision | `WEB_IMAGES_ENABLED=true` |
+
+Every callable also requires `WEB_TOOLS_ENABLED=true`. OCR is separately allowed
+by `WEB_OCR_ENABLED`; vision requires `WEB_VISION_ENABLED` **and** `--vision` on
+the call. Local Tesseract OCR needs no API key. Optional MIA OCR and vision use
+Kloudeks credentials, the supplied model IDs, and bounded model-call budgets.
+Image metadata, OCR text, and a model's chart interpretation are different outputs.
+
+Typical use: find an official source, read its page, discover its attachments,
+extract a few relevant pages, then use OCR or vision only if the needed evidence
+is in pixels. Keep source URLs and page/sheet locations with the answer. See
+[AI_USAGE.md](AI_USAGE.md) for result handling and integration details.
+
 ## Where this connects
 
-The baseline at `dde8663d81cffbfe6b102fbadd49d7f47a87f5ee` is a Python 3.10+
-setuptools/pip project. It has ingestion/build CLIs and 57 pytest tests. It has **no
-implemented agent, application server, tool registry, model client, credential
-loader, Docker setup, or general webpage extractor**. LangGraph, FastAPI, and
-Kloudeks are plans in `Launch.MD`. There is no existing agent interaction to exercise.
+The current project contains the deterministic ingestion/lakehouse pipeline and
+these optional tools. There is **no implemented agent loop or application API**
+that automatically chooses tools and answers a question. LangGraph/application
+orchestration is still planned in `Launch.MD`. Running a CLI command produces JSON;
+it does not start an AI research conversation.
 
 `backend.tools.get_tools()` is a small new integration seam: a mapping of tool
 names to synchronous Python callables. It returns an empty mapping while disabled,
 before importing extension code. Future orchestration can register these callables
-alongside its own tools. This change does not introduce an agent framework, model
-provider, or model credentials. It preserves the existing spreadsheet parsers.
+alongside its own tools. There is no agent framework here. Optional image/OCR
+interpretation uses one new Kloudeks client abstraction under `backend/model_clients/`;
+the existing analytical spreadsheet parsers remain unchanged.
 
 The implementation lives in `backend/extensions/web_tools/`, so the existing
 `backend*` package discovery includes it without changing `pyproject.toml`.
 Deployment, tests, configuration, and these instructions live here.
+
+```mermaid
+flowchart LR
+    Caller["Person using CLI / future Python agent"] --> Tools["backend.tools callables"]
+    Tools --> Search["SearXNG: search results"]
+    Tools --> Worker["Isolated crawler worker"]
+    Worker --> HTML["Crawl4AI: HTML text and links"]
+    Worker --> Files["File parsers / local OCR"]
+    Worker --> Model["Optional Kloudeks OCR / vision"]
+    Search --> Evidence["Source-linked evidence"]
+    HTML --> Evidence
+    Files --> Evidence
+    Model --> Evidence
+    Evidence --> Answer["Human or future agent checks evidence and writes answer"]
+```
+
+Website access and model requests from the worker pass through the validating
+egress proxy. The diagram shows the logical workflow; the [isolation section](#configuration-and-isolation)
+describes Docker networking. The tools do not insert these results into DuckDB
+or a vector index automatically.
 
 ## Recommended WSL2 setup
 
@@ -31,8 +94,9 @@ Python packages, and Chromium. You do not install Crawl4AI, Playwright, or brows
 libraries into the baseline virtual environment. No global Python packages are needed.
 
 If this checkout is already open in WSL, keep using it; skip cloning below.
-The implementation was made on `feature/open-source-web-tools` in the original
-checkout. No separate worktree was needed because it was clean.
+The web tools and their file/image extensions are maintained on `perhat` in the
+original checkout. Temporary implementation branches are not needed to use them.
+No separate worktree was needed.
 
 ### Windows PowerShell: WSL and VS Code
 
@@ -56,13 +120,12 @@ such as `~/src`, rather than `/mnt/c`.
 ### WSL Bash: fresh clone and baseline
 
 These commands are for another developer who does not already have a checkout.
-The branch must first be made available through your team's normal Git workflow;
-this implementation does not push it.
+Use the team's `perhat` branch after the changes have been pushed there.
 
 ```bash
 mkdir -p ~/src
 cd ~/src
-git clone --branch feature/open-source-web-tools https://github.com/Erayisci/Agentic_Analysis_Coderspace.git
+git clone --branch perhat https://github.com/Erayisci/Agentic_Analysis_Coderspace.git
 cd Agentic_Analysis_Coderspace
 code .
 ```
@@ -239,13 +302,15 @@ Both published services bind to `127.0.0.1`. The crawler uses only an internal
 Docker network. Its host port is published by the egress container, whose bounded
 TCP gateway forwards requests exclusively to `crawler:8932`. This makes the worker
 reachable from WSL without giving the browser a direct Internet route. The gateway
-allows at most 16 connections, 3 MiB per connection, and a 190-second lifetime.
+allows at most 16 connections, 3 MiB per connection, and a 190-second lifetime
+(up to 310 seconds when a longer optional asset deadline is configured).
 The separate, unpublished proxy port `3128` handles website access and checks all DNS
 answers, connects to validated public IP addresses, and permits HTTP/HTTPS on
 ports 80/443. Redirects and browser subrequests also pass through this boundary.
 The trusted internal SearXNG origin is intentionally separate from user URL rules.
-No baseline data directories, Docker sockets, credentials, or volumes are mounted
-into the crawler. Do not expose these development services to a shared network.
+No baseline data directories or Docker sockets are mounted into the crawler.
+The optional asset image receives only its own cache volume and configured MIA key;
+the standard HTML image needs neither. Do not expose these development services to a shared network.
 
 Each setup receives its own Compose project identity. For another checkout or
 worktree, run setup there rather than copying its real `.env`. Choose different
@@ -281,8 +346,9 @@ if search["results"]:
 
 Calling `get_tools()` without an explicit mapping reads process environment.
 It does not load any `.env` or modify model settings. Reuse one mapping so its
-concurrency limit is shared. A future Kloudeks/LangGraph integration should use
-the existing model client when implemented; this extension never calls a model.
+concurrency limit is shared. A future Kloudeks/LangGraph integration can reuse
+`backend.model_clients.kloudeks.KloudeksClient`. Search and HTML reading do not
+call a model; optional MIA OCR/vision does, only when enabled and requested.
 
 Search accepts `query`, bounded `max_results`, optional `language`, `time_range`
 (`day`, `month`, `year`), and `domains`. Domains are also checked against returned
@@ -296,7 +362,9 @@ fetch time, status, and explicit character counts/truncation metadata. Extractio
 uses Crawl4AI's deterministic Markdown path with Chromium rendering, including
 ordinary JavaScript pages; there is no LLM extraction or paid fallback. See
 [Crawl4AI configuration](https://docs.crawl4ai.com/core/browser-crawler-config/).
-PDF, Excel, images, downloads, and non-HTML types return unsupported-content errors.
+The HTML reader rejects PDF, Excel, images, and other non-HTML downloads. Enable
+the separate `read_document` and `read_image` tools to process supported files;
+see [ASSETS.md](ASSETS.md).
 Existing analytical parsers continue to work independently. There is no login,
 CAPTCHA bypass, authenticated browsing, or custom JavaScript execution interface.
 The SDK can reject very short pages as possible access challenges; those return
@@ -331,10 +399,10 @@ than changing unrelated pipeline behavior.
 | SearXNG JSON returns 403 | Confirm this project's settings are mounted and `search.formats` includes `json`; recreate with `start` after correcting configuration. |
 | Empty/partial search, 429, CAPTCHA | Inspect unavailable-engine metadata and logs. Wait, reduce concurrency/retries or change the enabled free engines in settings. There is no paid fallback or unlimited-throughput guarantee. |
 | Chromium missing or shared-library failure | Rerun `start` and inspect image build errors. Browser packages and Linux libraries install inside the crawler image, never via host `playwright install` or `sudo pip`. |
-| Page fails or is unsupported | Check its HTTP status/type; use a public HTML page. Private addresses, nonstandard ports, login-only sites, and non-HTML downloads are rejected. |
+| Page fails or is unsupported | Check its HTTP status/type; use `read` for HTML, or enable `document`/`image` for supported files. Private addresses, nonstandard ports, and login-only sites are rejected. |
 | `certificate_error` | The site's HTTPS certificate could not be verified. Missing issuer chains are retried through Chromium's normal verifier; if verification still fails, use another source or wait for the site operator to fix its HTTPS configuration. |
 | Configuration ignored by Python | `get_tools()` reads process environment only; pass an explicit mapping or set the feature/service variables in your launcher. The CLI loads only its own `.env`. |
-| Missing model credentials | Search/read need none. Agent reasoning remains unimplemented in this baseline; configure the future approved Kloudeks client through its eventual loader, not this extension. |
+| Missing model credentials | Search, HTML, document text, and local OCR need none. For optional MIA vision/OCR, set the key locally and restart as described in [ASSETS.md](ASSETS.md). |
 
 Search and crawling have no required search subscription. Hosting, network access,
 electricity, and any existing/future model API usage are separate costs. Upstream

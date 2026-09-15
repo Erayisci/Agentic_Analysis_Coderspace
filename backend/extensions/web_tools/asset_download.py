@@ -44,6 +44,10 @@ async def browser_intermediates(origin, proxy, timeout):
 
             await context.route("**/*", route)
             page = await context.new_page()
+            # Certificate details are recorded only for requests observed after
+            # Network.enable; attaching a session after navigation yields no chain.
+            session = await context.new_cdp_session(page)
+            await session.send("Network.enable")
             page.on("response", lambda response: verified.append(response.url)
                     if response.url.startswith(origin + "/") else None)
             try:
@@ -51,7 +55,6 @@ async def browser_intermediates(origin, proxy, timeout):
             except Exception:
                 if not verified:
                     raise AssetFailure("certificate_error") from None
-            session = await context.new_cdp_session(page)
             chain = await session.send("Network.getCertificate", {"origin": origin})
             intermediates = []
             for value in chain.get("tableNames", [])[:10]:

@@ -79,6 +79,10 @@ assert not any(name in sys.modules for name in ('pypdf', 'pdfplumber', 'openpyxl
                   {"url": "https://example.com/chart.png", "text": "Chart"}]
         self.assertEqual([v["type_hint"] for v in public_assets(values, 2)], ["pdf", "png"])
         self.assertEqual(len(public_assets(values, 1)), 1)
+        downloads = [{"url": "https://example.com/menu"},
+                     {"url": "https://example.com/file?id=12", "text": "Dokuman Linki Annual report"}]
+        self.assertEqual(public_assets(downloads, 1)[0]["type_hint"], "document")
+        self.assertEqual(public_assets([{"url": "https://example.com/file", "download": True}], 1)[0]["type_hint"], "document")
 
     def test_child_timeout_kills_descendants(self):
         process = Mock(pid=54321)

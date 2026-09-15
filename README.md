@@ -9,8 +9,13 @@ Current state: the ingestion, validation and lakehouse layers are implemented an
 and API are designed in [`Launch.MD`](Launch.MD) but not yet written.
 
 An optional [SearXNG + Crawl4AI web-tools extension](extensions/web_tools/README.md) provides
-`search_web` and `read_url` callables for the future agent. It is disabled by default, runs its
-dependencies in separate containers, and does not change the pipeline setup below.
+`search_web` and `read_url` callables for the future agent, with separately optional
+[file, image, OCR, and Kloudeks vision tools](extensions/web_tools/ASSETS.md). Each capability
+has switches and resource limits. Dependencies run in separate containers; all tools are
+disabled by default and do not change the pipeline setup below.
+
+To try the web tools yourself, use the [Docker-to-results testing walkthrough](extensions/web_tools/TESTING.md).
+For AI integration, see the [tool contracts and usage reference](extensions/web_tools/AI_USAGE.md).
 
 ---
 
@@ -179,4 +184,7 @@ These are enforced in code and documented at length in [`CLAUDE.md`](CLAUDE.md).
 |---|---|
 | [`Launch.MD`](Launch.MD) | Architecture and execution blueprint: stack, agent design, roadmap |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes for contributors and coding agents: invariants, traps, refresh procedure |
+| [`extensions/web_tools/README.md`](extensions/web_tools/README.md) | Optional web tools overview and fresh-clone onboarding |
+| [`extensions/web_tools/TESTING.md`](extensions/web_tools/TESTING.md) | Manual testing, expected results, saved output, limits, and shutdown |
+| [`extensions/web_tools/AI_USAGE.md`](extensions/web_tools/AI_USAGE.md) | Python tool contracts and guidance for AI consumers |
 | `data/analytics/schema_card.md` | Generated, agent-facing description of the lakehouse |

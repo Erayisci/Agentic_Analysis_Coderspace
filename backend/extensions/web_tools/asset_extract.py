@@ -336,7 +336,8 @@ def extract(path, request, metadata, config, proxy):
             for index in range(min(book.nsheets, config.asset_max_sheets)):
                 sheet = book.sheet_by_index(index)
                 def row_values(row):
-                    for item in sheet.row(row, 0, min(sheet.ncols, config.asset_max_columns)):
+                    for column in range(min(sheet.ncols, config.asset_max_columns)):
+                        item = sheet.cell(row, column)
                         if item.ctype == xlrd.XL_CELL_DATE:
                             yield xlrd.xldate_as_datetime(item.value, book.datemode)
                         elif item.ctype == xlrd.XL_CELL_BOOLEAN:

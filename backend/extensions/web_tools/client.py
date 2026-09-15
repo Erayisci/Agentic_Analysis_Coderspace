@@ -350,6 +350,7 @@ class WebTools:
                     if not isinstance(payload.get(key), list):
                         raise ToolFailure("malformed_response", "The crawler omitted requested asset links")
                     response[key] = public_assets(payload[key], assets.asset_max_links)
+                    response[key + "_truncated"] = bool(payload.get(key + "_truncated")) or len(payload[key]) > assets.asset_max_links
             if response["truncated"]:
                 response["warnings"].append("Content was truncated at the configured character limit.")
         except ToolFailure as error:

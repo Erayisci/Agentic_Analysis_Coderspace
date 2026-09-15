@@ -3,8 +3,9 @@
 This product includes software developed by UncleCode (https://x.com/unclecode)
 as part of the Crawl4AI project (https://github.com/unclecode/crawl4ai).
 
-No hosted search subscription, model API, API key, or paid service is used by this
-extension. Hosting resources and network access remain the operator's responsibility.
+Search, HTML/file extraction, and local OCR use no hosted subscription or model key.
+Optional MIA vision/OCR uses the operator's Kloudeks endpoint, key, and model quota.
+Hosting resources and network access remain the operator's responsibility.
 Search engines and target websites are external services with their own availability
 and access rules. Source content is returned as untrusted evidence.
 
@@ -24,8 +25,30 @@ The package and image distributions carry their individual license notices.
 the SDK brings for optional capabilities that this worker does not call.
 In particular, Crawl4AI requires `unclecode-litellm==1.81.13`, whose dependencies
 include the `openai` package. Those packages stay inside the crawler image;
-this integration performs no LLM extraction and does not import a vendor SDK in
-its tool or worker implementation or accept model credentials.
+HTML extraction does not use those vendor clients. Optional MIA calls use the
+single standard-library Kloudeks client abstraction, without importing a vendor SDK.
+
+## Optional file/image image target
+
+`requirements-assets.lock` adds hash-locked parsers constrained by the existing
+crawler lock, only in the `crawler-assets` target:
+
+| Component | Version | Upstream source/license |
+| --- | --- | --- |
+| pypdf | `6.18.1` | [BSD-3-Clause](https://github.com/py-pdf/pypdf/blob/main/LICENSE) |
+| pdfplumber | `0.11.10` | [MIT](https://github.com/jsvine/pdfplumber/blob/stable/LICENSE.txt) |
+| pdfminer.six | `20260107` | [MIT](https://github.com/pdfminer/pdfminer.six/blob/master/LICENSE) |
+| pypdfium2 / PDFium | `5.13.0` wrapper | [Wrapper and bundled PDFium license notices](https://github.com/pypdfium2-team/pypdfium2/tree/main/LICENSES) |
+| openpyxl | `3.1.5` | [MIT; project metadata](https://pypi.org/project/openpyxl/3.1.5/) |
+| xlrd | `2.0.2` | [BSD-style license](https://github.com/python-excel/xlrd/blob/master/LICENSE) |
+| defusedxml | `0.7.1` | [PSF license; project metadata](https://pypi.org/project/defusedxml/0.7.1/) |
+| Pillow | `12.3.0`, shared with crawler lock | [MIT-CMU license](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
+| Tesseract, English/Turkish data | Debian Bookworm packages at build time | [Apache-2.0 engine](https://github.com/tesseract-ocr/tesseract/blob/main/LICENSE), [language data](https://github.com/tesseract-ocr/tessdata/blob/main/LICENSE) |
+| DejaVu fonts (OCR fixtures) | Debian Bookworm package | [License notices](https://github.com/dejavu-fonts/dejavu-fonts/blob/master/LICENSE) |
+
+The MIA request protocol and exact model IDs follow the hackathon guide supplied
+by the user. The service's availability, access rights, and quota are independent
+of the open-source parser stack. No model weights are redistributed by this project.
 
 ## Immutable image references
 
@@ -52,6 +75,10 @@ python3 -m venv /tmp/kkb-web-tools-lock-env
 /tmp/kkb-web-tools-lock-env/bin/uv pip compile extensions/web_tools/requirements.in \
   --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
   --generate-hashes --output-file extensions/web_tools/requirements.lock \
+  --no-emit-index-url --cache-dir /tmp/kkb-web-tools-uv-cache
+/tmp/kkb-web-tools-lock-env/bin/uv pip compile extensions/web_tools/requirements-assets.in \
+  --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+  --generate-hashes --output-file extensions/web_tools/requirements-assets.lock \
   --no-emit-index-url --cache-dir /tmp/kkb-web-tools-uv-cache
 ```
 

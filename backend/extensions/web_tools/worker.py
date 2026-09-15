@@ -297,9 +297,12 @@ async def crawl_page(request, proxy, timeout):
             maximum = AssetConfig.from_environ().asset_max_links
             for key, selector, attr in (("links", "a[href]", "href"), ("images", "img[src]", "src")):
                 records = await page.evaluate("""([selector, attr]) => Array.from(document.querySelectorAll(selector))
-                    .slice(0, 1000).map(node => ({url: node[attr], text: (node.alt || node.textContent || '').slice(0, 500)}))""",
+                    .slice(0, 1001).map(node => ({url: node[attr], download: node.hasAttribute('download'),
+                        text: (node.alt || ((node.querySelector('img')?.alt || '') + ' ' + node.textContent) || '').slice(0, 500)}))""",
                                               [selector, attr])
-                state[key] = public_assets(records, maximum)
+                candidates = public_assets(records, maximum + 1)
+                state[key] = candidates[:maximum]
+                state[key + "_truncated"] = len(records) > 1000 or len(candidates) > maximum
         return page
 
     browser = BrowserConfig(
@@ -333,6 +336,7 @@ async def crawl_page(request, proxy, timeout):
         result = format_result(request, state["metadata"], text, partial=state["partial"])
         if request.get("include_links"):
             result.update({key: state.get(key, []) for key in ("links", "images")})
+            result.update({key + "_truncated": state.get(key + "_truncated", False) for key in ("links", "images")})
         return result
 
 

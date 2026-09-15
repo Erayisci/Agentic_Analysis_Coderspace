@@ -1,6 +1,6 @@
 """Dependency-free public document/image tools; the service enforces policy too."""
 
-from .asset_common import AssetFailure, ERRORS, failure, normalize
+from .asset_common import AssetFailure, failure, normalize
 from .client import ToolFailure
 from .security import UnsafeURL, validate_url_syntax
 
@@ -62,4 +62,9 @@ class AssetTools:
         if not self.config.links_enabled:
             return failure("feature_disabled")
         result = self.web.read_url(url, max_chars=100)
-        return {key: result.get(key) for key in ("status", "requested_url", "final_url", "title", "links", "images", "error", "warnings")}
+        discovery = {key: result.get(key) for key in (
+            "status", "requested_url", "final_url", "title", "fetched_at", "source_trust",
+            "links", "images", "links_truncated", "images_truncated", "error", "warnings")}
+        if result.get("status") == "ok" and (result.get("links_truncated") or result.get("images_truncated")):
+            discovery["status"] = "partial"
+        return discovery

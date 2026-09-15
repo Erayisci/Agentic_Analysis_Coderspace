@@ -162,6 +162,14 @@ class BrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(result["content"], "")
             self.assertGreaterEqual(self.server.tls_attempts, 3)
             self.assertEqual(self.server.tls_http_requests, 0)
+            # Binary downloads use the same normally verified browser only to
+            # recover intermediate CAs. It must not accept this unknown issuer.
+            from backend.extensions.web_tools.asset_download import download
+            from backend.extensions.web_tools.asset_common import AssetFailure
+            with self.assertRaises(AssetFailure) as asset_failure:
+                download(url, proxy, path / "rejected.pdf", 1048576, 30)
+            self.assertEqual(asset_failure.exception.code, "certificate_error")
+            self.assertEqual(self.server.tls_http_requests, 0)
 
 
 if __name__ == "__main__":

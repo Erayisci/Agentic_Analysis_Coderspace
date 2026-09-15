@@ -31,7 +31,7 @@ certificate-chain handling fix were verified on 2026-09-15 in that same checkout
 | Baseline pytest before edits | 57 passed |
 | Baseline rendering/build/pytest with the extension present in an isolated source copy | Passed; 57 tests passed again |
 | Blocking lint on final checkout | Passed: 0 errors |
-| `web-tools test` with system Python and no crawler/pytest packages | 48 passed, including gateway and TLS handling tests; 5 optional real-browser cases skipped |
+| `web-tools test` with system Python and no crawler/pytest packages | 61 passed; 14 optional cases skipped (9 file/OCR and 5 browser tests, run separately below) |
 | Optional browser fixture tests with the locked SDK and Chromium | All 5 passed inside the rebuilt Docker container, including rejection of an untrusted certificate after missing-issuer fallback |
 | `pip install --require-hashes -r requirements.lock` in a separate crawler environment | Passed |
 | `pip check` in the crawler environment | Passed: no broken requirements |
@@ -163,6 +163,61 @@ After rebuilding the extension:
 - Both services still passed `web-tools check` from WSL. Dependencies, network
   isolation, baseline files, and the user's ignored configuration were preserved.
 
+## Optional files, images, OCR, and MIA protocol, 2026-09-15
+
+This continuation found the earlier work committed at `c858683` on `perhat`, with
+a clean working tree. Remaining fixes and documentation were developed on
+`feature/web-assets` based on that commit, then moved to `perhat` at the user's
+request. No repository clone or worktree was created; existing local
+configuration values were preserved and missing defaults appended with `setup`.
+A second setup run left the file byte-for-byte unchanged. It remains Git-ignored.
+
+The optional `crawler-assets` image built successfully from the hash-locked parser
+requirements and the existing crawler runtime. All three services became healthy;
+`pip check` reported no broken requirements. Parser/OCR packages were not installed
+into the baseline environment. Docker Desktop's WSL socket became unavailable
+during continuation; starting the existing Desktop installation restored it. The
+agent used `sg docker` where needed for the existing group membership.
+
+Actual checks on the final implementation:
+
+| Check | Result |
+| --- | --- |
+| Offline extension suite | 61 passed; 14 optional integration cases skipped |
+| Docker file/OCR fixtures | 9 passed: PDF text and table locations; CSV/XLSX limits; legacy XLS dates and row limits; DOCX paragraphs/tables; PNG/scanned-PDF local OCR; archive/pixel/text caps; isolated download/cache refresh; MIA batching and shared call limits |
+| Docker browser fixtures | 5 passed; missing-issuer test also verified that the binary downloader rejected an untrusted certificate before receiving any HTTP content |
+| Blocking repository lint | 0 errors |
+| Git whitespace check | Passed |
+| Original lakehouse regression with current extension source | Cached-workbook rendering and full build passed in `/tmp/kkb-assets-baseline-rm0hjbrm/source`; all 57 pytest tests passed in 3.15s using a separate virtual environment |
+| BDDK discovery | 50 links, 8 images; attachment URLs ranked first; `links_truncated=true`, `images_truncated=false`, explicit `partial` status |
+| BDDK report download | `https://www.bddk.org.tr/Veri/EkGetir/8?ekId=625`, detected PDF, 2,980,052 bytes, 47 pages |
+| Selected PDF pages 1–2 | 899 characters, source locations retained, `partial` because only two pages were requested |
+| Repeat PDF read | Cache hit, original fetch timestamp retained |
+| Selected PDF pages 5–6 | 6,123 characters, two table sections with page locations, within the requested 8,000-character cap |
+| Model transport fixtures | Exact supplied MIA OCR prompt/fields and base64 images; single/multiple-image windows; image/token limits; output truncation; sanitized 401/403/429/500 responses; no automatic retries |
+| Restore standard HTML/search image | `start` and `check` passed; documents/images/links/OCR/vision reported false; a direct `/asset` POST returned `feature_disabled`; the default host registry remained empty |
+| Live smoke after restoring standard services | 3 search results; successful read of `https://docs.searxng.org/`, bounded to 2,000 characters; overall `partial` due to an unavailable search engine |
+
+The binary downloader initially could not recover BDDK's omitted intermediate
+certificate because its DevTools session started after navigation. Enabling the
+Network domain before the verified Chromium request makes the verified chain
+available. Only non-root CA intermediates are loaded into a fresh Python TLS
+context; partial-chain trust is disabled and the chain must reach an existing OS
+root. No leaf/root certificates, TLS bypass, or host trust-store changes are used.
+The original HTML certificate fallback remains intact.
+
+MIA live vision and OCR remain **unverified**: no actual MIA API key was supplied
+to the implementation session. Protocol and budget tests use fixtures; no real
+model call or quota expenditure is claimed. Local Tesseract OCR was exercised with
+actual image pixels and scanned PDFs, without a model service.
+
+The new capabilities were left disabled, with normal HTML/search services running.
+Enable them using [ASSETS.md](ASSETS.md). Test output and downloaded report results
+were kept outside Git under `/tmp`; the checkout's baseline environment and generated
+data were not modified. The work was initially left uncommitted for review; the
+user subsequently requested delivery on `perhat` and removal only of the temporary
+branches created during this implementation.
+
 ## Remaining platform and agent checks
 
 The Python lock and tested Docker deployment target Linux x86-64 / Python 3.12;
@@ -170,18 +225,19 @@ ARM has not been tested. Debian browser support packages are installed
 from Debian repositories at image build time, so that OS package layer is not
 fully locked. See `THIRD_PARTY.md` for upstream references and update guidance.
 
-There is no baseline agent loop, LangGraph registration layer, API, model client,
-or credential loader yet. The new minimal callable mapping is tested, but an
+There is no baseline agent loop, LangGraph registration layer, or application API
+yet. The Kloudeks client and private extension credential configuration now support
+optional MIA image/OCR calls. The callable mapping is tested, but an
 agent conversation that selects tools and writes a citation cannot be verified
-until that planned baseline functionality exists. No replacement agent or
-provider was introduced.
+until that planned baseline functionality exists. No replacement agent was introduced.
 
 ## Review scope
 
-The only previously tracked file changed is the root `README.md`, to clarify
-status and link to the extension. All implementation, deployment, lock, tests,
-and remaining documentation are new files under `backend/tools/`,
-`backend/extensions/`, and `extensions/web_tools/`.
+Relative to the original baseline `dde8663`, the only existing file changed is the
+root `README.md`. Added implementation, deployment, locks, tests, and documentation
+live under `backend/tools/`, `backend/model_clients/`, `backend/extensions/`, and
+`extensions/web_tools/`. The continuation's diff is relative to the web-tools commit
+`c858683`; existing implementation work in that commit was preserved.
 
 The baseline dependency files, CI workflow, model settings, ingestion/parsing
 code, raw corpora, database, and baseline startup commands remain unchanged.

@@ -133,6 +133,20 @@ BT /F1 16 Tf 50 520 Td (Revenue) Tj ET BT /F1 16 Tf 310 520 Td (12345 TRY) Tj ET
         self.assertIn("Quarterly report", result["content"])
         self.assertEqual(result["sections"][1]["rows"], [["Revenue", "12345 TRY"]])
 
+    def test_legacy_xls_dates_and_row_limits(self):
+        import base64
+        import zlib
+        # Generated with xlwt 1.3.0: Figures sheet, date/amount header,
+        # 2026-03-31 / 12345, and one extra row. No runtime writer dependency.
+        encoded = (
+            "eNrtWE1oE0EU/maTND+0+amp0AolFKxa24N48dKulbQ9pVQv/iBoaoOUaiJrCurF2pqjIHhSvBTqwUvViz+oUG8ehBY9CIKQKHjxJCh4aLO+97KLSURoRAuV+Zb55u2b92ZeMjNvdndlOVacf9BRQh0G4EHZDqKpSqeoBN2bKKjdtll06wAVW2NTIRigiWzy4WnLKz/PIc93CQbue18QAx+oHMc5jOaymcQG4oDEkFYcQz+xwm3ShNEuUbUKnxLeInxPLJ8J7xfNNeF+si2qY1g2R3v2Oav4iNElbWFwv4/E551o9qANL3kVX76uKrY+DFqT6TObrKHT24wF0ISOZLIZi+8juIMQcJTQl0r1JZNFxGmyF/DNTgBf3V29lND6jdUrkP57rd7/G32AJrFef8PwAjOwT8omKSCCkJdb/BiePD1tZc6vkoOHFFyoJZnOZ2iTD57NTWfzPmDoQt5KhzizSyaI1mSCFtkhzcQT1DHLMdknUQpl9e6X16nxMfOEaGYk+1fOiO0cEmxcYQ9yDkuLR5hte4R3C89Kr9tE7hCO0yKmunuszRGG58TmqrR20zh7BW/MHVXyTpILnw8+7ix8NHeRvDhSuhRffGvOo4vOrAny52sOvapX3brJeGK6tXLyyXvh9l9yS8CIOrHbzkEYwRrvJkJMuHLH/45y7FWd/XMaQ0nmml0xyO7TEtuzpSGetT0b0jPzgNGKhyxQVvuJEDQ0NDQ0NDQ0NDT+BMp5JnfeDuiRu/Lk73e+66xRKevPJP8tDiFHV57eEYeQpdrCxYbWz1b4lNuXWqeP+72QcZhGtzCFcYljquH1S29uqvr3rNsx+ve2UKPjlxuJ8x+P/wO6jtJq"
+        )
+        result = self.parse(zlib.decompress(base64.b64decode(encoded)), "report.xls",
+                            config=replace(self.config, asset_max_rows=2))
+        self.assertEqual(result["sections"][0]["rows"][1], ["2026-03-31T00:00:00", "12345.0"])
+        self.assertEqual(len(result["sections"][0]["rows"]), 2)
+        self.assertEqual(result["status"], "partial")
+
     def test_image_and_scanned_pdf_ocr_are_local_and_bounded(self):
         config = replace(self.config, ocr_enabled=True, ocr_languages="eng", ocr_max_pages=1)
         with self.image() as image:

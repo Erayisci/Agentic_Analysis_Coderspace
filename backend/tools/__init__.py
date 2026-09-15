@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 
 
 def get_tools(environ: Mapping[str, str] | None = None) -> dict[str, Callable]:
-    """Return enabled tools without loading crawler packages or model settings.
+    """Return enabled tools without loading crawler packages or starting services.
 
     Keep the returned mapping for the lifetime of the caller so its web tools
     share a concurrency limit. The current repository has no agent runner.
