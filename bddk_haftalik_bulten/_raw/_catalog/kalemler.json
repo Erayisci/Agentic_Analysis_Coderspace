@@ -1,0 +1,1065 @@
+{
+ "fetched_at": "2026-09-14T17:41:41",
+ "url": "https://www.bddk.org.tr/BultenHaftalik/tr/Gelismis",
+ "tables": [
+  {
+   "table_id": 289,
+   "slug": "krediler",
+   "items": [
+    {
+     "item_id": 5687,
+     "label": "Toplam Krediler (2+10)",
+     "display": "Toplam Krediler (2+10)"
+    },
+    {
+     "item_id": 5688,
+     "label": "T&#252;ketici Kredileri ve Bireysel Kredi Kartları (3+7)",
+     "display": "T&#252;ketici Kredileri ve Bireysel Kredi Kartları (3+7)"
+    },
+    {
+     "item_id": 5689,
+     "label": "T&#252;ketici Kredileri (4+5+6)",
+     "display": "T&#252;ketici Kredileri (4+5+6)"
+    },
+    {
+     "item_id": 5690,
+     "label": "a) Konut",
+     "display": "a) Konut"
+    },
+    {
+     "item_id": 5691,
+     "label": "b) Taşıt",
+     "display": "b) Taşıt"
+    },
+    {
+     "item_id": 5692,
+     "label": "c) İhtiya&#231;",
+     "display": "c) İhtiya&#231;"
+    },
+    {
+     "item_id": 5694,
+     "label": "Bireysel Kredi Kartları (8+9)",
+     "display": "Bireysel Kredi Kartları (8+9)"
+    },
+    {
+     "item_id": 5695,
+     "label": "a) Taksitli",
+     "display": "a) Taksitli"
+    },
+    {
+     "item_id": 5696,
+     "label": "b) Taksitsiz",
+     "display": "b) Taksitsiz"
+    },
+    {
+     "item_id": 5698,
+     "label": "Ticari ve Diğer Krediler",
+     "display": "Ticari ve Diğer Krediler"
+    },
+    {
+     "item_id": 5699,
+     "label": "Taksitli Tic. Krd. ve Kurumsal Kredi Kartları (12+16) (Bilgi)",
+     "display": "Taksitli Tic. Krd. ve Kurumsal Kredi Kartları (12+16) (Bilgi)"
+    },
+    {
+     "item_id": 5700,
+     "label": "Taksitli Ticari Krediler (13+14+15) (Bilgi)",
+     "display": "Taksitli Ticari Krediler (13+14+15) (Bilgi)"
+    },
+    {
+     "item_id": 5701,
+     "label": "a) İşyeri",
+     "display": "a) İşyeri"
+    },
+    {
+     "item_id": 5702,
+     "label": "b) Taşıt",
+     "display": "b) Taşıt"
+    },
+    {
+     "item_id": 5703,
+     "label": "c) İhtiya&#231;",
+     "display": "c) İhtiya&#231;"
+    },
+    {
+     "item_id": 5705,
+     "label": "Kurumsal Kredi Kartları (17+18) (Bilgi)",
+     "display": "Kurumsal Kredi Kartları (17+18) (Bilgi)"
+    },
+    {
+     "item_id": 5706,
+     "label": "a) Taksitli",
+     "display": "a) Taksitli"
+    },
+    {
+     "item_id": 5707,
+     "label": "b) Taksitsiz",
+     "display": "b) Taksitsiz"
+    },
+    {
+     "item_id": 5697,
+     "label": "KOBİ Kredileri (Bilgi)",
+     "display": "KOBİ Kredileri (Bilgi)"
+    },
+    {
+     "item_id": 5708,
+     "label": "D&#246;v. Endeksli Krediler (Bilgi)",
+     "display": "D&#246;v. Endeksli Krediler (Bilgi)"
+    },
+    {
+     "item_id": 5882,
+     "label": "Kredili Mevduat Hesapları-T&#252;ketici Kredileri (Bilgi)",
+     "display": "Kredili Mevduat Hesapları-T&#252;ketici Kredileri (Bilgi)"
+    },
+    {
+     "item_id": 5883,
+     "label": "Kredili Mevduat Hesapları-Taksitli Ticari Krediler(Bilgi) ",
+     "display": "Kredili Mevduat Hesapları-Taksitli Ticari Krediler(Bilgi) "
+    },
+    {
+     "item_id": 5693,
+     "label": "d) Diğer",
+     "display": "1.0.7 - d) Diğer  (Sonlandırılma Tarihi= 26-12-2014 )"
+    },
+    {
+     "item_id": 5704,
+     "label": "d) Diğer",
+     "display": "1.0.18 - d) Diğer  (Sonlandırılma Tarihi= 26-12-2014 )"
+    }
+   ]
+  },
+  {
+   "table_id": 290,
+   "slug": "takipteki_alacaklar",
+   "items": [
+    {
+     "item_id": 5709,
+     "label": "Takipteki Alacaklar (2+8)",
+     "display": "Takipteki Alacaklar (2+8)"
+    },
+    {
+     "item_id": 5866,
+     "label": "T&#252;ketici Kredileri ve Bireysel Kredi Kartları (3+7)",
+     "display": "T&#252;ketici Kredileri ve Bireysel Kredi Kartları (3+7)"
+    },
+    {
+     "item_id": 5710,
+     "label": "T&#252;ketici Kredileri (4+5+6)",
+     "display": "T&#252;ketici Kredileri (4+5+6)"
+    },
+    {
+     "item_id": 5867,
+     "label": "a) Konut",
+     "display": "a) Konut"
+    },
+    {
+     "item_id": 5868,
+     "label": "b) Taşıt",
+     "display": "b) Taşıt"
+    },
+    {
+     "item_id": 5869,
+     "label": "c) İhtiya&#231;",
+     "display": "c) İhtiya&#231;"
+    },
+    {
+     "item_id": 5711,
+     "label": "Bireysel Kredi Kartları",
+     "display": "Bireysel Kredi Kartları"
+    },
+    {
+     "item_id": 5713,
+     "label": "Ticari ve Diğer Krediler",
+     "display": "Ticari ve Diğer Krediler"
+    },
+    {
+     "item_id": 5714,
+     "label": "Takipteki Alacaklar &#214;zel Karşılığı (-)",
+     "display": "Takipteki Alacaklar &#214;zel Karşılığı (-)"
+    },
+    {
+     "item_id": 5715,
+     "label": "Taksitli Ticari Krd. (Bilgi)",
+     "display": "Taksitli Ticari Krd. (Bilgi)"
+    },
+    {
+     "item_id": 5716,
+     "label": "Kurumsal Kredi Kartları (Bilgi)",
+     "display": "Kurumsal Kredi Kartları (Bilgi)"
+    },
+    {
+     "item_id": 5712,
+     "label": "KOBİ Kredileri (Bilgi)",
+     "display": "KOBİ Kredileri (Bilgi)"
+    },
+    {
+     "item_id": 5871,
+     "label": "d) Diğer",
+     "display": "2.0.13 - d) Diğer  (Sonlandırılma Tarihi= 26-12-2014 )"
+    }
+   ]
+  },
+  {
+   "table_id": 291,
+   "slug": "menkul_degerler",
+   "items": [
+    {
+     "item_id": 5717,
+     "label": "Toplam Menkul Değerler (2+5+8)",
+     "display": "Toplam Menkul Değerler (2+5+8)"
+    },
+    {
+     "item_id": 5873,
+     "label": "Ger&#231;eğe Uygun Değer Farkı K/Z Yan. Menk. Değ.",
+     "display": "Ger&#231;eğe Uygun Değer Farkı K/Z Yan. Menk. Değ."
+    },
+    {
+     "item_id": 5874,
+     "label": " - Devlet Tahvilleri (Bilgi i&#231;in)",
+     "display": " - Devlet Tahvilleri (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5875,
+     "label": " - Kira Sertifikaları (Bilgi i&#231;in)",
+     "display": " - Kira Sertifikaları (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5880,
+     "label": "GUD Farkı Diğer Kapsamlı Gelire Yan. Menk. Değ.",
+     "display": "GUD Farkı Diğer Kapsamlı Gelire Yan. Menk. Değ."
+    },
+    {
+     "item_id": 5876,
+     "label": " - Devlet Tahvilleri (Bilgi i&#231;in)",
+     "display": " - Devlet Tahvilleri (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5881,
+     "label": " - Kira Sertifikaları (Bilgi i&#231;in)",
+     "display": " - Kira Sertifikaları (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5877,
+     "label": "İtfa Edilmiş Maliyeti &#220;zerinden Değerlenen Menkul Değerler",
+     "display": "İtfa Edilmiş Maliyeti &#220;zerinden Değerlenen Menkul Değerler"
+    },
+    {
+     "item_id": 5878,
+     "label": " - Devlet Tahvilleri (Bilgi i&#231;in)",
+     "display": " - Devlet Tahvilleri (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5879,
+     "label": " - Kira Sertifikaları (Bilgi i&#231;in)",
+     "display": " - Kira Sertifikaları (Bilgi i&#231;in)"
+    },
+    {
+     "item_id": 5727,
+     "label": "Repo İşlemine Konu Menkul Değerler (Bilgi)",
+     "display": "Repo İşlemine Konu Menkul Değerler (Bilgi)"
+    },
+    {
+     "item_id": 5728,
+     "label": "Teminata Verilen Menkul Değerler (Bilgi)",
+     "display": "Teminata Verilen Menkul Değerler (Bilgi)"
+    },
+    {
+     "item_id": 5729,
+     "label": "Eurobondlar (Bilgi)",
+     "display": "Eurobondlar (Bilgi)"
+    },
+    {
+     "item_id": 5718,
+     "label": "Ger&#231;eğe Uygun Değer Farkı K/Z Yan. Menk. Değ. (3+4)",
+     "display": "3.0.2 - Ger&#231;eğe Uygun Değer Farkı K/Z Yan. Menk. Değ. (3+4)  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5719,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "3.0.3 - a) Kamu Bor&#231;lanma Senetleri  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5720,
+     "label": "b) Diğer Menkul Değerler",
+     "display": "3.0.4 - b) Diğer Menkul Değerler  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5721,
+     "label": "GUD Farkı Diğer Kapsamlı Gelire Yan. Menk. Değ. (6+7)",
+     "display": "3.0.5 - GUD Farkı Diğer Kapsamlı Gelire Yan. Menk. Değ. (6+7)  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5722,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "3.0.6 - a) Kamu Bor&#231;lanma Senetleri  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5723,
+     "label": "b) Diğer Menkul Değerler",
+     "display": "3.0.7 - b) Diğer Menkul Değerler  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5724,
+     "label": "İtfa Edilmiş Maliyeti &#220;zerinden Değerlenen Menkul Değerler (9+10)",
+     "display": "3.0.8 - İtfa Edilmiş Maliyeti &#220;zerinden Değerlenen Menkul Değerler (9+10)  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5725,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "3.0.9 - a) Kamu Bor&#231;lanma Senetleri  (Sonlandırılma Tarihi= 10-09-2022 )"
+    },
+    {
+     "item_id": 5726,
+     "label": "b) Diğer Menkul Değerler",
+     "display": "3.0.10 - b) Diğer Menkul Değerler  (Sonlandırılma Tarihi= 10-09-2022 )"
+    }
+   ]
+  },
+  {
+   "table_id": 292,
+   "slug": "mevduat",
+   "items": [
+    {
+     "item_id": 5730,
+     "label": "Mevduat (Katılım Fonu) (2+5+8)",
+     "display": "Mevduat (Katılım Fonu) (2+5+8)"
+    },
+    {
+     "item_id": 5731,
+     "label": "Ger&#231;ek Kişiler (3+4)",
+     "display": "Ger&#231;ek Kişiler (3+4)"
+    },
+    {
+     "item_id": 5732,
+     "label": "a) Vadesiz",
+     "display": "a) Vadesiz"
+    },
+    {
+     "item_id": 5733,
+     "label": "b) Vadeli",
+     "display": "b) Vadeli"
+    },
+    {
+     "item_id": 5734,
+     "label": "Ticari Kuruluşlar (6+7)",
+     "display": "Ticari Kuruluşlar (6+7)"
+    },
+    {
+     "item_id": 5735,
+     "label": "a) Vadesiz",
+     "display": "a) Vadesiz"
+    },
+    {
+     "item_id": 5736,
+     "label": "b) Vadeli",
+     "display": "b) Vadeli"
+    },
+    {
+     "item_id": 5737,
+     "label": "Resmi ve Diğer Kuruluşlar (9+10)",
+     "display": "Resmi ve Diğer Kuruluşlar (9+10)"
+    },
+    {
+     "item_id": 5738,
+     "label": "a) Vadesiz",
+     "display": "a) Vadesiz"
+    },
+    {
+     "item_id": 5739,
+     "label": "b) Vadeli",
+     "display": "b) Vadeli"
+    },
+    {
+     "item_id": 5740,
+     "label": "Sigortaya Tabi Mevduat (Bilgi)",
+     "display": "Sigortaya Tabi Mevduat (Bilgi)"
+    },
+    {
+     "item_id": 5872,
+     "label": "Kur Korumalı TL Mevduat ve Katılma Hesapları (Bilgi i&#231;in)",
+     "display": "Kur Korumalı TL Mevduat ve Katılma Hesapları (Bilgi i&#231;in)"
+    }
+   ]
+  },
+  {
+   "table_id": 293,
+   "slug": "diger_bilanco_kalemleri",
+   "items": [
+    {
+     "item_id": 5741,
+     "label": "Nakit Değerler",
+     "display": "Nakit Değerler"
+    },
+    {
+     "item_id": 5742,
+     "label": "T.C. Merkez Bankasından Alacaklar",
+     "display": "T.C. Merkez Bankasından Alacaklar"
+    },
+    {
+     "item_id": 5743,
+     "label": "Para Piyasalarından Alacaklar",
+     "display": "Para Piyasalarından Alacaklar"
+    },
+    {
+     "item_id": 5744,
+     "label": "Zorunlu Karşılıklar",
+     "display": "Zorunlu Karşılıklar"
+    },
+    {
+     "item_id": 5745,
+     "label": "Bankalardan Alacaklar (5+6)",
+     "display": "Bankalardan Alacaklar (5+6)"
+    },
+    {
+     "item_id": 5746,
+     "label": "a) Yurti&#231;i Bankalar",
+     "display": "a) Yurti&#231;i Bankalar"
+    },
+    {
+     "item_id": 5747,
+     "label": "b) Yurtdışı Bankalar",
+     "display": "b) Yurtdışı Bankalar"
+    },
+    {
+     "item_id": 5748,
+     "label": "T.C. Merkez Bankasına Bor&#231;lar",
+     "display": "T.C. Merkez Bankasına Bor&#231;lar"
+    },
+    {
+     "item_id": 5849,
+     "label": "Para Piyasalarına Bor&#231;lar",
+     "display": "Para Piyasalarına Bor&#231;lar"
+    },
+    {
+     "item_id": 5749,
+     "label": "Bankalara Bor&#231;lar (11+12)",
+     "display": "Bankalara Bor&#231;lar (11+12)"
+    },
+    {
+     "item_id": 5750,
+     "label": "a) Yurti&#231;i Bankalar",
+     "display": "a) Yurti&#231;i Bankalar"
+    },
+    {
+     "item_id": 5751,
+     "label": "b) Yurtdışı Bankalar",
+     "display": "b) Yurtdışı Bankalar"
+    },
+    {
+     "item_id": 5870,
+     "label": "Repo İşl. Sağlanan Fonlar",
+     "display": "Repo İşl. Sağlanan Fonlar"
+    },
+    {
+     "item_id": 5752,
+     "label": "İhra&#231; Edilen Menkul Kıymetler (Net)",
+     "display": "İhra&#231; Edilen Menkul Kıymetler (Net)"
+    },
+    {
+     "item_id": 5753,
+     "label": "Bankalara Kullandırılan Krediler (Bilgi)",
+     "display": "Bankalara Kullandırılan Krediler (Bilgi)"
+    },
+    {
+     "item_id": 5754,
+     "label": "Bankalar Mevduatı (Bilgi)",
+     "display": "Bankalar Mevduatı (Bilgi)"
+    }
+   ]
+  },
+  {
+   "table_id": 294,
+   "slug": "bilanco_disi_islemler",
+   "items": [
+    {
+     "item_id": 5755,
+     "label": "Gayrinakdi Kredi ve Y&#252;k&#252;ml&#252;l&#252;kler",
+     "display": "Gayrinakdi Kredi ve Y&#252;k&#252;ml&#252;l&#252;kler"
+    },
+    {
+     "item_id": 5756,
+     "label": "Taahh&#252;tler (3+4)",
+     "display": "Taahh&#252;tler (3+4)"
+    },
+    {
+     "item_id": 5757,
+     "label": "a) T&#252;rev Finansal Ara&#231;lar",
+     "display": "a) T&#252;rev Finansal Ara&#231;lar"
+    },
+    {
+     "item_id": 5758,
+     "label": "b) Diğer",
+     "display": "b) Diğer"
+    }
+   ]
+  },
+  {
+   "table_id": 295,
+   "slug": "saklanan_menkul_degerler_nominal",
+   "items": [
+    {
+     "item_id": 5759,
+     "label": "Bankalarda Saklanan Menkul Değerler (Nominal) (2+24)",
+     "display": "Bankalarda Saklanan Menkul Değerler (Nominal) (2+24)"
+    },
+    {
+     "item_id": 5760,
+     "label": "Yurti&#231;i Yerleşikler Adına Saklanan (3+7+11+15+19)",
+     "display": "Yurti&#231;i Yerleşikler Adına Saklanan (3+7+11+15+19)"
+    },
+    {
+     "item_id": 5761,
+     "label": "Ger&#231;ek Kişiler (4+5+6)",
+     "display": "Ger&#231;ek Kişiler (4+5+6)"
+    },
+    {
+     "item_id": 5762,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5763,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5764,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5765,
+     "label": "Sigorta Şirketleri (8+9+10)",
+     "display": "Sigorta Şirketleri (8+9+10)"
+    },
+    {
+     "item_id": 5766,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5767,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5768,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5769,
+     "label": "Diğer T&#252;zel Kişiler (12+13+14)",
+     "display": "Diğer T&#252;zel Kişiler (12+13+14)"
+    },
+    {
+     "item_id": 5770,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5771,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5772,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5773,
+     "label": "Bankalar (16+17+18)",
+     "display": "Bankalar (16+17+18)"
+    },
+    {
+     "item_id": 5774,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5775,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5776,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5777,
+     "label": "Diğer Mali Kuruluşlar (20+21+22)",
+     "display": "Diğer Mali Kuruluşlar (20+21+22)"
+    },
+    {
+     "item_id": 5778,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5779,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5780,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5781,
+     "label": "D&#246;v. End..KBS (Bilgi)",
+     "display": "D&#246;v. End..KBS (Bilgi)"
+    },
+    {
+     "item_id": 5782,
+     "label": "Yurtdışı Yerleşikler Adına Saklanan (25+29+33+37+41)",
+     "display": "Yurtdışı Yerleşikler Adına Saklanan (25+29+33+37+41)"
+    },
+    {
+     "item_id": 5783,
+     "label": "Ger&#231;ek Kişiler (26+27+28)",
+     "display": "Ger&#231;ek Kişiler (26+27+28)"
+    },
+    {
+     "item_id": 5784,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5785,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5786,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5787,
+     "label": "Sigorta Şirketleri (30+31+32)",
+     "display": "Sigorta Şirketleri (30+31+32)"
+    },
+    {
+     "item_id": 5788,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5789,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5790,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5791,
+     "label": "Diğer T&#252;zel Kişiler (34+35+36)",
+     "display": "Diğer T&#252;zel Kişiler (34+35+36)"
+    },
+    {
+     "item_id": 5792,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5793,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5794,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5795,
+     "label": "Bankalar (38+39+40)",
+     "display": "Bankalar (38+39+40)"
+    },
+    {
+     "item_id": 5796,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5797,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5798,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5799,
+     "label": "Diğer Mali Kuruluşlar (42+43+44)",
+     "display": "Diğer Mali Kuruluşlar (42+43+44)"
+    },
+    {
+     "item_id": 5800,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5801,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5802,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5803,
+     "label": "D&#246;v. End..KBS (Bilgi)",
+     "display": "D&#246;v. End..KBS (Bilgi)"
+    }
+   ]
+  },
+  {
+   "table_id": 296,
+   "slug": "saklanan_menkul_degerler_piyasa",
+   "items": [
+    {
+     "item_id": 5804,
+     "label": "Bankalarda Saklanan Menkul Değerler (Piyasa Değeri) (2+24)",
+     "display": "Bankalarda Saklanan Menkul Değerler (Piyasa Değeri) (2+24)"
+    },
+    {
+     "item_id": 5805,
+     "label": "Yurti&#231;i Yerleşikler Adına Saklanan (3+7+11+15+19)",
+     "display": "Yurti&#231;i Yerleşikler Adına Saklanan (3+7+11+15+19)"
+    },
+    {
+     "item_id": 5806,
+     "label": "Ger&#231;ek Kişiler (4+5+6)",
+     "display": "Ger&#231;ek Kişiler (4+5+6)"
+    },
+    {
+     "item_id": 5807,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5808,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5809,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5810,
+     "label": "Sigorta Şirketleri (8+9+10)",
+     "display": "Sigorta Şirketleri (8+9+10)"
+    },
+    {
+     "item_id": 5811,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5812,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5813,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5814,
+     "label": "Diğer T&#252;zel Kişiler (12+13+14)",
+     "display": "Diğer T&#252;zel Kişiler (12+13+14)"
+    },
+    {
+     "item_id": 5815,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5816,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5817,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5818,
+     "label": "Bankalar (16+17+18)",
+     "display": "Bankalar (16+17+18)"
+    },
+    {
+     "item_id": 5819,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5820,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5821,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5822,
+     "label": "Diğer Mali Kuruluşlar (20+21+22)",
+     "display": "Diğer Mali Kuruluşlar (20+21+22)"
+    },
+    {
+     "item_id": 5823,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5824,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5825,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5826,
+     "label": "D&#246;v. End. KBS (Bilgi)",
+     "display": "D&#246;v. End. KBS (Bilgi)"
+    },
+    {
+     "item_id": 5827,
+     "label": "Yurtdışı Yerleşikler Adına Saklanan (25+29+33+37+41)",
+     "display": "Yurtdışı Yerleşikler Adına Saklanan (25+29+33+37+41)"
+    },
+    {
+     "item_id": 5828,
+     "label": "Ger&#231;ek Kişiler (26+27+28)",
+     "display": "Ger&#231;ek Kişiler (26+27+28)"
+    },
+    {
+     "item_id": 5829,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5830,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5831,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5832,
+     "label": "Sigorta Şirketleri (30+31+32)",
+     "display": "Sigorta Şirketleri (30+31+32)"
+    },
+    {
+     "item_id": 5833,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5834,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5835,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5836,
+     "label": "Diğer T&#252;zel Kişiler (34+35+36)",
+     "display": "Diğer T&#252;zel Kişiler (34+35+36)"
+    },
+    {
+     "item_id": 5837,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5838,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5839,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5840,
+     "label": "Bankalar (38+39+40)",
+     "display": "Bankalar (38+39+40)"
+    },
+    {
+     "item_id": 5841,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5842,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5843,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5844,
+     "label": "Diğer Mali Kuruluşlar (42+43+44)",
+     "display": "Diğer Mali Kuruluşlar (42+43+44)"
+    },
+    {
+     "item_id": 5845,
+     "label": "a) Kamu Bor&#231;lanma Senetleri",
+     "display": "a) Kamu Bor&#231;lanma Senetleri"
+    },
+    {
+     "item_id": 5846,
+     "label": "b) Eurobondlar",
+     "display": "b) Eurobondlar"
+    },
+    {
+     "item_id": 5847,
+     "label": "c) Diğer",
+     "display": "c) Diğer"
+    },
+    {
+     "item_id": 5848,
+     "label": "D&#246;v. End. KBS (Bilgi)",
+     "display": "D&#246;v. End. KBS (Bilgi)"
+    }
+   ]
+  },
+  {
+   "table_id": 297,
+   "slug": "yabanci_para_pozisyonu",
+   "items": [
+    {
+     "item_id": 5884,
+     "label": "Bilan&#231;o İ&#231;i Yabancı Para Pozisyonu (2-3)",
+     "display": "Bilan&#231;o İ&#231;i Yabancı Para Pozisyonu (2-3)"
+    },
+    {
+     "item_id": 5885,
+     "label": "a) Bilan&#231;o İ&#231;i Varlıklar",
+     "display": "a) Bilan&#231;o İ&#231;i Varlıklar"
+    },
+    {
+     "item_id": 5886,
+     "label": "b) Bilan&#231;o İ&#231;i Y&#252;k&#252;ml&#252;l&#252;kler",
+     "display": "b) Bilan&#231;o İ&#231;i Y&#252;k&#252;ml&#252;l&#252;kler"
+    },
+    {
+     "item_id": 5887,
+     "label": "Bilan&#231;o Dışı Yabancı Para Pozisyonu (5-6)",
+     "display": "Bilan&#231;o Dışı Yabancı Para Pozisyonu (5-6)"
+    },
+    {
+     "item_id": 5888,
+     "label": "a) Bilan&#231;o Dışı Varlıklar",
+     "display": "a) Bilan&#231;o Dışı Varlıklar"
+    },
+    {
+     "item_id": 5889,
+     "label": "b) Bilan&#231;o Dışı Y&#252;k&#252;ml&#252;l&#252;kler",
+     "display": "b) Bilan&#231;o Dışı Y&#252;k&#252;ml&#252;l&#252;kler"
+    },
+    {
+     "item_id": 5890,
+     "label": "Yabancı Para Net Genel Pozisyonu (1+4)",
+     "display": "Yabancı Para Net Genel Pozisyonu (1+4)"
+    },
+    {
+     "item_id": 5891,
+     "label": "Yasal &#214;zkaynak",
+     "display": "Yasal &#214;zkaynak"
+    },
+    {
+     "item_id": 5892,
+     "label": "D&#246;vize Endeskli Varlıklar (Bilgi)",
+     "display": "D&#246;vize Endeskli Varlıklar (Bilgi)"
+    },
+    {
+     "item_id": 5893,
+     "label": "D&#246;vize Endeksli Y&#252;k&#252;ml&#252;l&#252;kler (Bilgi)",
+     "display": "D&#246;vize Endeksli Y&#252;k&#252;ml&#252;l&#252;kler (Bilgi)"
+    },
+    {
+     "item_id": 5850,
+     "label": "Bilan&#231;o İ&#231;i Yabancı Para Pozisyonu (2-3)",
+     "display": "9.0.1 - Bilan&#231;o İ&#231;i Yabancı Para Pozisyonu (2-3)  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5851,
+     "label": "a) Bilan&#231;o İ&#231;i Varlıklar",
+     "display": "9.0.2 - a) Bilan&#231;o İ&#231;i Varlıklar  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5852,
+     "label": "b) Bilan&#231;o İ&#231;i Y&#252;k&#252;ml&#252;l&#252;kler",
+     "display": "9.0.3 - b) Bilan&#231;o İ&#231;i Y&#252;k&#252;ml&#252;l&#252;kler  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5853,
+     "label": "Bilan&#231;o Dışı Yabancı Para Pozisyonu (5-6)",
+     "display": "9.0.4 - Bilan&#231;o Dışı Yabancı Para Pozisyonu (5-6)  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5854,
+     "label": "a) Bilan&#231;o Dışı Varlıklar",
+     "display": "9.0.5 - a) Bilan&#231;o Dışı Varlıklar  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5855,
+     "label": "b) Bilan&#231;o Dışı Y&#252;k&#252;ml&#252;l&#252;kler",
+     "display": "9.0.6 - b) Bilan&#231;o Dışı Y&#252;k&#252;ml&#252;l&#252;kler  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5856,
+     "label": "Yabancı Para Net Genel Pozisyonu (1+4)",
+     "display": "9.0.7 - Yabancı Para Net Genel Pozisyonu (1+4)  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5857,
+     "label": "Yasal &#214;zkaynak",
+     "display": "9.0.8 - Yasal &#214;zkaynak  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5858,
+     "label": "D&#246;vize Endeskli Varlıklar (Bilgi)",
+     "display": "9.0.9 - D&#246;vize Endeskli Varlıklar (Bilgi)  (Sonlandırılma Tarihi= 09-01-2023 )"
+    },
+    {
+     "item_id": 5859,
+     "label": "D&#246;vize Endeksli Y&#252;k&#252;ml&#252;l&#252;kler (Bilgi)",
+     "display": "9.0.10 - D&#246;vize Endeksli Y&#252;k&#252;ml&#252;l&#252;kler (Bilgi)  (Sonlandırılma Tarihi= 09-01-2023 )"
+    }
+   ]
+  }
+ ]
+}
