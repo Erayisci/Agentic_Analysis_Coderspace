@@ -10,7 +10,12 @@ import pandas as pd
 
 from ..domain import canonical
 from ..transform import analytics, macro
-from ..transform.bulletin import build_bulletin_metrics, check_decumulation, decumulate
+from ..transform.bulletin import (
+    build_bulletin_entities,
+    build_bulletin_metrics,
+    check_decumulation,
+    decumulate,
+)
 from ..validation import identities as validate
 from ..core.config import (
     ANALYTICS_DIR,
@@ -101,7 +106,7 @@ def build_bulletin_tables():
     and each row's own label-stated identity ('Tüketici Kredileri (2+3+4)'),
     which makes 60 arithmetic rules machine-derived rather than hand-curated.
 
-    Returns (observations, lifecycle_report, metric_catalog).
+    Returns (observations, lifecycle_report, metric_catalog, entity_index).
     """
     frames = []
     reports = []
@@ -114,7 +119,7 @@ def build_bulletin_tables():
     report = pd.concat([r for r in reports if len(r)], ignore_index=True) if any(
         len(r) for r in reports
     ) else pd.DataFrame(columns=["dataset", "check", "entity_key", "passed", "detail"])
-    return combined, report, build_bulletin_metrics(combined)
+    return combined, report, build_bulletin_metrics(combined), build_bulletin_entities(combined)
 
 
 def build_weekly_tables():
@@ -183,11 +188,12 @@ def main() -> int:
     print(f"  {len(quality_report)} checks passed")
 
     print("Parsing BDDK bulletin tables...")
-    bulletin_obs, bulletin_report, bulletin_metrics = build_bulletin_tables()
+    bulletin_obs, bulletin_report, bulletin_metrics, bulletin_entities = build_bulletin_tables()
     bulletin_footnotes = parse_bulletin_footnotes(RAW_BDDK_JSON_DIR)
     decumulation = pd.DataFrame(check_decumulation(bulletin_obs))
     print(f"  {len(bulletin_obs):,} observations across {bulletin_obs.dataset.nunique()} tables, "
-          f"{len(bulletin_metrics)} metrics, {len(bulletin_footnotes)} published methodology note(s), "
+          f"{len(bulletin_entities)} entities, {len(bulletin_metrics)} metrics, "
+          f"{len(bulletin_footnotes)} published methodology note(s), "
           f"{len(bulletin_report)} registered lifecycle/identity note(s)")
 
     print("Parsing BDDK weekly bulletin tables...")
@@ -230,6 +236,7 @@ def main() -> int:
             [quality_report, decumulation, weekly_vs_monthly, macro_coverage],
             ignore_index=True),
         "bulletin_observations": bulletin_obs,
+        "bulletin_entities": bulletin_entities,
         "bulletin_metrics": bulletin_metrics,
         "bulletin_footnotes": bulletin_footnotes,
         "bulletin_lifecycle_report": bulletin_report,
@@ -243,7 +250,8 @@ def main() -> int:
 
     print("Writing Parquet and DuckDB...")
     processed_names = {"observations", "sectors", "metrics", "sector_crosswalk",
-                       "bulletin_observations", "bulletin_metrics", "bulletin_footnotes",
+                       "bulletin_observations", "bulletin_entities", "bulletin_metrics",
+                       "bulletin_footnotes",
                        "weekly_observations", "weekly_items",
                        "macro_series", "macro_observations",
                        "macro_observations_native"}

@@ -84,6 +84,54 @@ def build_bulletin_metrics(observations: pd.DataFrame) -> pd.DataFrame:
     return catalog[columns].sort_values(["dataset", "metric", "currency"]).reset_index(drop=True)
 
 
+def build_bulletin_entities(observations: pd.DataFrame) -> pd.DataFrame:
+    """One row per (dataset, entity_key): the agent's search surface.
+
+    `macro_series` lets a question about TÜFE find its series_code without
+    reading 89k fact rows, and `weekly_items` does the same for the weekly
+    corpus. The monthly bulletin had no equivalent, so finding the housing-loan
+    row meant SELECT DISTINCT over 135k rows -- the one query a small model
+    cannot be trusted to write, standing between every question and its data.
+
+    Measured: each (dataset, entity_key) carries exactly one entity_name, unit,
+    temporal_semantics, entity_type and parent_key across all 67 months, so
+    nothing here is an aggregation that could hide a conflict. `formula` and
+    `footnote` DO vary by period (4 and 1 entities respectively); the latest is
+    carried for discovery and bulletin_observations stays the per-period truth.
+    """
+    stable = ["source", "dataset", "entity_type", "entity_key", "entity_name",
+              "parent_key", "unit", "temporal_semantics"]
+    frame = observations.sort_values("period")
+
+    index = frame.groupby(["dataset", "entity_key"], dropna=False).agg(
+        **{column: (column, "first") for column in stable if column not in ("dataset", "entity_key")},
+        formula=("formula", "last"),
+        footnote=("footnote", "last"),
+        first_period=("period", "min"),
+        last_period=("period", "max"),
+        n_periods=("period", "nunique"),
+        n_observations=("value", "size"),
+    ).reset_index()
+
+    # What a query MUST filter on: an entity published in three currencies
+    # returns three rows per month, and summing them triple-counts.
+    for column, name in (("currency", "currencies"), ("metric", "metrics")):
+        combos = frame.groupby(["dataset", "entity_key"])[column].apply(
+            lambda values: ",".join(sorted(values.dropna().unique())) or None
+        ).rename(name)
+        index = index.merge(combos, on=["dataset", "entity_key"], how="left")
+
+    children = frame[frame.parent_key.notna()].groupby(
+        ["dataset", "parent_key"]).entity_key.nunique().rename("n_children").reset_index()
+    children = children.rename(columns={"parent_key": "entity_key"})
+    index = index.merge(children, on=["dataset", "entity_key"], how="left")
+    index["n_children"] = index.n_children.fillna(0).astype(int)
+
+    columns = [*stable, "currencies", "metrics", "n_children", "formula", "footnote",
+               "first_period", "last_period", "n_periods", "n_observations"]
+    return index[columns].sort_values(["dataset", "entity_key"]).reset_index(drop=True)
+
+
 def check_decumulation(observations: pd.DataFrame) -> list:
     """Every cumulative series must have a flow for every month it covers.
 

@@ -10,7 +10,7 @@ The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 .venv/bin/pip install -e ".[dev]"           # once; makes `backend` importable
 .venv/bin/python -m backend.ingestion.bddk_bulletin --from-cache  # render workbooks, no network
 .venv/bin/python -m backend.lakehouse.build # full build: parse -> validate -> parquet + duckdb
-.venv/bin/pytest -q                         # all 157 tests (build must have run first)
+.venv/bin/pytest -q                         # all 168 tests (build must have run first)
 .venv/bin/pytest tests/test_bulletin.py -q  # parser/label invariants only — needs no build
 .venv/bin/pytest tests/test_lakehouse.py::test_period_coverage -q
 .venv/bin/pytest -q -k risk_weight          # one test by name, across files
@@ -150,6 +150,7 @@ DuckDB table of the same name. Adding a table means adding one entry there:
 | Table | Contents |
 |---|---|
 | `bulletin_observations` | all 17 BDDK monthly tables, generalised entity schema; `value` as published plus `value_flow` where the series is cumulative |
+| `bulletin_entities` | the agent's search surface: one row per (dataset, entity_key) for all 519 monthly line items, with unit, semantics, parent, the currencies/metrics it publishes and its period span |
 | `bulletin_metrics` | the bulletin half of the series index: one row per (dataset, metric, currency, unit), carrying `temporal_semantics` and `metric_kind` |
 | `bulletin_footnotes` | `Json.uyari` methodology notes, one row per distinct text with the period span it covers |
 | `weekly_observations`, `weekly_items` | all 9 BDDK weekly tables; items carry `retired_on`, `is_informational`, `parent_key` |
@@ -173,6 +174,18 @@ fails. The passing report is itself persisted as the `data_quality_report` table
 
 `schema_card.md` is generated for the agent's context window, not for humans — keep it token-efficient and
 keep the query rules in `lakehouse/schema_card.py` in sync with anything you change in `domain/canonical.py`.
+
+Its `## Query patterns` section holds seven worked SQL examples, and the card tells the model they run as
+written. `test_every_schema_card_query_runs_and_returns_rows` parses them back out of the generated card and
+executes each one, so that claim is enforced rather than asserted: a renamed column or a retired entity_key
+fails the build's tests instead of leaving the agent copying SQL that errors. Add an example and update the
+expected count in `test_schema_card_documents_the_query_patterns`.
+
+**Discovery is a table, not a `SELECT DISTINCT`.** `macro_series` and `weekly_items` already let a question
+find its series without reading the fact table; `bulletin_entities` closes the same gap for the 519 monthly
+line items. `entity_key` is ASCII-slugified Turkish, so `ILIKE` on the key is case-safe where `ILIKE` on
+`entity_name` is not — `'İ'.lower()` is not `'i'`, and a Turkish character in a key would silently break the
+search the card documents. `test_entity_keys_are_ascii_so_turkish_search_is_case_safe` pins that.
 
 ## Data sources
 
@@ -456,7 +469,7 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 18 lakehouse tables, 157 tests.
+macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 168 tests.
 `tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` pins the kick-off deck's demo
 table end to end from the lakehouse alone. Everything in `Launch.MD` past the ingestion layer — BDDK
 FinTürk (İllere Göre), the Kloudeks-backed agent, the six required tools, and the deployed trust layer —
