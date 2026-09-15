@@ -1,0 +1,2 @@
+# Isolated crawler service only. Never install into the baseline .venv.
+crawl4ai==0.9.3

@@ -1,0 +1,16 @@
+# Dockerfile-specific context: no corpus, baseline environment, or local secrets.
+**
+!backend/
+!backend/extensions/
+!backend/extensions/web_tools/
+!backend/extensions/web_tools/*.py
+!backend/model_clients/
+!backend/model_clients/*.py
+!extensions/
+!extensions/web_tools/
+!extensions/web_tools/requirements.lock
+!extensions/web_tools/requirements-assets.lock
+!extensions/web_tools/Dockerfile
+!extensions/web_tools/tests/
+!extensions/web_tools/tests/test_browser.py
+!extensions/web_tools/tests/test_assets_integration.py

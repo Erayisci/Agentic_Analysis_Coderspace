@@ -1,0 +1,31 @@
+# Local-only SearXNG. Secret is supplied by the ignored .env through Compose.
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - brave
+      - wikipedia
+general:
+  instance_name: "KKB optional web search"
+  debug: false
+search:
+  formats:
+    - html
+    - json
+  safe_search: 1
+  autocomplete: ""
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: GET
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 12.0
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: wikipedia
+    disabled: false

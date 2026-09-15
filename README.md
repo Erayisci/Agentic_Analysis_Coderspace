@@ -5,8 +5,12 @@ lakehouse, built so an LLM agent never has to do arithmetic or schema reasoning 
 
 Submission for the **KKB Hackathon 2026 — Lakehouse Agent Builder and Data Analytics**.
 
-Current state: the ingestion, validation and lakehouse layers are implemented and tested. The agent,
-its tools and the API are designed in [`Launch.MD`](Launch.MD) but not yet written.
+Current state: the ingestion, validation and lakehouse layers are implemented and tested. The agent
+and API are designed in [`Launch.MD`](Launch.MD) but not yet written.
+
+An optional [SearXNG + Crawl4AI web-tools extension](extensions/web_tools/README.md) provides
+`search_web` and `read_url` callables for the future agent. It is disabled by default, runs its
+dependencies in separate containers, and does not change the pipeline setup below.
 
 ---
 
