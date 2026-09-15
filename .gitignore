@@ -19,3 +19,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Secrets (EVDS_API_KEY lives here; see backend/core/config.py)
+.env
