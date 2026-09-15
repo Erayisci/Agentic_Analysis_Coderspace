@@ -6,10 +6,13 @@ Repository layout the paths below refer to:
     bddk_aylik_bulten/_raw_json/    archived endpoint responses -- the source of
                                     truth for the bulletin parser
     riskmerkezi_sectoral/  raw TBB Risk Merkezi monthly Excel files (never modified)
+    evds/_raw_json/        archived TCMB EVDS responses -- the source of truth for
+                           the macro series (catalogue + data, never modified)
     data/processed/        normalized long-format tables parsed from the raw files
     data/analytics/        derived tables (growth rates, ratios, reconciliation)
     data/lakehouse.duckdb  DuckDB database containing every table above
 """
+import os
 from pathlib import Path
 
 # This module sits at backend/core/config.py, so the repository root is three
@@ -21,13 +24,38 @@ RAW_BDDK_DIR = RAW_BDDK_ROOT / "05_sektorel_kredi_dagilimi"
 RAW_BDDK_JSON_DIR = RAW_BDDK_ROOT / "_raw_json"
 RAW_TBB_DIR = ROOT / "riskmerkezi_sectoral"
 
+# The weekly bulletin answers a DATE RANGE per request, so its archive is one
+# envelope per table covering the whole history, not one file per period.
+RAW_BDDK_WEEKLY_ROOT = ROOT / "bddk_haftalik_bulten"
+RAW_BDDK_WEEKLY_DIR = RAW_BDDK_WEEKLY_ROOT / "_raw"
+RAW_BDDK_WEEKLY_CATALOG = RAW_BDDK_WEEKLY_DIR / "_catalog"
+
+# The corpus window, matching the monthly archive's edge. The weekly bulletin
+# reaches further back (2014) but the brief asks for 2021 onwards and the
+# cross-validation against the monthly tables has nothing to compare before it.
+WEEKLY_FETCH_START = "1.01.2021"
+
+RAW_EVDS_ROOT = ROOT / "evds"
+RAW_EVDS_JSON_DIR = RAW_EVDS_ROOT / "_raw_json"
+EVDS_CATALOG_DIR = RAW_EVDS_JSON_DIR / "_catalog"
+EVDS_SERIELIST_DIR = EVDS_CATALOG_DIR / "serielist"
+
+# The corpus window the brief asks for is 2021-01..2026-06; the BDDK archive
+# already runs one month further, so EVDS is pulled to the same edge.
+EVDS_FETCH_START = "2021-01-01"
+EVDS_FETCH_END = "2026-07-31"
+
 DATA_DIR = ROOT / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
 ANALYTICS_DIR = DATA_DIR / "analytics"
 DUCKDB_PATH = DATA_DIR / "lakehouse.duckdb"
 SCHEMA_CARD_PATH = ANALYTICS_DIR / "schema_card.md"
 
-UNIT = "bin_TL"
+# Spelled exactly as `bulletin_observations.unit` spells it. The sectoral path
+# and the generic bulletin path read the same BDDK table, so a query filtering
+# on `unit = 'bin TL'` must match rows from both -- an underscored variant here
+# silently excluded `observations` from every such filter.
+UNIT = "bin TL"
 
 # Absolute tolerances for arithmetic identity checks (values are in bin TL).
 TOLERANCE_BDDK = 2.0   # source values are integers
@@ -38,3 +66,26 @@ TOLERANCE_TBB = 1.0    # source values are floats with 3 decimals
 # mean +/- 3*sigma band computed from history.
 TROUBLE_DIVERGENCE_HARD_LOWER_PCT = 5.0
 TROUBLE_DIVERGENCE_HARD_UPPER_PCT = 30.0
+
+
+def evds_api_key() -> str:
+    """The EVDS web-service key, from the environment or the gitignored `.env`.
+
+    Only the ingestion CLI needs it: the parser and the build read the
+    committed archive, so a clone builds without a key.
+    """
+    key = os.environ.get("EVDS_API_KEY", "").strip()
+    if not key:
+        env_file = ROOT / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                name, _, value = line.partition("=")
+                if name.strip() == "EVDS_API_KEY":
+                    key = value.strip().strip("'\"")
+                    break
+    if not key:
+        raise RuntimeError(
+            "EVDS_API_KEY is not set. Export it or put `EVDS_API_KEY=...` in the repo-root\n"
+            ".env (gitignored). Keys are issued at https://evds3.tcmb.gov.tr -> Profilim."
+        )
+    return key

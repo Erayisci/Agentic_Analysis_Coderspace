@@ -224,6 +224,33 @@ def test_no_generic_npl_metric_exists(connection):
     assert count == 0
 
 
+def test_the_three_series_indexes_share_one_semantics_vocabulary(connection):
+    """`metrics` used to say 'period_end_stock' where the other two say 'stock'.
+
+    The agent learns the vocabulary once from the schema card; a synonym in one
+    table means a filter that silently returns nothing.
+    """
+    words = connection.execute(
+        "SELECT DISTINCT temporal_semantics FROM metrics UNION "
+        "SELECT DISTINCT temporal_semantics FROM bulletin_metrics UNION "
+        "SELECT DISTINCT temporal_semantics FROM macro_series"
+    ).df().iloc[:, 0].tolist()
+    assert set(words) == {"stock", "flow", "rate", "index", "cumulative_ytd", "ratio"}
+
+
+def test_the_two_bddk_paths_spell_their_shared_unit_the_same_way(connection):
+    """`observations` and `bulletin_observations` read the same BDDK table 05.
+
+    They therefore hold the same unit, and a query filtering on it must reach
+    both -- 'bin_TL' in one and 'bin TL' in the other excluded one silently.
+    """
+    units = connection.execute(
+        "SELECT DISTINCT unit FROM observations UNION "
+        "SELECT DISTINCT unit FROM bulletin_observations WHERE dataset='sektorel_kredi_dagilimi'"
+    ).df().iloc[:, 0].tolist()
+    assert units == ["bin TL"]
+
+
 def test_all_validation_checks_recorded_and_passed(connection):
     total, passed = connection.execute(
         "SELECT count(*), sum(CASE WHEN passed THEN 1 ELSE 0 END) FROM data_quality_report"
