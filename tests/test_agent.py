@@ -7,6 +7,7 @@ number is testable. The model's own reliability is measured separately, by
 than of this code.
 """
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -357,3 +358,149 @@ def test_a_hallucinated_key_is_resolved_by_discovery():
     assert session.audit[0].ok
     assert "resolved to" in session.audit[0].detail
     assert len(session.artifact.frame) == 12
+
+
+def test_causality_step_requires_a_second_column():
+    with pytest.raises(ValueError, match="causality"):
+        Step(
+            op="analyze",
+            method="causality",
+            column="loan",
+        )
+
+
+def test_executor_runs_causality_on_artifact_columns():
+    """The executor should delegate causality to the deterministic tool."""
+    rng = np.random.default_rng(123)
+    n = 100
+
+    index = pd.date_range(
+        "2018-01-01",
+        periods=n,
+        freq="MS",
+    )
+
+    rate = rng.normal(size=n)
+    loan = rng.normal(scale=0.3, size=n)
+
+    # Synthetic relationship:
+    # rate[t-2] contributes to loan[t].
+    for t in range(2, n):
+        loan[t] += 0.8 * rate[t - 2]
+
+    artifact = AnalysisArtifact()
+
+    artifact.add_column(
+        "rate",
+        pd.Series(rate, index=index),
+        ColumnLineage(
+            column="rate",
+            label="Rate",
+            source="macro",
+            unit="%",
+            temporal_semantics="rate",
+            key="rate",
+        ),
+    )
+
+    artifact.add_column(
+        "loan",
+        pd.Series(loan, index=index),
+        ColumnLineage(
+            column="loan",
+            label="Loan",
+            source="bulletin",
+            unit="milyon TL",
+            temporal_semantics="stock",
+            key="loan",
+        ),
+    )
+
+    plan = Plan(
+        intent="series_analysis",
+        steps=[
+            Step(
+                op="analyze",
+                method="causality",
+                column="loan",
+                against="rate",
+            ),
+        ],
+    )
+
+    session = Executor(
+        Session(artifact=artifact)
+    ).run(plan)
+
+    assert session.audit[0].ok
+
+    result = session.facts["analysis"]["causality:loan"]
+
+    assert result["cause"] == "rate"
+    assert result["effect"] == "loan"
+    assert result["forward"]["significant"]
+
+
+def test_deterministic_summary_includes_causality_result():
+    rng = np.random.default_rng(321)
+    n = 100
+    index = pd.date_range("2018-01-01", periods=n, freq="MS")
+
+    rate = rng.normal(size=n)
+    loan = rng.normal(scale=0.3, size=n)
+
+    for t in range(2, n):
+        loan[t] += 0.8 * rate[t - 2]
+
+    artifact = AnalysisArtifact()
+
+    artifact.add_column(
+        "rate",
+        pd.Series(rate, index=index),
+        ColumnLineage(
+            column="rate",
+            label="Rate",
+            source="macro",
+            unit="%",
+            temporal_semantics="rate",
+            key="rate",
+        ),
+    )
+
+    artifact.add_column(
+        "loan",
+        pd.Series(loan, index=index),
+        ColumnLineage(
+            column="loan",
+            label="Loan",
+            source="bulletin",
+            unit="milyon TL",
+            temporal_semantics="stock",
+            key="loan",
+        ),
+    )
+
+    plan = Plan(
+        intent="series_analysis",
+        steps=[
+            Step(
+                op="analyze",
+                method="causality",
+                column="loan",
+                against="rate",
+            )
+        ],
+    )
+
+    session = Executor(Session(artifact=artifact)).run(plan)
+
+    from backend.agent.composer import deterministic_summary
+
+    summary = deterministic_summary(
+        session,
+        "Faiz kredileri etkiliyor mu?",
+    )
+
+    assert "Nedensellik analizi" in summary
+    assert "rate -> loan" in summary
+    assert "nedensellik kaniti degil" in summary

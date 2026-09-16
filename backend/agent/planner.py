@@ -78,9 +78,26 @@ class Step(BaseModel):
 
     @model_validator(mode="after")
     def _has_required_fields(self) -> "Step":
-        missing = [field for field in REQUIRED[self.op] if getattr(self, field, None) in (None, "")]
+        missing = [
+            field
+            for field in REQUIRED[self.op]
+            if getattr(self, field, None) in (None, "")
+        ]
+
         if missing:
-            raise ValueError(f"step op={self.op!r} is missing required field(s): {missing}")
+            raise ValueError(
+                f"step op={self.op!r} is missing required field(s): {missing}"
+            )
+
+        if (
+            self.op == "analyze"
+            and self.method == "causality"
+            and not (self.against or self.other_column)
+        ):
+            raise ValueError(
+                "causality analysis requires against or other_column"
+            )
+
         return self
 
     def arguments(self) -> dict:
@@ -117,6 +134,7 @@ Adimlar:
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda).
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: anomaly, changepoint veya causality.
+  causality icin column=hedef seri ve against=olasi neden/oncul seri olmalidir.
 - chart: grafik ciz.
 - read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa.
 
