@@ -1,0 +1,1128 @@
+[
+  {
+    "configuration": "deterministic",
+    "description": "No LLM at all: rules router + discovery-ranked plan. The floor.",
+    "model": "none",
+    "n_scenarios": 10,
+    "mean_score": 0.681,
+    "perfect": 0,
+    "plan_validity": 0.0,
+    "numeric_match": 0.4,
+    "unit_preserved": 1.0,
+    "citations": 1.0,
+    "verified": 0.7,
+    "intent": 1.0,
+    "median_seconds": 0.11,
+    "total_seconds": 1.1,
+    "usage": {},
+    "rows": [
+      {
+        "scenario": "demo_turn1_loans_and_rate",
+        "passed": 7,
+        "total": 11,
+        "score": 0.636,
+        "seconds": 0.21,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_first": true,
+            "konut_kredisi_last": false,
+            "faiz_first": true,
+            "faiz_last": true,
+            "faiz_max": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn2_deflate_without_disturbing",
+        "passed": 7,
+        "total": 10,
+        "score": 0.7,
+        "seconds": 0.12,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "keys": false,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_reel_last": false
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn3_add_house_price_index",
+        "passed": 8,
+        "total": 10,
+        "score": 0.8,
+        "seconds": 0.12,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": false,
+          "keys": true,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "kfe_first": true,
+            "kfe_last": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690",
+          "TP_KFE_TR"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "discovery_english_alias",
+        "passed": 6,
+        "total": 9,
+        "score": 0.667,
+        "seconds": 0.11,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 36,
+        "failed_steps": []
+      },
+      {
+        "scenario": "unit_trap_sectoral_vs_bulletin",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 0.1,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankalara_kullandirilan_krediler",
+          "TP_HPBITABLO6_19",
+          "5688"
+        ],
+        "n_rows": 12,
+        "failed_steps": []
+      },
+      {
+        "scenario": "cumulative_profit_flow",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 0.08,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "ocak_2026_flow": false
+          },
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankacilik_hizmetleri_gelirleri",
+          "TP_TOP_T04",
+          "5742"
+        ],
+        "n_rows": 21,
+        "failed_steps": []
+      },
+      {
+        "scenario": "anomaly_on_housing_loans",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 0.1,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "DERIVED_IPOTEKLI_PAY_TRTOPLAM",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "changepoint_on_rate",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 0.11,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "weekly_latest_credit",
+        "passed": 6,
+        "total": 7,
+        "score": 0.857,
+        "seconds": 0.11,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "unit_preserved": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "latest_total_credit": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "krediler",
+          "TP_KTF10",
+          "5687"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "metadata_what_exists",
+        "passed": 2,
+        "total": 5,
+        "score": 0.4,
+        "seconds": 0.04,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": false,
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      }
+    ]
+  },
+  {
+    "configuration": "qwen-fast",
+    "description": "Guided json_schema decoding, reasoning off. The intended production setting.",
+    "model": "kkbhackathon2026/Qwen3.8-27B",
+    "n_scenarios": 10,
+    "mean_score": 0.723,
+    "perfect": 1,
+    "plan_validity": 0.7,
+    "numeric_match": 0.6,
+    "unit_preserved": 0.875,
+    "citations": 1.0,
+    "verified": 0.7,
+    "intent": 0.9,
+    "median_seconds": 1.25,
+    "total_seconds": 12.5,
+    "usage": {
+      "prompt_tokens": 14801,
+      "completion_tokens": 1840,
+      "reasoning_tokens": 0,
+      "latency_seconds": 11.217,
+      "calls": 22
+    },
+    "rows": [
+      {
+        "scenario": "demo_turn1_loans_and_rate",
+        "passed": 10,
+        "total": 11,
+        "score": 0.909,
+        "seconds": 2.27,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": true,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "konut_kredisi_first": true,
+            "konut_kredisi_last": true,
+            "faiz_first": true,
+            "faiz_last": true,
+            "faiz_max": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "konut_kredisi_tutari",
+          "konut_kredisi_faiz_orani"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn2_deflate_without_disturbing",
+        "passed": 10,
+        "total": 10,
+        "score": 1.0,
+        "seconds": 1.56,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "rows": true,
+          "keys": true,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "konut_kredisi_reel_last": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "konut_kredisi_tutari",
+          "konut_kredisi_faiz_orani",
+          "tufe",
+          "konut_kredisi_tutari_reel"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn3_add_house_price_index",
+        "passed": 8,
+        "total": 10,
+        "score": 0.8,
+        "seconds": 1.87,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": false,
+          "keys": true,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "kfe_first": true,
+            "kfe_last": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "konut_kredisi_tutari",
+          "konut_kredisi_faiz_orani",
+          "tufe",
+          "konut_kredisi_tutari_reel",
+          "TP_KFE_TR",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "discovery_english_alias",
+        "passed": 7,
+        "total": 9,
+        "score": 0.778,
+        "seconds": 0.95,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "mortgage_interest_rate"
+        ],
+        "n_rows": 36,
+        "failed_steps": []
+      },
+      {
+        "scenario": "unit_trap_sectoral_vs_bulletin",
+        "passed": 3,
+        "total": 7,
+        "score": 0.429,
+        "seconds": 0.61,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "rows": false,
+          "window": false,
+          "unit_preserved": false,
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      },
+      {
+        "scenario": "cumulative_profit_flow",
+        "passed": 3,
+        "total": 6,
+        "score": 0.5,
+        "seconds": 0.64,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "semantics": false,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "ocak_2026_flow": false
+          },
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      },
+      {
+        "scenario": "anomaly_on_housing_loans",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 1.61,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "DERIVED_IPOTEKLI_PAY_TRTOPLAM",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "changepoint_on_rate",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 1.64,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "weekly_latest_credit",
+        "passed": 5,
+        "total": 7,
+        "score": 0.714,
+        "seconds": 0.67,
+        "checks": {
+          "plan_validity": true,
+          "intent": false,
+          "unit_preserved": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "latest_total_credit": false
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "toplam_kredi"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "metadata_what_exists",
+        "passed": 3,
+        "total": 5,
+        "score": 0.6,
+        "seconds": 0.71,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "keys": false,
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      }
+    ]
+  },
+  {
+    "configuration": "qwen-thinking",
+    "description": "Guided decoding with reasoning on.",
+    "model": "kkbhackathon2026/Qwen3.8-27B",
+    "n_scenarios": 10,
+    "mean_score": 0.723,
+    "perfect": 1,
+    "plan_validity": 0.4,
+    "numeric_match": 0.2,
+    "unit_preserved": 1.0,
+    "citations": 1.0,
+    "verified": 0.7,
+    "intent": 0.9,
+    "median_seconds": 45.11,
+    "total_seconds": 401.2,
+    "usage": {
+      "prompt_tokens": 16064,
+      "completion_tokens": 67161,
+      "reasoning_tokens": 66132,
+      "latency_seconds": 399.605,
+      "calls": 23
+    },
+    "rows": [
+      {
+        "scenario": "demo_turn1_loans_and_rate",
+        "passed": 7,
+        "total": 11,
+        "score": 0.636,
+        "seconds": 63.45,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_first": true,
+            "konut_kredisi_last": false,
+            "faiz_first": true,
+            "faiz_last": true,
+            "faiz_max": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn2_deflate_without_disturbing",
+        "passed": 7,
+        "total": 10,
+        "score": 0.7,
+        "seconds": 61.33,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "keys": false,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_reel_last": false
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn3_add_house_price_index",
+        "passed": 8,
+        "total": 10,
+        "score": 0.8,
+        "seconds": 60.91,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": false,
+          "keys": true,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "kfe_first": true,
+            "kfe_last": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690",
+          "TP_KFE_TR"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "discovery_english_alias",
+        "passed": 7,
+        "total": 9,
+        "score": 0.778,
+        "seconds": 29.31,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "mortgage_interest_rate"
+        ],
+        "n_rows": 36,
+        "failed_steps": [
+          "fetch_series",
+          "chart"
+        ]
+      },
+      {
+        "scenario": "unit_trap_sectoral_vs_bulletin",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 63.06,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankalara_kullandirilan_krediler",
+          "TP_HPBITABLO6_19",
+          "5688"
+        ],
+        "n_rows": 12,
+        "failed_steps": []
+      },
+      {
+        "scenario": "cumulative_profit_flow",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 75.37,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "ocak_2026_flow": false
+          },
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankacilik_hizmetleri_gelirleri",
+          "TP_TOP_T04",
+          "5742"
+        ],
+        "n_rows": 21,
+        "failed_steps": []
+      },
+      {
+        "scenario": "anomaly_on_housing_loans",
+        "passed": 8,
+        "total": 8,
+        "score": 1.0,
+        "seconds": 9.06,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": true,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "konut_kredileri"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "changepoint_on_rate",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 10.95,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "weekly_latest_credit",
+        "passed": 5,
+        "total": 7,
+        "score": 0.714,
+        "seconds": 8.83,
+        "checks": {
+          "plan_validity": true,
+          "intent": false,
+          "unit_preserved": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "latest_total_credit": false
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "toplam_kredi"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "metadata_what_exists",
+        "passed": 3,
+        "total": 5,
+        "score": 0.6,
+        "seconds": 18.94,
+        "checks": {
+          "plan_validity": true,
+          "intent": true,
+          "keys": false,
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      }
+    ]
+  },
+  {
+    "configuration": "qwen-json-only",
+    "description": "json_object mode, no schema constraint -- what a deployment without guided decoding gives.",
+    "model": "kkbhackathon2026/Qwen3.8-27B",
+    "n_scenarios": 10,
+    "mean_score": 0.615,
+    "perfect": 0,
+    "plan_validity": 0.0,
+    "numeric_match": 0.2,
+    "unit_preserved": 1.0,
+    "citations": 1.0,
+    "verified": 0.6,
+    "intent": 0.9,
+    "median_seconds": 3.68,
+    "total_seconds": 54.9,
+    "usage": {
+      "prompt_tokens": 22976,
+      "completion_tokens": 2660,
+      "reasoning_tokens": 0,
+      "latency_seconds": 53.316,
+      "calls": 34
+    },
+    "rows": [
+      {
+        "scenario": "demo_turn1_loans_and_rate",
+        "passed": 7,
+        "total": 11,
+        "score": 0.636,
+        "seconds": 19.79,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_first": true,
+            "konut_kredisi_last": false,
+            "faiz_first": true,
+            "faiz_last": true,
+            "faiz_max": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn2_deflate_without_disturbing",
+        "passed": 7,
+        "total": 10,
+        "score": 0.7,
+        "seconds": 4.72,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "keys": false,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "konut_kredisi_reel_last": false
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 60,
+        "failed_steps": []
+      },
+      {
+        "scenario": "demo_turn3_add_house_price_index",
+        "passed": 8,
+        "total": 10,
+        "score": 0.8,
+        "seconds": 7.22,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": false,
+          "keys": true,
+          "unit_preserved": true,
+          "preserved_columns": true,
+          "numeric_match": true,
+          "_numeric_detail": {
+            "kfe_first": true,
+            "kfe_last": true
+          },
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690",
+          "TP_KFE_TR"
+        ],
+        "n_rows": 67,
+        "failed_steps": []
+      },
+      {
+        "scenario": "discovery_english_alias",
+        "passed": 6,
+        "total": 9,
+        "score": 0.667,
+        "seconds": 2.61,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "keys": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "faiz_swaplari",
+          "5690"
+        ],
+        "n_rows": 36,
+        "failed_steps": []
+      },
+      {
+        "scenario": "unit_trap_sectoral_vs_bulletin",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 3.67,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "rows": true,
+          "window": false,
+          "unit_preserved": true,
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankalara_kullandirilan_krediler",
+          "TP_HPBITABLO6_19",
+          "5688"
+        ],
+        "n_rows": 12,
+        "failed_steps": []
+      },
+      {
+        "scenario": "cumulative_profit_flow",
+        "passed": 5,
+        "total": 8,
+        "score": 0.625,
+        "seconds": 3.61,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "unit_preserved": true,
+          "semantics": true,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "ocak_2026_flow": false
+          },
+          "citations": true,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "bankacilik_hizmetleri_gelirleri",
+          "TP_TOP_T04",
+          "5742"
+        ],
+        "n_rows": 21,
+        "failed_steps": []
+      },
+      {
+        "scenario": "anomaly_on_housing_loans",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 5.52,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "DERIVED_IPOTEKLI_PAY_TRTOPLAM",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "changepoint_on_rate",
+        "passed": 6,
+        "total": 8,
+        "score": 0.75,
+        "seconds": 3.69,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": true,
+          "unit_preserved": true,
+          "analysis_ran": false,
+          "citations": true,
+          "verified": true,
+          "no_unsupported_numbers": true
+        },
+        "columns": [
+          "TP_KTF12",
+          "tuketici_kredileri_konut",
+          "5690"
+        ],
+        "n_rows": 69,
+        "failed_steps": []
+      },
+      {
+        "scenario": "weekly_latest_credit",
+        "passed": 1,
+        "total": 5,
+        "score": 0.2,
+        "seconds": 1.37,
+        "checks": {
+          "plan_validity": false,
+          "intent": false,
+          "numeric_match": false,
+          "_numeric_detail": {
+            "latest_total_credit": false
+          },
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": [
+          "search"
+        ]
+      },
+      {
+        "scenario": "metadata_what_exists",
+        "passed": 2,
+        "total": 5,
+        "score": 0.4,
+        "seconds": 2.68,
+        "checks": {
+          "plan_validity": false,
+          "intent": true,
+          "keys": false,
+          "citations": null,
+          "verified": false,
+          "no_unsupported_numbers": true
+        },
+        "columns": [],
+        "n_rows": 0,
+        "failed_steps": []
+      }
+    ]
+  }
+]

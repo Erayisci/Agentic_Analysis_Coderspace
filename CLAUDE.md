@@ -10,7 +10,7 @@ The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 .venv/bin/pip install -e ".[dev]"           # once; makes `backend` importable
 .venv/bin/python -m backend.ingestion.bddk_bulletin --from-cache  # render workbooks, no network
 .venv/bin/python -m backend.lakehouse.build # full build: parse -> validate -> parquet + duckdb
-.venv/bin/pytest -q                         # all 168 tests (build must have run first)
+.venv/bin/pytest -q                         # all 246 tests (build must have run first)
 .venv/bin/pytest tests/test_bulletin.py -q  # parser/label invariants only — needs no build
 .venv/bin/pytest tests/test_lakehouse.py::test_period_coverage -q
 .venv/bin/pytest -q -k risk_weight          # one test by name, across files
@@ -110,7 +110,13 @@ backend/
 ├── validation/   identities, continuity, weekly, macro  — abort the build on failure
 ├── transform/    analytics, bulletin, macro        — growth, ratios, reconciliation, de-cumulation,
 │                 the bulletin metric catalogue, monthly alignment
-└── lakehouse/    build (orchestrator), schema_card
+├── lakehouse/    build (orchestrator), schema_card
+├── llm/          client — the ONLY module that talks to a model (Kloudeks/MIA, httpx, no SDK)
+├── tools/        lakehouse (discover/fetch_series/run_sql), series (the shared loader),
+│                 transforms, charts, anomaly, web_url — pure functions, no model calls
+├── agent/        state (AnalysisArtifact + lineage), router, planner (the plan DSL),
+│                 executor, verifier, composer, pipeline (wires the five stages)
+└── eval/         scenarios.yaml + run_eval — benchmark the model against SQL-computed golds
 
 scripts/lakehouse_query.py — read-only DuckDB console + a manual check plan with expected values
 ```
@@ -397,6 +403,63 @@ also offers a bank-group breakdown, not taken.
 TBB Risk Merkezi is a source the team added; the brief does not ask for it. Keep it as an extra
 cross-validation signal, but do not let it drive schema or roadmap decisions, and be prepared to drop it.
 
+## The agent layer
+
+    question -> router -> planner -> executor -> verifier -> composer -> answer
+
+The model appears at exactly three points: classifying intent, emitting a typed plan, and writing
+prose over numbers it did not compute. Everything else is Python. `agent/pipeline.py:run_turn` is
+the single entry point and returns the API payload; `Agent` holds one `Session` per conversation.
+
+**The plan DSL is the only language the model speaks.** Eight ops (`discover`, `fetch_series`,
+`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`) over a flat pydantic `Step`.
+Flat rather than a discriminated union on purpose: guided-decoding backends vary in `$ref`/`anyOf`
+support, and a schema a deployment silently mishandles fails with no error message.
+
+**MIA supports `response_format: json_schema`, and that changes the design.** Generation is
+constrained to the schema token by token, so a syntactically invalid plan is unreachable — plan
+validity stops being a prompting problem. Measured on this endpoint: 0.5s and schema-conformant.
+
+**Qwen3 is a reasoning model, and reasoning tokens are billed against `max_tokens`.** A trivial
+prompt costs 63 completion tokens with thinking and 2 without; the reference demo question consumed
+all 1400 on reasoning and returned an *empty string*, which looks like a model failure and is a
+budget error. `KloudeksClient` therefore defaults `think=False` and quadruples the budget when
+thinking is on. Benchmarked, thinking is ~60x slower for no score gain — see `eval_results.md`.
+
+**Discovery is the tool everything depends on**, and its ranking is pinned by tests. Lessons that
+cost real debugging, each now a comment in `tools/lakehouse.py`:
+
+- The candidate pool must be *every* matching row. An unordered `LIMIT 60` in SQL meant the correct
+  series was often never scored, which made the ranking look mysteriously unstable.
+- Aliases match on word boundaries, longest phrase wins, and a self-map (`"faiz" -> "faiz"`) is
+  dropped — it adds no vocabulary and only triples the weight of a word the question already used.
+- A long question is several short ones: `discover_concepts` splits on clause boundaries and
+  searches each, because no weighting rescues one content word among thirty filler ones.
+- Every corpus is guaranteed seats in the result. A rate-heavy question otherwise fills all of them
+  with EVDS series and the planner never sees the BDDK row it was asked about.
+
+**The artifact is state, not chat history.** The demo's turns 2 and 3 say "bozmadan" — later turns
+extend the table rather than recompute it. `add_column` outer-joins so a new column can never
+shorten the table, and a follow-up inherits the existing window (without that, adding the house
+price index stretched a 60-row answer to 67 and disturbed exactly what the question protected).
+A weekly series is resampled to the monthly grain on the way in, or it adds 296 index entries
+instead of a column.
+
+**Citations and the audit trail are by-products of execution, not a later reconstruction.** Each
+`fetch_series` appends `{table, filters, value_column, unit, semantics, period range}`; each step
+appends an `AuditStep`. A failing step records `ok=False` and execution continues, so one bad step
+costs a column rather than the turn.
+
+**The composer never sees the table** — only `verifier.quotable_numbers()`, a dict of figures the
+tools already computed. Afterwards `unsupported_numbers()` re-reads the prose and flags any figure
+matching nothing computed. (Turkish groups thousands with `.`, so "678.970" means 678970; reading
+it as 678.97 made every correctly-quoted large figure look unsupported.)
+
+`backend/eval/run_eval.py` benchmarks configurations of the one chat model MIA exposes against
+SQL-computed gold numbers. Every `expect_values` entry in `scenarios.yaml` carries the `gold_sql`
+that produced it — **never** the kick-off deck's chart, whose four labelled end-values do not
+co-occur at any month in the published data and which is a shape to match, not a numeric target.
+
 ## Domain invariants (violating these produces silently wrong analysis)
 
 **Temporal semantics are per-metric, not global.** The BDDK sectoral file is period-end outstanding
@@ -469,12 +532,20 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 168 tests.
-`tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` pins the kick-off deck's demo
-table end to end from the lakehouse alone. Everything in `Launch.MD` past the ingestion layer — BDDK
-FinTürk (İllere Göre), the Kloudeks-backed agent, the six required tools, and the deployed trust layer —
-is designed but not yet written.
+macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 246 tests.
 
-`README.md` is the outward-facing version of this file and has fallen behind it: it still lists the
-weekly bulletin as not acquired and the suite as 57 tests. Update it alongside the next change that
-touches either.
+The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
+pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web
+URL, plus charts). Two tools are stubs the executor already routes to but nothing implements — **web
+search** needs an open backend (ddgs or a SearXNG container), and the **image path of the Web URL
+tool** raises `NotImplementedError` pending a call to `Unlimited-OCR`, which MIA does expose. Not yet
+written: the FastAPI service, the frontend, Docker, and deployment.
+Two tests pin the reference scenario from opposite ends:
+`tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` proves the demo table is
+producible from the lakehouse in SQL alone, and
+`tests/test_agent.py::test_the_reference_scenario_runs_from_a_hand_written_plan` proves the execution
+layer produces it with no model involved. If the second passes and a live turn still fails, the defect
+is in the prompt or the plan, not in the data or the tools — which is the point of having both.
+
+BDDK FinTürk (İllere Göre) remains unacquired.
+

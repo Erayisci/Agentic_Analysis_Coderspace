@@ -5,8 +5,10 @@ lakehouse, built so an LLM agent never has to do arithmetic or schema reasoning 
 
 Submission for the **KKB Hackathon 2026 — Lakehouse Agent Builder and Data Analytics**.
 
-Current state: the ingestion, validation and lakehouse layers are implemented and tested. The agent,
-its tools and the API are designed in [`Launch.MD`](Launch.MD) but not yet written.
+Current state: the ingestion, validation and lakehouse layers are implemented and tested, and the
+agent layer runs end to end against the Kloudeks/MIA open-weight endpoint — a typed plan DSL, six of
+the brief's tools, a verifier and a cited answer. The FastAPI service, frontend and deployment
+described in [`Launch.MD`](Launch.MD) are not yet written.
 
 ---
 
@@ -22,7 +24,7 @@ pip install -e ".[dev]"
 
 python -m backend.ingestion.bddk_bulletin --from-cache  # raw workbooks from the archived responses
 python -m backend.lakehouse.build                       # parse -> validate -> parquet + duckdb
-pytest -q                                               # 57 tests
+pytest -q                                               # 246 tests
 ```
 
 That produces `data/lakehouse.duckdb` and `data/analytics/schema_card.md`. The whole thing runs offline
@@ -94,7 +96,7 @@ The brief's target corpus is **2021-01 through 2026-06**.
 |---|---|
 | BDDK Aylık Bülten — all 17 tables | ✅ built, 2021-01..2026-07, 135,513 observations |
 | TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency) |
-| BDDK Haftalık Bülten | ❌ not acquired |
+| BDDK Haftalık Bülten — all 9 tables | ✅ built, 2021-01-08..2026-09-04, 163,740 observations |
 | BDDK FinTürk (İllere Göre) | ❌ not acquired |
 | TBB Risk Merkezi sectoral | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
 
@@ -122,9 +124,27 @@ backend/
 ├── domain/       bulletin_tables (17-table registry + lifecycles), canonical (sector graph), evds_series
 ├── ingestion/    bddk_bulletin, riskmerkezi, evds  — runnable CLIs, fetch only
 ├── parsing/      bddk_sectoral, bddk_bulletin, tbb, evds — raw files -> long frames
-├── validation/   identities, continuity, macro     — abort the build on failure
-├── transform/    analytics, macro                  — growth, ratios, reconciliation, monthly alignment
-└── lakehouse/    build (orchestrator), schema_card
+├── validation/   identities, continuity, weekly, macro  — abort the build on failure
+├── transform/    analytics, bulletin, macro        — growth, ratios, de-cumulation, monthly alignment
+├── lakehouse/    build (orchestrator), schema_card
+├── llm/          client — the only module that talks to a model (Kloudeks/MIA)
+├── tools/        lakehouse, series, transforms, charts, anomaly, web_url — no model calls
+├── agent/        state, router, planner, executor, verifier, composer, pipeline
+└── eval/         scenarios.yaml + run_eval — benchmark against SQL-computed gold numbers
+```
+
+### The agent
+
+    question -> router -> planner -> executor -> verifier -> composer -> answer
+
+The model classifies intent, emits a typed plan, and writes prose over numbers it did not compute.
+Everything between is Python: the plan is a pydantic schema the server's guided decoding constrains
+generation to, the executor runs it and records a citation per series, and the verifier checks units,
+coverage and lineage before anything is said. Run the benchmark with:
+
+```bash
+python -m backend.eval.run_eval --out eval_results.md    # needs KLOUDEKS_API_KEY
+python -m backend.eval.run_eval --config deterministic   # no model, no network
 ```
 
 Dependencies point inward only: `lakehouse` orchestrates, `transform`/`validation` operate on parsed
@@ -146,7 +166,9 @@ table 05, so the generic path cannot drift from the pinned one.
 | `growth`, `ratios` | Month-over-month / year-over-year changes, derived ratios |
 | `macro_series`, `macro_observations`, `macro_observations_native` | TCMB EVDS series index, monthly-aligned values, and the native-frequency points |
 | `reconciliation_monitor` | BDDK vs TBB divergence with a mean ± 3σ band per series |
-| `data_quality_report`, `bulletin_lifecycle_report` | Validation evidence, persisted and quotable |
+| `bulletin_entities` | The agent's search surface: 519 monthly line items with unit, semantics, parent and period span |
+| `weekly_observations`, `weekly_items` | All 9 BDDK weekly tables; items carry `retired_on` and `is_informational` |
+| `data_quality_report`, `bulletin_lifecycle_report`, `weekly_lifecycle_report` | Validation evidence, persisted and quotable |
 
 `data/analytics/schema_card.md` is generated for an agent's context window, not for humans.
 

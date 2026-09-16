@@ -1,0 +1,151 @@
+# Evaluation scenarios for the KKB agent.
+#
+# Every `expect_values` number here was computed by SQL against the lakehouse
+# (see the `gold_sql` field, which is the query that produced it) -- never taken
+# from the kick-off deck's chart. That chart's four labelled end-values do not
+# co-occur at any single month in the published data, so it is a shape to match
+# rather than a numeric target.
+#
+# tolerance_pct is per-scenario: a stock read straight from a table must match
+# exactly, while a derived index can legitimately differ in the last decimal.
+
+meta:
+  corpus_window: [2021-01-01, 2026-07-01]
+  lakehouse: data/lakehouse.duckdb
+
+scenarios:
+
+  # --- the three canonical demo turns, as one conversation ------------------
+  - id: demo_turn1_loans_and_rate
+    conversation: reference_demo
+    turn: 1
+    question: >-
+      2021-2025 yillari arasindaki 60 aylik veriden Turkiye'de kullanilan toplam konut
+      kredilerinin dagilimini aylik olarak gosteriniz. Buna ek olarak konut kredisi faiz
+      oranlarini da gosteriniz. Faiz oranlarinin dustugu donemlerde kredi miktari nasil
+      degisim gostermis, faiz orani dustugu halde kredi miktarinin yukselmedigi donemler
+      olmus mu?
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    expect_units: ["milyon TL", "%"]
+    expect_semantics: [stock, rate]
+    expect_values:
+      konut_kredisi_first: 276785.0
+      konut_kredisi_last: 678970.0
+      faiz_first: 18.388
+      faiz_last: 37.29
+      faiz_max: 44.72
+    tolerance_pct: 0.5
+    gold_sql: >-
+      SELECT period, value FROM bulletin_observations WHERE dataset='tuketici_kredileri'
+      AND entity_key='tuketici_kredileri_konut' AND currency='total'
+      AND period BETWEEN DATE '2021-01-01' AND DATE '2025-12-01' ORDER BY period
+    notes: >-
+      The question says "kullanilan" (extended), but the only monthly housing-loan
+      figure BDDK publishes is the period-end outstanding STOCK. The answer must say so.
+
+  - id: demo_turn2_deflate_without_disturbing
+    conversation: reference_demo
+    turn: 2
+    question: >-
+      Konut kredisi ve faiz oranlari tablosunu bozmadan sadece konut kredisi tutarlarini
+      enflasyondan arindirir misin?
+    expect_intent: followup
+    expect_rows: 60
+    expect_preserves_columns: true
+    expect_keys: [TP.GENENDEKS.T1]
+    expect_values:
+      konut_kredisi_reel_last: 99182.8
+    tolerance_pct: 1.0
+    gold_sql: >-
+      WITH loan AS (SELECT period, value FROM bulletin_observations WHERE dataset='tuketici_kredileri'
+      AND entity_key='tuketici_kredileri_konut' AND currency='total'),
+      cpi AS (SELECT period, value FROM macro_observations WHERE series_code='TP.GENENDEKS.T1')
+      SELECT l.value * (first_value(c.value) OVER (ORDER BY l.period) / c.value) AS real
+      FROM loan l JOIN cpi c USING (period) WHERE l.period = DATE '2025-12-01'
+    notes: The table must keep its existing columns and its 60-row window.
+
+  - id: demo_turn3_add_house_price_index
+    conversation: reference_demo
+    turn: 3
+    question: >-
+      Bu tabloyu hic bozmadan yeni bir sutun olarak konut fiyat endeksini getirebilir misin?
+      Faiz oranlarinin dustugu halde kredilerin artmamasinin sebebi fiyat artisi olabilir mi?
+    expect_intent: followup
+    expect_rows: 60
+    expect_preserves_columns: true
+    expect_keys: [TP.KFE.TR]
+    expect_units: ["endeks"]
+    expect_values:
+      kfe_first: 16.49
+      kfe_last: 204.36
+    tolerance_pct: 0.5
+    gold_sql: >-
+      SELECT period, value FROM macro_observations WHERE series_code='TP.KFE.TR'
+      AND period BETWEEN DATE '2021-01-01' AND DATE '2025-12-01' ORDER BY period
+
+  # --- single-turn coverage of the rest of the surface ----------------------
+  - id: discovery_english_alias
+    question: Show monthly mortgage loan volumes and the mortgage interest rate for 2022-2024.
+    expect_intent: series_analysis
+    expect_window: [2022-01-01, 2024-12-01]
+    expect_rows: 36
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    notes: The corpus is published only in Turkish; an English question must still resolve.
+
+  - id: unit_trap_sectoral_vs_bulletin
+    question: 2024 yilinda imalat sanayi sektorune kullandirilan nakdi kredileri goster.
+    expect_intent: series_analysis
+    expect_window: [2024-01-01, 2024-12-01]
+    expect_rows: 12
+    expect_units: ["bin TL"]
+    notes: >-
+      The sectoral table is the corpus's only bin TL table. Reporting it as milyon TL
+      is a 1000x error, so the unit must survive into the answer.
+
+  - id: cumulative_profit_flow
+    question: 2025 ve 2026 icin bankacilik sektorunun donem net karini aylik olarak goster.
+    expect_intent: series_analysis
+    expect_semantics: [cumulative_ytd]
+    expect_values:
+      ocak_2026_flow: 87249.0
+    tolerance_pct: 0.5
+    gold_sql: >-
+      SELECT value_flow FROM bulletin_observations WHERE dataset='kar_zarar'
+      AND entity_key='donem_net_kari_zarari' AND currency='total' AND period=DATE '2026-01-01'
+    notes: >-
+      kar_zarar is year-to-date and resets every January. A month-over-month change on
+      the published value is arithmetic nonsense; value_flow is the month's own figure.
+
+  - id: anomaly_on_housing_loans
+    question: Konut kredilerinde olagandisi hareketler var mi? Anomali analizi yap.
+    expect_intent: series_analysis
+    expect_analysis: anomaly
+    expect_keys: [tuketici_kredileri_konut]
+    notes: Must score the change, not the level, and report the unit.
+
+  - id: changepoint_on_rate
+    question: Konut kredisi faiz oranlarinda rejim degisikligi oldugu donemleri bul.
+    expect_intent: series_analysis
+    expect_analysis: changepoint
+    expect_keys: [TP.KTF12]
+
+  - id: weekly_latest_credit
+    question: BDDK haftalik bultenine gore en guncel toplam kredi buyuklugu nedir?
+    expect_intent: series_analysis
+    expect_values:
+      latest_total_credit: 28128197.3
+    tolerance_pct: 1.0
+    gold_sql: >-
+      SELECT o.value FROM weekly_observations o JOIN weekly_items i USING (dataset, entity_key)
+      WHERE i.retired_on IS NULL AND o.currency='total' AND o.entity_name ILIKE '%Toplam Krediler%'
+      AND o.period=(SELECT max(period) FROM weekly_observations)
+    notes: Must filter retired items, or the superseded definition double-counts.
+
+  - id: metadata_what_exists
+    question: Lakehouse'da hangi konut ile ilgili seriler var? Listele.
+    expect_intent: metadata
+    expect_keys: [tuketici_kredileri_konut]
+    notes: Discovery only; no table is required.
