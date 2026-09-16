@@ -167,6 +167,8 @@ def test_a_step_missing_its_required_field_is_rejected():
         Step(op="fetch_series")
     with pytest.raises(ValueError, match="missing required field"):
         Step(op="transform", operation="deflate")
+    with pytest.raises(ValueError, match="missing required field"):
+        Step(op="ingest_external", url="https://example.com/x.xlsx")  # no value_column
 
 
 def test_template_plans_need_no_model():
@@ -344,6 +346,94 @@ def test_a_failing_step_costs_a_column_not_the_turn():
     session = Executor(Session()).run(plan)
     assert [step.ok for step in session.audit] == [True, False, True]
     assert "konut" in session.artifact.column_names()
+
+
+def _mock_excel_fetch(monkeypatch, frame: pd.DataFrame):
+    """Same mocking approach as tests/test_external_series.py: fake
+    web_url._fetch rather than hitting the network."""
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from backend.tools import web_url
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        frame.to_excel(writer, sheet_name="Sheet1", index=False)
+    response = SimpleNamespace(
+        headers={"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+        content=buf.getvalue())
+    monkeypatch.setattr(web_url, "_fetch", lambda url: response)
+
+
+def test_ingest_external_adds_a_column_scoped_to_this_session_only(monkeypatch):
+    """The op reads an external file into a real column -- with source
+    'external' and unit_verified=False in its citation, since (unlike
+    bulletin/weekly/macro) nothing here labels its own unit -- and touches
+    nothing under data/, which is the whole point of not writing to the
+    lakehouse for an unseen, demo-day file."""
+    frame = pd.DataFrame({
+        "Tarih": pd.date_range("2021-01-01", periods=6, freq="MS"),
+        "Altin (USD)": [1800.0, 1810.0, 1795.0, 1820.0, 1830.0, 1825.0],
+    })
+    _mock_excel_fetch(monkeypatch, frame)
+
+    plan = Plan(intent="url_analysis", steps=[
+        Step(op="ingest_external", url="https://example.com/altin.xlsx",
+             value_column="Altin (USD)", as_name="altin"),
+    ])
+    session = Executor(Session()).run(plan)
+
+    assert session.audit[0].ok
+    assert "altin" in session.artifact.column_names()
+    assert len(session.artifact.frame) == 6
+    lineage = session.artifact.lineage["altin"]
+    assert lineage.source == "external"
+    assert lineage.citation["table"] == "external"
+    assert lineage.citation["unit_verified"] is False
+    assert session.citations and session.citations[0]["table"] == "external"
+
+
+def test_an_ingested_external_column_works_with_transform_and_chart_unmodified(monkeypatch):
+    """The point of the design: AnalysisArtifact.add_column does not care
+    where a column came from, so an external column needs no special-casing
+    anywhere else -- it can be indexed, charted, analyzed like any other."""
+    frame = pd.DataFrame({
+        "Tarih": pd.date_range("2021-01-01", periods=24, freq="MS"),
+        "Altin (USD)": [1800.0 + i * 5 for i in range(24)],
+    })
+    _mock_excel_fetch(monkeypatch, frame)
+
+    plan = Plan(intent="url_analysis", steps=[
+        Step(op="ingest_external", url="https://example.com/altin.xlsx",
+             value_column="Altin (USD)", as_name="altin"),
+        Step(op="transform", operation="index_to_base", column="altin", base_period="2021-01-01"),
+        Step(op="chart"),
+    ])
+    session = Executor(Session()).run(plan)
+
+    assert all(step.ok for step in session.audit), [s.detail for s in session.audit if not s.ok]
+    index_col = [c for c in session.artifact.column_names() if c != "altin"][0]
+    assert session.artifact.frame[index_col].iloc[0] == 100.0
+    assert "figure" in session.facts
+
+
+def test_ingest_external_bad_column_costs_a_step_not_the_turn(monkeypatch):
+    """A bad column name records a failed step and stops there cleanly -- it
+    must not raise out of Executor.run and abort the rest of the turn."""
+    frame = pd.DataFrame({
+        "Tarih": pd.date_range("2021-01-01", periods=6, freq="MS"),
+        "Altin (USD)": [1800.0] * 6,
+    })
+    _mock_excel_fetch(monkeypatch, frame)
+
+    plan = Plan(intent="url_analysis", steps=[
+        Step(op="ingest_external", url="https://example.com/altin.xlsx", value_column="Does Not Exist"),
+    ])
+    session = Executor(Session()).run(plan)
+
+    assert [step.ok for step in session.audit] == [False]
+    assert "not found" in session.audit[0].detail
+    assert session.artifact.is_empty()
 
 
 def test_a_hallucinated_key_is_resolved_by_discovery():

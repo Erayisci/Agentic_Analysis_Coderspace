@@ -23,10 +23,11 @@ from pydantic import BaseModel, Field, model_validator
 
 Intent = Literal["series_analysis", "followup", "url_analysis", "search", "metadata", "unsupported"]
 Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
-             "read_url", "search", "chart"]
+             "read_url", "search", "chart", "ingest_external"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio"]
 Method = Literal["anomaly", "changepoint", "causality"]
 Source = Literal["bulletin", "weekly", "macro"]
+MonthlyRule = Literal["last", "avg", "sum"]
 
 # Which fields each op actually needs. Checked after parsing, because guided
 # decoding guarantees the shape and not the sense.
@@ -39,6 +40,7 @@ REQUIRED: dict = {
     "read_url": ("url",),
     "search": ("query",),
     "chart": (),
+    "ingest_external": ("url", "value_column"),
 }
 
 
@@ -68,9 +70,18 @@ class Step(BaseModel):
     against: Optional[str] = Field(None, description="second column for a coincidence question")
     against_direction: Optional[Literal["up", "down"]] = None
 
-    # read_url / search
+    # read_url / search / ingest_external
     url: Optional[str] = None
     query: Optional[str] = None
+
+    # ingest_external only -- adds a column from an external file to the
+    # CURRENT SESSION'S table only; nothing is written to the lakehouse.
+    value_column: Optional[str] = Field(None, description="column in the external file holding the numbers")
+    period_column: Optional[str] = Field(None, description="column holding the dates; auto-detected if omitted")
+    sheet: Optional[str] = Field(None, description="Excel sheet name; ignored for CSV")
+    monthly_rule: Optional[MonthlyRule] = Field(
+        None, description="how to collapse several rows in one month: last (stock), avg (rate), sum (flow)")
+    unit: Optional[str] = Field(None, description="the external column's unit, if it is stated near it")
 
     # chart
     columns: Optional[List[str]] = Field(None, description="columns to plot; omit for all")
@@ -118,18 +129,25 @@ Adimlar:
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: anomaly, changepoint veya causality.
 - chart: grafik ciz.
-- read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa.
+- read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa. read_url sadece OKUR
+  (metin/onizleme dondurur), tabloya sutun EKLEMEZ.
+- ingest_external: bir URL'deki Excel/CSV dosyasindan bir sutunu SAYISAL SERI olarak tabloya
+  ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
+  sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
+  bulunur. Bu ekleme SADECE bu oturum icindir, kalici veritabanina hicbir sey yazilmaz.
 
 Kurallar:
 1. Anahtari (key) kesin bilmiyorsan once discover kullan. Anahtar UYDURMA.
 2. Mevcut tabloya ekleme yapiliyorsa ("bozmadan", "yeni sutun olarak") var olan sutunlari SILME,
-   sadece yeni fetch_series/transform adimlari ekle.
+   sadece yeni fetch_series/transform/ingest_external adimlari ekle.
 3. Tarih araligini start/end alanlarina yaz (YYYY-MM-DD).
 4. Grafik istenmisse son adim chart olsun.
 5. BIRIME DIKKAT ET. Kredi/mevduat TUTARI istendiginde birimi "milyon TL" veya "bin TL"
    olan seriyi sec. Birimi "adet" olan seri bir SAYIDIR (ornegin konut SATIS adedi),
    kredi tutari degildir. Birimi "%" olan seri bir orandir.
 6. Sutun adini as_name ile ver. Bir adimin kullanmadigi alanlari BOS BIRAK.
+7. Kullanici disaridan bir dosya/URL'deki veriyi mevcut tabloyla KARSILASTIRMAK veya
+   BIRLESTIRMEK istiyorsa ingest_external kullan; sadece OZETLEMESINI istiyorsa read_url yeter.
 """
 
 

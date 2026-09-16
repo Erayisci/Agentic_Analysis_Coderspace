@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies
 from ..tools.charts import build_chart, chart_summary
+from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
 from .planner import Plan, Step
 from .state import AuditStep, ColumnLineage, Session
@@ -99,6 +100,7 @@ class Executor:
             "discover": self._discover, "fetch_series": self._fetch, "transform": self._transform,
             "analyze": self._analyze, "find_periods": self._find_periods,
             "read_url": self._read_url_step, "search": self._search_step, "chart": self._chart,
+            "ingest_external": self._ingest_external,
         }[step.op]
         return handler(step, plan)
 
@@ -209,6 +211,24 @@ class Executor:
         self.session.facts.setdefault("documents", []).append(result)
         self.session.cite({"source": "url", "url": step.url, "kind": result.get("kind")})
         return f"read {step.url} ({result.get('kind')})"
+
+    def _ingest_external(self, step: Step, plan: Plan) -> str:
+        """Add one column of an external Excel/CSV file to THIS SESSION'S
+        table only -- see tools.external_series' module docstring for why
+        this never touches data/lakehouse.duckdb."""
+        series = ingest_external_series(
+            step.url, step.value_column, period_column=step.period_column,
+            sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last")
+        name = _column_name(step, re.sub(r"[^\w]+", "_", step.value_column))
+        self.session.artifact.add_column(name, series.values, ColumnLineage(
+            column=name, label=series.value_column, source=series.source, unit=series.unit,
+            temporal_semantics=series.temporal_semantics, key=series.key,
+            transform=f"ingest_external(period_column={series.period_column!r}, monthly_rule={series.monthly_rule!r})",
+            citation=series.citation()))
+        self.session.cite(series.citation())
+        return (f"{name}: {len(series.values)} points from {step.url} "
+                f"(value_column={series.value_column!r}, period_column={series.period_column!r}, "
+                f"unit={series.unit!r} unverified)")
 
     def _search_step(self, step: Step, plan: Plan) -> str:
         if self._search is None:
