@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ..tools import transforms as T
-from ..tools.anomaly import detect_anomalies
+from ..tools.anomaly import detect_anomalies, detect_anomalies_in_series
 from ..tools.charts import build_chart, chart_summary
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
@@ -177,10 +177,24 @@ class Executor:
         column = self._resolve_column(step.column)
         lineage = self.session.artifact.lineage[column]
         if step.method == "anomaly":
-            if not lineage.key:
-                raise ValueError(f"{column!r} is derived; run anomaly on a fetched series")
-            result = detect_anomalies(lineage.key, source=lineage.source,
-                                      dataset=(lineage.citation.get("filters") or {}).get("dataset"))
+            if lineage.source in ("bulletin", "weekly", "macro") and lineage.key:
+                # Re-fetch the full, unwindowed history from the lakehouse
+                # rather than the artifact's own (possibly plan.start/end
+                # windowed, or too-short) column, so the rolling baseline has
+                # more than what happens to be on screen to compare against.
+                result = detect_anomalies(lineage.key, source=lineage.source,
+                                          dataset=(lineage.citation.get("filters") or {}).get("dataset"))
+            else:
+                # A `transform`-derived or `ingest_external` column has no
+                # lakehouse row to go back to -- the artifact's own values
+                # are the only copy that exists, so score those directly.
+                series = self.session.artifact.frame[column].dropna()
+                result = detect_anomalies_in_series(
+                    series,
+                    describe={"source": lineage.source, "key": lineage.key, "name": lineage.label,
+                             "unit": lineage.unit, "temporal_semantics": lineage.temporal_semantics,
+                             "value_column": column},
+                    citation=lineage.citation)
         elif step.method == "changepoint":
             result = self._changepoint(column)
         elif step.method == "causality":

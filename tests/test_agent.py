@@ -393,13 +393,21 @@ def test_ingest_external_adds_a_column_scoped_to_this_session_only(monkeypatch):
     assert session.citations and session.citations[0]["table"] == "external"
 
 
-def test_an_ingested_external_column_works_with_transform_and_chart_unmodified(monkeypatch):
+def test_an_ingested_external_column_works_with_transform_analyze_and_chart_unmodified(monkeypatch):
     """The point of the design: AnalysisArtifact.add_column does not care
     where a column came from, so an external column needs no special-casing
-    anywhere else -- it can be indexed, charted, analyzed like any other."""
+    anywhere else -- it can be indexed, analyzed and charted like any other.
+
+    anomaly is the sharp case: it normally re-fetches full history from the
+    lakehouse by key, and an external column has no lakehouse row to fetch --
+    see test_anomaly_on_a_derived_column_scores_the_artifacts_own_values for
+    the bug this guards (it broke identically for transform-derived columns,
+    on real lakehouse data, with no external ingestion involved at all)."""
+    values = [1800.0 + i * 5 for i in range(24)]
+    values[15] = 3000.0  # an injected spike for anomaly to actually find
     frame = pd.DataFrame({
         "Tarih": pd.date_range("2021-01-01", periods=24, freq="MS"),
-        "Altin (USD)": [1800.0 + i * 5 for i in range(24)],
+        "Altin (USD)": values,
     })
     _mock_excel_fetch(monkeypatch, frame)
 
@@ -407,6 +415,7 @@ def test_an_ingested_external_column_works_with_transform_and_chart_unmodified(m
         Step(op="ingest_external", url="https://example.com/altin.xlsx",
              value_column="Altin (USD)", as_name="altin"),
         Step(op="transform", operation="index_to_base", column="altin", base_period="2021-01-01"),
+        Step(op="analyze", method="anomaly", column="altin", window=6, z_threshold=2.0, iqr_multiplier=1.0),
         Step(op="chart"),
     ])
     session = Executor(Session()).run(plan)
@@ -415,6 +424,31 @@ def test_an_ingested_external_column_works_with_transform_and_chart_unmodified(m
     index_col = [c for c in session.artifact.column_names() if c != "altin"][0]
     assert session.artifact.frame[index_col].iloc[0] == 100.0
     assert "figure" in session.facts
+    anomaly_result = session.facts["analysis"]["anomaly:altin"]
+    assert anomaly_result["n_anomalies"] >= 1
+    assert anomaly_result["source"] == "external"
+
+
+def test_anomaly_on_a_derived_column_scores_the_artifacts_own_values():
+    """Regression test for a bug found independently of ingest_external:
+    index_to_base/deflate/change all copy the ORIGINAL column's lineage.key
+    (so it looks fetchable) but set source="derived" -- and load_series only
+    accepts bulletin/weekly/macro, so analyze(anomaly) on any indexed,
+    deflated or MoM/YoY-changed column crashed with 'source must be one of
+    (...)', on real lakehouse data, no external ingestion needed to hit it."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="transform", operation="index_to_base", column="konut", base_period="2021-01-01"),
+        Step(op="analyze", method="anomaly", column="konut_endeks"),
+    ])
+    session = Executor(Session()).run(plan)
+
+    assert all(step.ok for step in session.audit), [s.detail for s in session.audit if not s.ok]
+    result = session.facts["analysis"]["anomaly:konut_endeks"]
+    assert result["source"] == "derived"
+    assert "n_anomalies" in result
 
 
 def test_ingest_external_bad_column_costs_a_step_not_the_turn(monkeypatch):
