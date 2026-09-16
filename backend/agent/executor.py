@@ -309,7 +309,9 @@ class Executor:
 
         max_lag = min(6, max(1, len(values) // 5 - 1))
         raw = grangercausalitytests(values[[column, other]].to_numpy(dtype=float), maxlag=max_lag)
-        by_lag = {lag: round(float(stats[0]["ssr_ftest"][1]), 5) for lag, stats in raw.items()}
+        # int(...): statsmodels' lag keys are numpy.int64, which json.dumps
+        # refuses as a dict key -- this result reaches the API response.
+        by_lag = {int(lag): round(float(stats[0]["ssr_ftest"][1]), 5) for lag, stats in raw.items()}
         best_lag = min(by_lag, key=by_lag.get)
         p_value = by_lag[best_lag]
         correlation = float(np.corrcoef(frame[column], frame[other])[0, 1])

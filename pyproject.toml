@@ -24,6 +24,9 @@ dependencies = [
     "pydantic>=2.6.0",
     "plotly>=5.20.0",
     "PyYAML>=6.0",
+    # API service.
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
 ]
 
 [project.optional-dependencies]

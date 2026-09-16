@@ -193,7 +193,10 @@ def _attach_parents(items: pd.DataFrame) -> pd.DataFrame:
         active = group[group.retired_on.isna()]
         by_position = dict(zip(active.row_position, active.entity_key))
         for row in active.itertuples():
-            if not row.formula or not _ADDITIVE.match(row.formula):
+            # pandas' string dtype represents a missing formula as float NaN,
+            # not None -- and NaN is truthy in Python, so `not row.formula`
+            # alone lets it through into the regex and crashes.
+            if not isinstance(row.formula, str) or not _ADDITIVE.match(row.formula):
                 continue
             for position in (int(p) for p in re.findall(r"\d+", row.formula)):
                 child = by_position.get(position)

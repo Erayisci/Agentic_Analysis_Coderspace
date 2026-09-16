@@ -276,6 +276,17 @@ def test_load_series_routes_all_three_corpora():
     assert load_series(key, source="weekly").temporal_semantics == "stock"
 
 
+def test_a_weekly_series_name_carries_its_table_for_context():
+    """entity_key is BDDK's item id, not a parent/child qualified key like the
+    bulletin's, so a weekly entity_name alone ("a) Konut") reads as unrelated
+    to the near-identical bulletin series it's usually fetched beside in the
+    same table -- observed live: a 'konut kredisi' question surfaced both,
+    one plainly labelled and one just "a) Konut" with no visible source."""
+    needs_lakehouse()
+    series = load_series("5690", source="weekly")  # Krediler / a) Konut
+    assert series.name == "Krediler / a) Konut"
+
+
 def test_a_cumulative_series_is_served_as_its_monthly_flow():
     needs_lakehouse()
     flow = load_series("donem_net_kari_zarari", dataset="kar_zarar")
@@ -305,6 +316,29 @@ def test_a_series_carries_its_provenance():
     assert citation["table"] == "bulletin_observations"
     assert citation["filters"]["entity_key"] == "tuketici_kredileri_konut"
     assert citation["unit"] == "milyon TL" and citation["temporal_semantics"] == "stock"
+
+
+def test_causality_result_is_json_serialisable():
+    """Regression test: statsmodels' grangercausalitytests keys p_values_by_lag
+    by numpy.int64, and json.dumps refuses a non-native-int dict key -- this
+    result reaches the API response verbatim via session.facts, so it must
+    round-trip through json.dumps, not just look right when printed."""
+    import json
+
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="analyze", method="causality", column="konut", against="faiz"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+
+    result = session.facts["analysis"]["causality:konut"]
+    assert type(result["best_lag"]) is int  # not numpy.int64
+    assert all(type(lag) is int for lag in result["p_values_by_lag"])
+    json.dumps(result)  # raises if a numpy scalar leaked through
 
 
 # --- executor end to end ----------------------------------------------------

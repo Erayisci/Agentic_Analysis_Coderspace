@@ -27,6 +27,7 @@ import duckdb
 import pandas as pd
 
 from ..core.config import DUCKDB_PATH
+from ..domain.weekly_tables import BY_SLUG as WEEKLY_TABLES
 
 SOURCES = ("bulletin", "weekly", "macro")
 CUMULATIVE = "cumulative_ytd"
@@ -186,7 +187,13 @@ def _weekly(con, key, currency, metric, start, end, include_retired):
     unit, semantics = con.execute(
         "SELECT min(unit), min(temporal_semantics) FROM weekly_observations WHERE entity_key = ?", [key]
     ).fetchone()
-    return frame, dict(name=meta.entity_name, unit=unit, semantics=semantics, value_column="value",
+    # Unlike the bulletin, a weekly entity_key is BDDK's own item id, not a
+    # parent/child qualified key -- so its entity_name alone ("a) Konut")
+    # carries no signal of which table it belongs to, and reads as unrelated
+    # to the near-identical bulletin series it usually gets fetched beside.
+    table = WEEKLY_TABLES.get(meta.dataset)
+    name = f"{table.title} / {meta.entity_name}" if table else meta.entity_name
+    return frame, dict(name=name, unit=unit, semantics=semantics, value_column="value",
                        dataset=meta.dataset, currency=currency, metric=metric,
                        is_informational=bool(meta.is_informational))
 
