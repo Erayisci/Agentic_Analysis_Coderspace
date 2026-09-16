@@ -37,6 +37,7 @@ EXCEL_CONTENT_TYPES = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel",
 )
+CSV_CONTENT_TYPES = ("text/csv", "application/csv", "application/vnd.ms-excel.csv")
 
 
 def _bounded(text: str) -> tuple:
@@ -89,6 +90,8 @@ def _detect_kind(content_type: str, url: str) -> str:
         return "pdf"
     if content_type in EXCEL_CONTENT_TYPES or path.endswith((".xlsx", ".xls")):
         return "excel"
+    if content_type in CSV_CONTENT_TYPES or path.endswith(".csv"):
+        return "csv"
     if content_type.startswith("image/") or path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
         return "image"
     if content_type in ("text/html", "application/xhtml+xml") or path.endswith((".html", ".htm")):
@@ -126,6 +129,16 @@ def _extract_excel(content: bytes) -> dict:
     }
 
 
+def _extract_csv(content: bytes) -> dict:
+    frame = pd.read_csv(BytesIO(content))
+    return {
+        "kind": "csv",
+        "columns": [str(c) for c in frame.columns],
+        "n_rows": int(len(frame)),
+        "preview": frame.head(20).astype(str).to_dict(orient="records"),
+    }
+
+
 def _extract_html(content: bytes) -> dict:
     soup = BeautifulSoup(content, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
@@ -153,7 +166,7 @@ def _extract_text(content: bytes, encoding: Optional[str]) -> dict:
 def read_url(url: str) -> dict:
     """Fetch a URL and return its content as a JSON-serialisable dict.
 
-    Supports PDF (pypdf), Excel (pandas/openpyxl) and text/HTML content, each
+    Supports PDF (pypdf), Excel and CSV (pandas/openpyxl) and text/HTML content, each
     truncated to MAX_TEXT_CHARS so a large document cannot blow out the
     calling LLM's context window. Raises NotImplementedError for images --
     see the module docstring -- and ValueError for anything else (bad scheme,
@@ -167,6 +180,8 @@ def read_url(url: str) -> dict:
         result = _extract_pdf(response.content)
     elif kind == "excel":
         result = _extract_excel(response.content)
+    elif kind == "csv":
+        result = _extract_csv(response.content)
     elif kind == "html":
         result = _extract_html(response.content)
     elif kind == "text":

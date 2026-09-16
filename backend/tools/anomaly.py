@@ -25,48 +25,19 @@ flagged numbers are.
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 from .series import load_series
 
 
-def detect_anomalies(
-    key: str,
-    source: str = "bulletin",
-    dataset: Optional[str] = None,
-    currency: Optional[str] = "total",
-    metric: Optional[str] = None,
-    on: str = "change",
-    window: int = 12,
-    z_threshold: float = 3.0,
-    iqr_multiplier: float = 1.5,
-) -> dict:
-    """Flag periods where a series' rolling z-score AND IQR fence both breach.
-
-    Args:
-        key, source, dataset, currency, metric: identify the series, passed
-            straight through to `load_series` -- `key` is an entity_key for the
-            bulletin and weekly corpora and a series_code for macro.
-        on: "change" scores the period-over-period percent change (default);
-            "level" scores the raw values as loaded.
-        window: trailing window, in periods, for the rolling mean/std and
-            quartiles. A point needs a full window of history behind it to be
-            scored at all -- there is no partial-window comparison, since that
-            would compare a point against too few precedents to mean anything.
-        z_threshold: |z| at or above this flags the z-score check.
-        iqr_multiplier: fence width, in IQRs beyond Q1/Q3, for the IQR check.
-
-    Returns a JSON-serialisable dict: identifies the series and parameters
-    used, then `anomalies` -- one entry per period flagged by both checks,
-    each carrying the scored value, the raw level it came from, the z-score
-    and which side of the fence it breached.
-    """
+def _score(series: pd.Series, on: str, window: int, z_threshold: float, iqr_multiplier: float) -> dict:
+    """The method itself, over a plain series -- shared by both entry points
+    below so "loaded from the lakehouse" and "already have it in hand" (an
+    external or derived column) can never silently score differently."""
     if on not in ("change", "level"):
         raise ValueError(f"on must be 'change' or 'level', got {on!r}")
     if window < 3:
         raise ValueError("window must be >= 3")
-
-    loaded = load_series(key, source=source, dataset=dataset, currency=currency, metric=metric)
-    series = loaded.values
 
     scored = series.pct_change(fill_method=None) * 100 if on == "change" else series
     scored = scored.dropna()
@@ -102,8 +73,6 @@ def detect_anomalies(
         })
 
     return {
-        **loaded.describe(),
-        "citation": loaded.citation(),
         "scored_on": on,
         "window": window,
         "z_threshold": z_threshold,
@@ -115,3 +84,63 @@ def detect_anomalies(
         "n_anomalies": len(anomalies),
         "anomalies": anomalies,
     }
+
+
+def detect_anomalies(
+    key: str,
+    source: str = "bulletin",
+    dataset: Optional[str] = None,
+    currency: Optional[str] = "total",
+    metric: Optional[str] = None,
+    on: str = "change",
+    window: int = 12,
+    z_threshold: float = 3.0,
+    iqr_multiplier: float = 1.5,
+) -> dict:
+    """Flag periods where a series' rolling z-score AND IQR fence both breach.
+
+    Args:
+        key, source, dataset, currency, metric: identify the series, passed
+            straight through to `load_series` -- `key` is an entity_key for the
+            bulletin and weekly corpora and a series_code for macro. Only for
+            a series the lakehouse actually holds; an external or derived
+            column has no lakehouse row to load and goes through
+            `detect_anomalies_in_series` instead.
+        on: "change" scores the period-over-period percent change (default);
+            "level" scores the raw values as loaded.
+        window: trailing window, in periods, for the rolling mean/std and
+            quartiles. A point needs a full window of history behind it to be
+            scored at all -- there is no partial-window comparison, since that
+            would compare a point against too few precedents to mean anything.
+        z_threshold: |z| at or above this flags the z-score check.
+        iqr_multiplier: fence width, in IQRs beyond Q1/Q3, for the IQR check.
+
+    Returns a JSON-serialisable dict: identifies the series and parameters
+    used, then `anomalies` -- one entry per period flagged by both checks,
+    each carrying the scored value, the raw level it came from, the z-score
+    and which side of the fence it breached.
+    """
+    loaded = load_series(key, source=source, dataset=dataset, currency=currency, metric=metric)
+    return {**loaded.describe(), "citation": loaded.citation(),
+            **_score(loaded.values, on, window, z_threshold, iqr_multiplier)}
+
+
+def detect_anomalies_in_series(
+    series: pd.Series,
+    describe: dict,
+    citation: dict,
+    on: str = "change",
+    window: int = 12,
+    z_threshold: float = 3.0,
+    iqr_multiplier: float = 1.5,
+) -> dict:
+    """Same method as `detect_anomalies`, for a series that is already in
+    hand rather than loadable from the lakehouse -- an `ingest_external`
+    column (its only copy lives on the artifact, not in any table) or a
+    `transform`-derived one.
+
+    `describe`/`citation` are carried through verbatim into the result
+    (mirroring `SeriesResult.describe()`/`.citation()`'s shape) so the caller
+    states what the series actually is instead of this function guessing.
+    """
+    return {**describe, "citation": citation, **_score(series, on, window, z_threshold, iqr_multiplier)}

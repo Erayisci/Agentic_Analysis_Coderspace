@@ -411,10 +411,23 @@ The model appears at exactly three points: classifying intent, emitting a typed 
 prose over numbers it did not compute. Everything else is Python. `agent/pipeline.py:run_turn` is
 the single entry point and returns the API payload; `Agent` holds one `Session` per conversation.
 
-**The plan DSL is the only language the model speaks.** Eight ops (`discover`, `fetch_series`,
-`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`) over a flat pydantic `Step`.
-Flat rather than a discriminated union on purpose: guided-decoding backends vary in `$ref`/`anyOf`
-support, and a schema a deployment silently mishandles fails with no error message.
+**The plan DSL is the only language the model speaks.** Nine ops (`discover`, `fetch_series`,
+`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_external`) over a flat
+pydantic `Step`. Flat rather than a discriminated union on purpose: guided-decoding backends vary in
+`$ref`/`anyOf` support, and a schema a deployment silently mishandles fails with no error message.
+
+**`ingest_external` adds a column; `read_url` only ever reads.** `read_url` extracts a document's
+text/preview into `session.facts["documents"]` for the composer to read and cite -- it cannot become
+a series, so nothing downstream (`transform`, `analyze`, `chart`) can touch it. `ingest_external`
+resolves one column of an external Excel/CSV URL into a real, unit-labelled column on the current
+turn's `AnalysisArtifact`, through `tools.external_series` (which shares `tools.web_url`'s fetch and
+SSRF guard rather than forking a second one). It is **session-scoped by construction**: nothing here
+writes to `data/lakehouse.duckdb`, which has exactly one writer (`backend.lakehouse.build`) and every
+other reader open `read_only=True` -- a live turn writing an unseen, demo-day file into the shared
+database on every question would risk corrupting or locking it for every other session. The column
+disappears when the session does, exactly like a `transform`-derived one. Its unit and temporal
+semantics are best-effort (an external file publishes neither the way the lakehouse's own sources do)
+and the citation says so with `unit_verified: false`.
 
 **MIA supports `response_format: json_schema`, and that changes the design.** Generation is
 constrained to the schema token by token, so a syntactically invalid plan is unreachable — plan
@@ -538,8 +551,10 @@ The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, th
 pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web
 URL, plus charts). Two tools are stubs the executor already routes to but nothing implements — **web
 search** needs an open backend (ddgs or a SearXNG container), and the **image path of the Web URL
-tool** raises `NotImplementedError` pending a call to `Unlimited-OCR`, which MIA does expose. Not yet
-written: the FastAPI service, the frontend, Docker, and deployment.
+tool** raises `NotImplementedError` pending a call to `Unlimited-OCR`, which MIA does expose. A ninth
+op, `ingest_external`, adds a column from an external Excel/CSV URL to the current session's table
+only (see "The agent layer" above) — a team-added capability, not one of the brief's six named tools.
+Not yet written: the FastAPI service, the frontend, Docker, and deployment.
 Two tests pin the reference scenario from opposite ends:
 `tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` proves the demo table is
 producible from the lakehouse in SQL alone, and

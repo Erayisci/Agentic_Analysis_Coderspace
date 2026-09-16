@@ -23,8 +23,9 @@ import time
 from typing import Any, Dict, Optional
 
 from ..tools import transforms as T
-from ..tools.anomaly import detect_anomalies
+from ..tools.anomaly import detect_anomalies, detect_anomalies_in_series
 from ..tools.charts import build_chart, chart_summary
+from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
 from .planner import Plan, Step
 from .state import AuditStep, ColumnLineage, Session
@@ -99,6 +100,7 @@ class Executor:
             "discover": self._discover, "fetch_series": self._fetch, "transform": self._transform,
             "analyze": self._analyze, "find_periods": self._find_periods,
             "read_url": self._read_url_step, "search": self._search_step, "chart": self._chart,
+            "ingest_external": self._ingest_external,
         }[step.op]
         return handler(step, plan)
 
@@ -175,10 +177,24 @@ class Executor:
         column = self._resolve_column(step.column)
         lineage = self.session.artifact.lineage[column]
         if step.method == "anomaly":
-            if not lineage.key:
-                raise ValueError(f"{column!r} is derived; run anomaly on a fetched series")
-            result = detect_anomalies(lineage.key, source=lineage.source,
-                                      dataset=(lineage.citation.get("filters") or {}).get("dataset"))
+            if lineage.source in ("bulletin", "weekly", "macro") and lineage.key:
+                # Re-fetch the full, unwindowed history from the lakehouse
+                # rather than the artifact's own (possibly plan.start/end
+                # windowed, or too-short) column, so the rolling baseline has
+                # more than what happens to be on screen to compare against.
+                result = detect_anomalies(lineage.key, source=lineage.source,
+                                          dataset=(lineage.citation.get("filters") or {}).get("dataset"))
+            else:
+                # A `transform`-derived or `ingest_external` column has no
+                # lakehouse row to go back to -- the artifact's own values
+                # are the only copy that exists, so score those directly.
+                series = self.session.artifact.frame[column].dropna()
+                result = detect_anomalies_in_series(
+                    series,
+                    describe={"source": lineage.source, "key": lineage.key, "name": lineage.label,
+                             "unit": lineage.unit, "temporal_semantics": lineage.temporal_semantics,
+                             "value_column": column},
+                    citation=lineage.citation)
         elif step.method == "changepoint":
             result = self._changepoint(column)
         elif step.method == "causality":
@@ -209,6 +225,24 @@ class Executor:
         self.session.facts.setdefault("documents", []).append(result)
         self.session.cite({"source": "url", "url": step.url, "kind": result.get("kind")})
         return f"read {step.url} ({result.get('kind')})"
+
+    def _ingest_external(self, step: Step, plan: Plan) -> str:
+        """Add one column of an external Excel/CSV file to THIS SESSION'S
+        table only -- see tools.external_series' module docstring for why
+        this never touches data/lakehouse.duckdb."""
+        series = ingest_external_series(
+            step.url, step.value_column, period_column=step.period_column,
+            sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last")
+        name = _column_name(step, re.sub(r"[^\w]+", "_", step.value_column))
+        self.session.artifact.add_column(name, series.values, ColumnLineage(
+            column=name, label=series.value_column, source=series.source, unit=series.unit,
+            temporal_semantics=series.temporal_semantics, key=series.key,
+            transform=f"ingest_external(period_column={series.period_column!r}, monthly_rule={series.monthly_rule!r})",
+            citation=series.citation()))
+        self.session.cite(series.citation())
+        return (f"{name}: {len(series.values)} points from {step.url} "
+                f"(value_column={series.value_column!r}, period_column={series.period_column!r}, "
+                f"unit={series.unit!r} unverified)")
 
     def _search_step(self, step: Step, plan: Plan) -> str:
         if self._search is None:
