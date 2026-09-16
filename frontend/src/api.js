@@ -33,3 +33,14 @@ export function getSession(sessionId) {
 export function resetSession(sessionId) {
   return request(`/session/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
+
+// Bypasses the planner: ingest_external needs a real model to preview a file
+// and decide value_column, which the deterministic fallback cannot do. This
+// exercises the same executor code directly, for demo/dev without a
+// Kloudeks key. See backend/api/main.py's debug_ingest_external docstring.
+export function debugIngestExternal(payload) {
+  return request("/debug/ingest_external", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}

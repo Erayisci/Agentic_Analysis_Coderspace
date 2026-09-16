@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, model_validator
 
 Intent = Literal["series_analysis", "followup", "url_analysis", "search", "metadata", "unsupported"]
 Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
-             "read_url", "search", "chart", "ingest_external"]
+             "read_url", "search", "chart", "ingest_external", "clear_table"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio"]
 Method = Literal["anomaly", "changepoint", "causality"]
 Source = Literal["bulletin", "weekly", "macro"]
@@ -41,6 +41,7 @@ REQUIRED: dict = {
     "search": ("query",),
     "chart": (),
     "ingest_external": ("url", "value_column"),
+    "clear_table": (),
 }
 
 
@@ -135,11 +136,16 @@ Adimlar:
   ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
   sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
   bulunur. Bu ekleme SADECE bu oturum icindir, kalici veritabanina hicbir sey yazilmaz.
+- clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. Kullanici "tabloyu temizle",
+  "sil", "bastan basla", "yeni tablo yap" gibi bir sey isterse kullan. Bu adim SADECE bu
+  oturumun bellekteki calisma tablosunu bosaltir -- lakehouse.duckdb'ye HICBIR ETKISI YOKTUR,
+  onu silme/degistirme imkani yoktur ve olmayacaktir.
 
 Kurallar:
 1. Anahtari (key) kesin bilmiyorsan once discover kullan. Anahtar UYDURMA.
 2. Mevcut tabloya ekleme yapiliyorsa ("bozmadan", "yeni sutun olarak") var olan sutunlari SILME,
-   sadece yeni fetch_series/transform/ingest_external adimlari ekle.
+   sadece yeni fetch_series/transform/ingest_external adimlari ekle. Kullanici acikca "sil"/
+   "temizle"/"bastan basla" DEMEDIKCE clear_table KULLANMA.
 3. Tarih araligini start/end alanlarina yaz (YYYY-MM-DD).
 4. Grafik istenmisse son adim chart olsun.
 5. BIRIME DIKKAT ET. Kredi/mevduat TUTARI istendiginde birimi "milyon TL" veya "bin TL"

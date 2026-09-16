@@ -28,7 +28,7 @@ from ..tools.charts import build_chart, chart_summary
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
 from .planner import Plan, Step
-from .state import AuditStep, ColumnLineage, Session
+from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
 MAX_URL_CHARS = 6000
 
@@ -100,7 +100,7 @@ class Executor:
             "discover": self._discover, "fetch_series": self._fetch, "transform": self._transform,
             "analyze": self._analyze, "find_periods": self._find_periods,
             "read_url": self._read_url_step, "search": self._search_step, "chart": self._chart,
-            "ingest_external": self._ingest_external,
+            "ingest_external": self._ingest_external, "clear_table": self._clear_table,
         }[step.op]
         return handler(step, plan)
 
@@ -269,6 +269,21 @@ class Executor:
         self.session.facts["chart"] = chart_summary(artifact, columns)
         self.session.facts["figure"] = figure
         return f"chart with {len(figure['data'])} trace(s)"
+
+    def _clear_table(self, step: Step, plan: Plan) -> str:
+        """Empty this session's working table -- and only this session's.
+
+        Replaces the in-memory AnalysisArtifact with a fresh, empty one and
+        drops the citations that described its (now gone) columns. This
+        touches nothing under data/: the lakehouse has exactly one writer
+        (backend.lakehouse.build, run offline) and every reader here -- this
+        included -- only ever opens it read_only. There is no code path from
+        this op, or any other, to a write against lakehouse.duckdb.
+        """
+        n_columns = len(self.session.artifact.column_names())
+        self.session.artifact = AnalysisArtifact()
+        self.session.citations = []
+        return f"cleared {n_columns} column(s); table is now empty"
 
     # -- helpers -----------------------------------------------------------
 

@@ -411,10 +411,18 @@ The model appears at exactly three points: classifying intent, emitting a typed 
 prose over numbers it did not compute. Everything else is Python. `agent/pipeline.py:run_turn` is
 the single entry point and returns the API payload; `Agent` holds one `Session` per conversation.
 
-**The plan DSL is the only language the model speaks.** Nine ops (`discover`, `fetch_series`,
-`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_external`) over a flat
-pydantic `Step`. Flat rather than a discriminated union on purpose: guided-decoding backends vary in
-`$ref`/`anyOf` support, and a schema a deployment silently mishandles fails with no error message.
+**The plan DSL is the only language the model speaks.** Ten ops (`discover`, `fetch_series`,
+`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_external`,
+`clear_table`) over a flat pydantic `Step`. Flat rather than a discriminated union on purpose:
+guided-decoding backends vary in `$ref`/`anyOf` support, and a schema a deployment silently
+mishandles fails with no error message.
+
+**`clear_table` empties the session's `AnalysisArtifact`, never the lakehouse.** It replaces the
+in-memory table with a fresh empty one and drops its citations -- there is no op, in this DSL or
+anywhere else in the codebase, that can reach `data/lakehouse.duckdb` with anything but a
+`read_only=True` connection, so a user asking to "clear" or "start over" can never touch the shared
+database. The planner is told to reach for this only on an explicit ask ("temizle", "sil", "baştan
+başla") -- never as a side effect of a normal follow-up.
 
 **`ingest_external` adds a column; `read_url` only ever reads.** `read_url` extracts a document's
 text/preview into `session.facts["documents"]` for the composer to read and cite -- it cannot become

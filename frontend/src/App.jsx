@@ -4,6 +4,8 @@ import ChatMessage from "./components/ChatMessage";
 import DataTable from "./components/DataTable";
 import ChartPanel from "./components/ChartPanel";
 import TrustPanel from "./components/TrustPanel";
+import IngestExternalPanel from "./components/IngestExternalPanel";
+import kkbLogo from "./assets/kkb-logo.png";
 import "./App.css";
 
 function sessionIdFromStorage() {
@@ -64,6 +66,11 @@ export default function App() {
     }
   }
 
+  function handleIngested(data) {
+    setLatest((prev) => ({ ...(prev || {}), ...data }));
+    setActiveTab("table");
+  }
+
   async function startNewChat() {
     try {
       await resetSession(sessionId);
@@ -78,9 +85,13 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div>
-          <h1>KKB Agentic Analytics</h1>
-          <p className="app-subtitle">Türkiye bankacılık &amp; makro verisi üzerinde doğal dilde analiz</p>
+        <div className="brand">
+          <img src={kkbLogo} alt="KKB Hackathon 2026" className="brand-logo" />
+          <div className="brand-divider" />
+          <div>
+            <h1>Agentic Analytics</h1>
+            <p className="app-subtitle">Türkiye bankacılık &amp; makro verisi üzerinde doğal dilde analiz</p>
+          </div>
         </div>
         <div className="header-right">
           {modelConfigured !== null ? (
@@ -134,6 +145,7 @@ export default function App() {
         </section>
 
         <aside className="side-panel">
+          <IngestExternalPanel sessionId={sessionId} onIngested={handleIngested} />
           <div className="tab-bar">
             <button className={activeTab === "table" ? "tab active" : "tab"} onClick={() => setActiveTab("table")}>Tablo</button>
             <button className={activeTab === "chart" ? "tab active" : "tab"} onClick={() => setActiveTab("chart")}>Grafik</button>

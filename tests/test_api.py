@@ -1,9 +1,13 @@
-"""Tests for the FastAPI service. No network call to Kloudeks: the app runs
-without KLOUDEKS_API_KEY set, exactly like a dev machine without the
-hackathon credential, so every turn here takes the deterministic path."""
+"""Tests for the FastAPI service. No network call to Kloudeks, ever, on any
+machine: the `client` fixture forces the app's agent to client=None right
+after startup, regardless of whether the local .env happens to carry a real
+KLOUDEKS_API_KEY. Without that override, a dev box that has added one for
+manual testing (see main.py's lifespan) would make every /ask test a slow,
+non-deterministic real call -- exactly what this suite exists to not do."""
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.agent.pipeline import Agent
 from backend.api.main import app
 from backend.core.config import DUCKDB_PATH
 
@@ -16,17 +20,29 @@ def needs_lakehouse():
 @pytest.fixture
 def client():
     with TestClient(app) as test_client:
+        # Overrides whatever the real lifespan built from the ambient
+        # environment (see module docstring) -- url_reader/web_search stay
+        # None too, so a URL in a test question can't reach the network either.
+        app.state.agent = Agent(client=None)
         yield test_client
-    # Each test gets a clean slate: sessions are process-lifetime, and tests
-    # in the same run would otherwise see each other's conversation state.
     app.state.agent.sessions.clear()
 
 
 def test_health_reports_whether_a_model_is_configured(client):
+    assert app.state.agent.client is None  # this fixture's guarantee
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["model_configured"] is False  # no KLOUDEKS_API_KEY in CI/dev
+    assert response.json()["model_configured"] is False
+
+    # /health only checks "is it None" -- but the lifespan's shutdown calls
+    # .close() on whatever's left in app.state.agent.client when the `with
+    # TestClient(...)` block above exits, so a bare object() would crash
+    # teardown; give the sentinel a no-op close().
+    from unittest.mock import MagicMock
+
+    app.state.agent.client = MagicMock()
+    assert client.get("/health").json()["model_configured"] is True
 
 
 def test_ask_returns_a_json_serialisable_payload_without_the_raw_session(client):

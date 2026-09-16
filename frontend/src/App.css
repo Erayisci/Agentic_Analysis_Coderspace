@@ -16,6 +16,24 @@
   flex-shrink: 0;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand-logo {
+  height: 40px;
+  width: auto;
+  display: block;
+}
+
+.brand-divider {
+  width: 1px;
+  height: 34px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
 .app-header h1 {
   margin: 0;
   font-size: 1.15rem;
@@ -255,6 +273,71 @@
 .badge-warn {
   background: #fdf1da;
   color: var(--amber);
+}
+
+/* ---------- ingest external (debug) ---------- */
+
+.ingest-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.ingest-toggle {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 10px 16px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--navy);
+  cursor: pointer;
+}
+
+.ingest-form {
+  padding: 4px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ingest-note {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: #fdf1da;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.ingest-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ingest-form input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.ingest-form input:focus {
+  outline: none;
+  border-color: var(--orange);
+}
+
+.ingest-error {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--red);
 }
 
 /* ---------- side panel tabs ---------- */

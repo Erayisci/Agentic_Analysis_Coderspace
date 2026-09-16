@@ -504,6 +504,28 @@ def test_ingest_external_bad_column_costs_a_step_not_the_turn(monkeypatch):
     assert session.artifact.is_empty()
 
 
+def test_clear_table_empties_the_artifact_and_its_citations():
+    """The only op whose job is to discard state -- must empty the session's
+    in-memory table and nothing else (no lakehouse connection is even opened
+    by this step, since it never touches anything under data/)."""
+    artifact = synthetic("a", n=12)
+    session = Session(artifact=artifact)
+    session.cite({"table": "t", "filters": {}})
+    assert not session.artifact.is_empty()
+    assert session.citations
+
+    plan = Plan(intent="metadata", steps=[Step(op="clear_table")])
+    Executor(session).run(plan)
+
+    assert session.audit[0].ok
+    assert session.artifact.is_empty()
+    assert session.citations == []
+
+
+def test_clear_table_needs_no_fields():
+    Step(op="clear_table")  # must not raise -- REQUIRED["clear_table"] is empty
+
+
 def test_a_hallucinated_key_is_resolved_by_discovery():
     """The most common plan defect: the model writes TP.TUFE where the corpus
     publishes TP.GENENDEKS.T1."""

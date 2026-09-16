@@ -23,7 +23,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from ..agent.executor import Executor
 from ..agent.pipeline import Agent
+from ..agent.planner import Plan, Step
+from ..agent.verifier import verify
 from ..core.config import kloudeks_api_key
 from ..llm import KloudeksClient
 from ..tools.web_url import read_url
@@ -68,6 +71,17 @@ class AskRequest(BaseModel):
     session_id: str = Field(default="default", description="conversation to continue, or a new one")
 
 
+class IngestExternalRequest(BaseModel):
+    url: str = Field(min_length=1)
+    value_column: str = Field(min_length=1, description="which column of the file holds the numbers")
+    session_id: str = "default"
+    as_name: Optional[str] = None
+    period_column: Optional[str] = None
+    sheet: Optional[str] = None
+    unit: Optional[str] = None
+    monthly_rule: str = "last"
+
+
 def _agent() -> Agent:
     return app.state.agent
 
@@ -84,6 +98,40 @@ def ask(request: AskRequest) -> Dict[str, Any]:
     DataFrame and is not JSON-serialisable."""
     result = _agent().ask(request.question.strip(), session_id=request.session_id)
     return {key: value for key, value in result.items() if key != "session"}
+
+
+@app.post("/debug/ingest_external")
+def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
+    """Run one ingest_external step directly, bypassing the planner.
+
+    ingest_external needs to see a file's columns before it can name
+    value_column -- normally the model previews the file with read_url first,
+    then decides. The deterministic fallback (no Kloudeks key) never does
+    this: it plans a single fixed template with no file-preview step, so it
+    can never emit this op from natural language alone. This endpoint exists
+    so the feature itself (fetch, parse, add to the session's table) can be
+    exercised end to end without a working Kloudeks key -- a deployment
+    with one exercises the same executor code through /ask instead, once the
+    model has actually chosen to call it.
+    """
+    session = _agent().session(request.session_id)
+    session.start_turn(f"[debug] ingest_external {request.url}")
+    step = Step(op="ingest_external", url=request.url, value_column=request.value_column,
+                as_name=request.as_name, period_column=request.period_column,
+                sheet=request.sheet, unit=request.unit, monthly_rule=request.monthly_rule)
+    plan = Plan(intent="url_analysis", steps=[step])
+    Executor(session, url_reader=_agent().url_reader, web_search=_agent().web_search).run(plan)
+    verification = verify(session)
+    return {
+        "table": {
+            "columns": session.artifact.column_names(),
+            "units": session.artifact.units(),
+            "rows": session.artifact.to_records(),
+        },
+        "citations": session.citations,
+        "verification": verification,
+        "audit": [a.to_dict() for a in session.audit],
+    }
 
 
 @app.get("/session/{session_id}")
