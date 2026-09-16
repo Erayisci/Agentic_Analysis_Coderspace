@@ -1,0 +1,7 @@
+"""Analytical tools the agent calls: pure functions over lakehouse series.
+
+Every function takes plain Python / pandas inputs and returns a JSON-serialisable
+dict, so it can be registered as an LLM tool without an adapter. None of them
+call a model: the agent decides *which* tool runs, the tool decides what the
+numbers are.
+"""
