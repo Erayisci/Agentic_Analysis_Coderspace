@@ -68,6 +68,50 @@ TROUBLE_DIVERGENCE_HARD_LOWER_PCT = 5.0
 TROUBLE_DIVERGENCE_HARD_UPPER_PCT = 30.0
 
 
+# --- Kloudeks / MIA -------------------------------------------------------
+# The hackathon brief allows open-weight models only, reached through the
+# Kloudeks platform. One OpenAI-compatible endpoint serves all three; nothing
+# outside backend/llm may import an LLM SDK or name a model id.
+KLOUDEKS_BASE_URL = "https://mia.csp.kloudeks.com/v1"
+KLOUDEKS_CHAT_MODEL = "kkbhackathon2026/Qwen3.8-27B"
+KLOUDEKS_EMBEDDING_MODEL = "kkbhackathon2026/Qwen3-Embedding-8B"
+KLOUDEKS_OCR_MODEL = "kkbhackathon2026/Unlimited-OCR"
+
+# Qwen3 is a reasoning model and thinks before answering. Measured against this
+# endpoint: a trivial prompt costs 63 completion tokens with thinking and 2
+# without. Planning is a schema-filling task where the server's guided decoding
+# already guarantees the shape, so thinking buys nothing and costs latency;
+# narrative composition is where it earns its keep. Per-call override exists.
+KLOUDEKS_TIMEOUT_SECONDS = 120.0
+
+
+def _read_dotenv(name: str) -> str:
+    """One key from the gitignored repo-root .env, or ''."""
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            return value.strip().strip("'\"")
+    return ""
+
+
+def kloudeks_api_key() -> str:
+    """The MIA/Kloudeks API key, from the environment or the gitignored `.env`.
+
+    Never logged and never written into code: the key is a credential, and the
+    platform guide is explicit that it must not reach a repository.
+    """
+    key = os.environ.get("KLOUDEKS_API_KEY", "").strip() or _read_dotenv("KLOUDEKS_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "KLOUDEKS_API_KEY is not set. Export it or put `KLOUDEKS_API_KEY=...` in the\n"
+            "repo-root .env (gitignored)."
+        )
+    return key
+
+
 def evds_api_key() -> str:
     """The EVDS web-service key, from the environment or the gitignored `.env`.
 
