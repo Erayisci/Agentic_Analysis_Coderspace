@@ -48,7 +48,7 @@ assert not any(name.startswith(('crawl4ai', 'playwright', 'backend.extensions'))
 
         with patch.object(client, "_request_json", side_effect=request) as http:
             tools = get_tools({"WEB_TOOLS_ENABLED": "true"})
-            self.assertEqual(set(tools), {"search_web", "read_url"})
+            self.assertEqual(set(tools), {"search_web", "read_url", "read_web_url"})
             self.assertEqual(tools["search_web"]("bank")["status"], "ok")
             self.assertEqual(tools["read_url"]("https://example.com")["status"], "ok")
             self.assertEqual(http.call_args.args[2], {"url": "https://example.com/", "max_chars": 20000})

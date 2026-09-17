@@ -18,6 +18,7 @@ class Collector:
         self.maximum = request["max_chars"]
         self.parts, self.sections, self.warnings = [], [], [WARNING]
         self.original, self.returned, self.limited = 0, 0, False
+        self.processing_errors = []
         self.result = {"requested_url": request["url"], **metadata, "fetched_at": timestamp(),
                        "kind": request["kind"], "source_trust": "untrusted_external"}
 
@@ -39,6 +40,9 @@ class Collector:
         section = {"location": location, "method": method, "text": selected}
         if rows is not None and len(rendered) <= room:
             section["rows"] = rows
+            section["validation"] = {"status": "unvalidated", "ready_for_calculation": False,
+                                     "rectangular": len({len(row) for row in rows}) <= 1,
+                                     "has_empty_cells": any(value == "" for row in rows for value in row)}
         self.sections.append(section)
 
     def limit(self, message):
@@ -48,10 +52,15 @@ class Collector:
 
     def finish(self):
         content = "".join(self.parts)
-        return {**self.result, "status": "partial" if self.limited else ("ok" if content else "empty"),
+        if self.processing_errors and not content:
+            from .asset_common import failure
+            return {**self.result, **failure(self.processing_errors[0]["code"], self.result["requested_url"]),
+                    "final_url": self.result.get("final_url"), "processing_errors": self.processing_errors}
+        return {**self.result, "status": "partial" if self.limited or self.processing_errors else ("ok" if content else "empty"),
                 "content": content, "sections": self.sections, "original_chars": self.original,
                 "returned_chars": len(content), "max_chars": self.maximum, "truncated": self.limited,
-                "warnings": self.warnings, "error": None, "cache": {"hit": False, "age_seconds": 0}}
+                "warnings": self.warnings, "processing_errors": self.processing_errors,
+                "error": None, "cache": {"hit": False, "age_seconds": 0}}
 
 
 def inspect_zip(path, config):
@@ -87,7 +96,29 @@ def detect(path, metadata, config):
         if b"<html" in signature.lower() or b"<!doctype" in signature.lower() or b"\x00" in signature[:10] and not signature.startswith((b"\xff\xfe", b"\xfe\xff")):
             raise AssetFailure("unsupported_content_type")
         return "csv"
+    if media in {"text/plain", "text/markdown", "application/json", "text/json"} or (
+            media == "application/octet-stream" and metadata["final_url"].split("?", 1)[0].lower().endswith((".txt", ".md", ".json"))):
+        return "text"
     raise AssetFailure("unsupported_content_type")
+
+
+def decode_text(raw, metadata):
+    """Honor a declared charset or BOM; never silently replace unreadable digits."""
+    import codecs
+    encoding = metadata.get("charset") or "utf-8-sig"
+    if raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        encoding = "utf-32"
+    elif raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"
+    elif raw.startswith(codecs.BOM_UTF8):
+        encoding = "utf-8-sig"
+    try:
+        text = raw.decode(encoding, errors="strict")
+    except (LookupError, UnicodeError):
+        raise AssetFailure("parse_error") from None
+    if any(ord(char) < 32 and char not in "\n\r\t\f" for char in text):
+        raise AssetFailure("unsupported_content_type")
+    return text
 
 
 def cell(value):
@@ -134,24 +165,34 @@ class Interpreter:
     def __init__(self, request, config, proxy, collector):
         self.request, self.config, self.proxy, self.collector = request, config, proxy, collector
         self.calls, self.ocr_pages = 0, 0
+        self.model_failed = False
 
     def model(self, images, locations, *, ocr):
         from backend.model_clients.kloudeks import KloudeksClient, ModelFailure
         from .asset_cache import AssetStore
+        if self.model_failed:
+            return False
         if self.calls >= self.config.model_max_calls_per_read:
             self.collector.limit("The per-read model call limit was reached.")
             return False
-        if not self.config.kloudeks_api_key:
-            raise AssetFailure("model_not_configured")
-        AssetStore(self.config).consume_model_call()
-        self.calls += 1
-        client = KloudeksClient(self.config.kloudeks_base_url, self.config.kloudeks_api_key, self.proxy,
-                               timeout=min(60, self.config.asset_timeout_seconds))
         try:
+            if not self.config.kloudeks_api_key:
+                raise AssetFailure("model_not_configured")
+            AssetStore(self.config).consume_model_call()
+            self.calls += 1
+            client = KloudeksClient(self.config.kloudeks_base_url, self.config.kloudeks_api_key, self.proxy,
+                                   timeout=min(50, self.config.asset_timeout_seconds - 2))
             result = client.interpret(images, model=self.config.kloudeks_ocr_model if ocr else self.config.kloudeks_vision_model,
                                       max_tokens=self.config.model_max_tokens, question=self.request["question"], ocr=ocr)
-        except ModelFailure as error:
-            raise AssetFailure(error.code) from None
+        except (ModelFailure, AssetFailure) as error:
+            from .asset_common import failure
+            self.model_failed = True
+            detail = failure(error.code)["error"] | {"operation": "ocr" if ocr else "vision", "locations": locations}
+            if getattr(error, "http_status", None) is not None:
+                detail["http_status"] = error.http_status
+            self.collector.processing_errors.append(detail)
+            self.collector.warnings.append("Optional model interpretation failed; available extracted evidence is preserved. " + detail["message"])
+            return False
         self.collector.add(result["text"], ", ".join(locations), "mia_ocr" if ocr else "mia_vision")
         self.collector.result["model"] = result["model"]
         self.collector.warnings.append("Model-derived text may contain recognition or interpretation errors; verify against the source.")
@@ -295,8 +336,11 @@ def extract_image(path, request, config, collector, interpreter):
 
 def extract(path, request, metadata, config, proxy):
     kind = detect(path, metadata, config)
-    if (request["kind"] == "image") != (kind == "image"):
+    if request["kind"] != "auto" and (request["kind"] == "image") != (kind == "image"):
         raise AssetFailure("unsupported_content_type")
+    if not (config.images_enabled if kind == "image" else config.documents_enabled):
+        raise AssetFailure("feature_disabled")
+    request = {**request, "kind": "image" if kind == "image" else "document"}
     collector = Collector(request, {**metadata, "format": kind})
     interpreter = Interpreter(request, config, proxy, collector)
     if kind == "pdf":
@@ -304,15 +348,15 @@ def extract(path, request, metadata, config, proxy):
     elif kind == "image":
         extract_image(path, request, config, collector, interpreter)
     elif kind == "csv":
-        raw = Path(path).read_bytes()
-        encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-        text = raw.decode(encoding)
+        text = decode_text(Path(path).read_bytes(), metadata)
         try:
             dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
         csv.field_size_limit(1048576)
         add_rows(collector, csv.reader(io.StringIO(text), dialect), "CSV rows starting at 1", config)
+    elif kind == "text":
+        collector.add(decode_text(Path(path).read_bytes(), metadata), "Text", "plain_text")
     elif kind == "xlsx":
         import openpyxl
         book = openpyxl.load_workbook(io.BytesIO(Path(path).read_bytes()), read_only=True, data_only=True, keep_links=False)

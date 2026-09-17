@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.client
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -186,6 +187,7 @@ def format_result(request, metadata, markdown, *, partial=False):
         "requested_url": request["url"], "final_url": metadata["url"],
         "title": metadata.get("title"), "content": content,
         "content_type": metadata["content_type"],
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "fingerprint_kind": "html_text",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "truncated": original_chars > len(content), "original_chars": original_chars,
         "returned_chars": len(content), "max_chars": request["max_chars"],
@@ -453,11 +455,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         config = self.server.asset_config
         self._json(200 if ready else 503, {"status": "ok" if ready else "unavailable", "service": "crawler",
                    "capabilities": {name: getattr(config, name + "_enabled") for name in
-                                    ("documents", "images", "links", "ocr", "vision")},
+                                    ("documents", "images", "links", "ocr", "vision", "agent")},
+                   "agent_limits": {name: getattr(config, name) for name in (
+                       "agent_max_tool_calls", "agent_max_model_calls", "agent_max_context_chars", "model_max_calls_per_read",
+                       "agent_max_sources", "agent_max_download_bytes", "agent_max_evidence_bytes", "agent_timeout_seconds", "asset_max_bytes")},
                    "vision_configured": bool(config.kloudeks_api_key)})
 
     def do_POST(self):
-        if self.path not in {"/read", "/asset"}:
+        if self.path not in {"/read", "/asset", "/agent-model"}:
             self.send_error(404)
             return
         if not self.server.read_slots.acquire(blocking=False):
@@ -474,11 +479,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise ReadFailure("invalid_request")
-            if self.path == "/asset":
+            if self.path in {"/asset", "/agent-model"}:
                 from . import asset_worker
                 from .asset_common import AssetFailure, failure, normalize
                 try:
-                    request = normalize(json.loads(raw), self.server.asset_config)
+                    if self.path == "/agent-model":
+                        from .agent_protocol import normalize_model_request
+                        request = normalize_model_request(json.loads(raw), self.server.asset_config)
+                    else:
+                        request = normalize(json.loads(raw), self.server.asset_config)
                 except AssetFailure as error:
                     self._json(200, failure(error.code))
                     return

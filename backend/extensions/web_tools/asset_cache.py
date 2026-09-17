@@ -28,7 +28,7 @@ class AssetStore:
         policy = asdict(self.config)
         policy.pop("kloudeks_api_key", None)
         request = {k: v for k, v in request.items() if k != "refresh"}
-        return hashlib.sha256(json.dumps(["assets-v1", request, policy], sort_keys=True).encode()).hexdigest()
+        return hashlib.sha256(json.dumps(["assets-v2", request, policy], sort_keys=True).encode()).hexdigest()
 
     def get(self, key):
         now = time.time()

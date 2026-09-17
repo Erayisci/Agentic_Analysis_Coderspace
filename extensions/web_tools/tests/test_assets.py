@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 import http.client
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -29,7 +30,7 @@ class AssetPolicyTests(unittest.TestCase):
 import sys
 from backend.tools import get_tools
 assert get_tools({'WEB_TOOLS_ENABLED': 'false', 'WEB_DOCUMENTS_ENABLED': 'true'}) == {}
-assert set(get_tools({'WEB_TOOLS_ENABLED': 'true'})) == {'search_web', 'read_url'}
+assert set(get_tools({'WEB_TOOLS_ENABLED': 'true'})) == {'search_web', 'read_url', 'read_web_url'}
 tools = get_tools({'WEB_TOOLS_ENABLED': 'true', 'WEB_DOCUMENTS_ENABLED': 'true', 'WEB_IMAGES_ENABLED': 'true', 'WEB_LINKS_ENABLED': 'true'})
 assert {'read_document', 'read_image', 'get_page_assets'} <= tools.keys()
 assert not any(name in sys.modules for name in ('pypdf', 'pdfplumber', 'openpyxl', 'PIL', 'playwright', 'crawl4ai'))
@@ -135,6 +136,57 @@ assert not any(name in sys.modules for name in ('pypdf', 'pdfplumber', 'openpyxl
                              connection_factory=Mock(return_value=connection))
                 connection.close.assert_called_once()
 
+    def test_download_fingerprint_covers_full_bytes_and_worker_uses_lower_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw = b"column,value\nMarch,12345\n"
+            headers = {"Content-Type": "text/csv", "Content-Length": str(len(raw))}
+            response = Mock(status=200)
+            response.getheader.side_effect = lambda key, default=None: headers.get(key, default)
+            response.read.side_effect = [raw[:10], raw[10:], b""]
+            connection = Mock()
+            connection.getresponse.return_value = response
+            path = Path(directory) / "asset"
+            metadata = download("https://example.com/file", "http://egress:3128", path, 1024, 1,
+                                connection_factory=Mock(return_value=connection))
+            self.assertEqual(metadata["content_sha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(metadata["downloaded_bytes"], len(raw))
+            self.assertEqual(path.read_bytes(), raw)
+        with patch("backend.extensions.web_tools.asset_download.download", return_value=metadata) as fetch, patch(
+                "backend.extensions.web_tools.asset_extract.extract", return_value={"status": "ok"}):
+            asset_worker.process({"url": "https://example.com/a.pdf", "kind": "auto", "max_bytes": 2048},
+                                 "http://egress:3128", AssetConfig(documents_enabled=True))
+        self.assertEqual(fetch.call_args.args[3], 2048)
+
+    def test_research_endpoint_checks_server_flag_and_context_limit(self):
+        with BoundedHTTPServer(("127.0.0.1", 0), WorkerHandler) as server:
+            server.read_slots = threading.BoundedSemaphore(2)
+            server.asset_slots = threading.BoundedSemaphore(1)
+            server.proxy = "http://egress:3128"
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for enabled, context, expected in ((False, {}, "feature_disabled"),
+                                                    (True, {"text": "x" * 2100}, "invalid_request"),
+                                                    (True, {}, None)):
+                    server.asset_config = AssetConfig(agent_enabled=enabled, agent_max_context_chars=2000)
+                    connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+                    with patch.object(asset_worker, "run_isolated", return_value={"status": "ok"}) as run:
+                        try:
+                            connection.request("POST", "/agent-model", body=json.dumps({"question": "question", "context": context}),
+                                               headers={"Content-Type": "application/json"})
+                            result = json.loads(connection.getresponse().read())
+                            if expected:
+                                self.assertEqual(result["error"]["code"], expected)
+                                run.assert_not_called()
+                            else:
+                                self.assertEqual(run.call_args.args[0]["operation"], "agent-model")
+                                self.assertEqual(result["status"], "ok")
+                        finally:
+                            connection.close()
+            finally:
+                server.shutdown()
+                thread.join()
+
     def test_cache_expiry_eviction_and_shared_model_budget(self):
         with tempfile.TemporaryDirectory() as directory:
             config = AssetConfig(asset_cache_ttl_seconds=60, asset_cache_max_bytes=1048576, model_max_calls_per_hour=1)
@@ -188,12 +240,26 @@ class MIAProtocolTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         payload = json.loads(connection.request.call_args.kwargs["body"])
         self.assertNotIn("vllm_xargs", payload)
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
         for status in (302, 401, 403, 429, 500):
             client, connection = self.connection(status=status)
             with self.subTest(status=status), self.assertRaises(ModelFailure) as error:
                 client.interpret([b"image"], model="kkbhackathon2026/Qwen3.8-27B", max_tokens=128)
             self.assertNotIn("private-test-key", str(error.exception))
             self.assertEqual(connection.request.call_count, 1)
+
+    def test_empty_reasoning_only_response_and_http_diagnostics(self):
+        client, connection = self.connection({"choices": [{"message": {"content": "", "reasoning_content": "private reasoning"}, "finish_reason": "length"}]})
+        with self.assertRaises(ModelFailure) as error:
+            client.chat([{"role": "user", "content": "hello"}], model="kkbhackathon2026/Qwen3.8-27B", max_tokens=128)
+        self.assertEqual(error.exception.code, "model_output_limit")
+        self.assertNotIn("private reasoning", str(error.exception))
+        client, connection = self.connection(status=401)
+        with self.assertRaises(ModelFailure) as error:
+            client.chat([], model="kkbhackathon2026/Qwen3.8-27B", max_tokens=128)
+        self.assertEqual(error.exception.http_status, 401)
+        self.assertEqual(error.exception.code, "model_access_denied")
+        connection.getresponse.return_value.read.assert_not_called()
 
 
 if __name__ == "__main__":

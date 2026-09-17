@@ -9,19 +9,41 @@ class AssetTools:
     def __init__(self, web, config):
         self.web, self.config = web, config
 
+    def read_web_url(self, url, max_chars=None, max_pages=None, start_page=1,
+                     ocr=None, vision=False, question="", refresh=False, *, max_bytes=None):
+        """Route HTML, documents, text and images by response type and file bytes."""
+        payload = {"url": url, "kind": "auto", "start_page": start_page,
+                   "vision": vision, "question": question, "refresh": refresh}
+        for name, value in (("max_chars", max_chars), ("max_pages", max_pages), ("ocr", ocr), ("max_bytes", max_bytes)):
+            if value is not None:
+                payload[name] = value
+        try:
+            request = normalize(payload, self.config, check_enabled=False)
+        except AssetFailure as error:
+            return failure(error.code)
+        # The HTML reader checks the actual response and every redirect. Only a
+        # type mismatch dispatches to a file reader; never retry arbitrary errors.
+        page = self.web.read_url(request["url"], max_chars=request["max_chars"])
+        if page.get("status") != "error":
+            return {**page, "kind": "html", "format": "html", "sections": [
+                {"location": "Webpage", "method": "html_text", "text": page.get("content", "")}]}
+        if (page.get("error") or {}).get("code") != "unsupported_content_type":
+            return page
+        return self._read(url, "auto", max_chars, max_pages, start_page, ocr, vision, question, refresh, max_bytes=max_bytes)
+
     def read_document(self, url, max_chars=None, max_pages=None, start_page=1,
                       ocr=None, vision=False, question="", refresh=False):
-        """Extract a bounded public PDF, XLSX/XLS, CSV or DOCX; cite section locations."""
+        """Extract a bounded public PDF, XLSX/XLS, CSV, DOCX or text; cite locations."""
         return self._read(url, "document", max_chars, max_pages, start_page, ocr, vision, question, refresh)
 
     def read_image(self, url, ocr=None, vision=False, question="", max_chars=None, refresh=False):
         """Read a public PNG/JPEG/WebP/TIFF using allowed OCR/vision; no arbitrary model settings."""
         return self._read(url, "image", max_chars, 1, 1, ocr, vision, question, refresh)
 
-    def _read(self, url, kind, maximum, pages, start, ocr, vision, question, refresh):
+    def _read(self, url, kind, maximum, pages, start, ocr, vision, question, refresh, *, max_bytes=None):
         payload = {"url": url, "kind": kind, "start_page": start, "vision": vision,
                    "question": question, "refresh": refresh}
-        for key, value in (("max_chars", maximum), ("max_pages", pages), ("ocr", ocr)):
+        for key, value in (("max_chars", maximum), ("max_pages", pages), ("ocr", ocr), ("max_bytes", max_bytes)):
             if value is not None:
                 payload[key] = value
         requested = None
@@ -41,7 +63,10 @@ class AssetTools:
                 self.web._slots.release()
             if result.get("status") == "error":
                 error = result.get("error", {})
-                return failure(error.get("code") if isinstance(error, dict) else "parse_error", requested)
+                safe = failure(error.get("code") if isinstance(error, dict) else "parse_error", requested)
+                if isinstance(error, dict) and type(error.get("http_status")) is int and 100 <= error["http_status"] <= 599:
+                    safe["error"]["http_status"] = error["http_status"]
+                return safe
             if (result.get("status") not in {"ok", "empty", "partial"}
                     or not isinstance(result.get("content"), str) or not isinstance(result.get("sections"), list)
                     or len(result["content"]) > request["max_chars"]):

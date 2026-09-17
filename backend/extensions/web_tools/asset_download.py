@@ -3,8 +3,10 @@
 import asyncio
 import base64
 import http.client
+import hashlib
 import ssl
 import time
+from email.message import Message
 from urllib.parse import urljoin, urlsplit
 
 from .asset_common import AssetFailure
@@ -112,6 +114,7 @@ def download(url, proxy, destination, maximum, timeout, connection_factory=None)
             if encoding not in {"", "identity"}:
                 raise AssetFailure("unsupported_content_type")
             total = 0
+            digest = hashlib.sha256()
             with open(destination, "wb") as output:
                 while True:
                     remaining = deadline - time.monotonic()
@@ -126,10 +129,14 @@ def download(url, proxy, destination, maximum, timeout, connection_factory=None)
                     if total > maximum:
                         raise AssetFailure("asset_too_large")
                     output.write(block)
+                    digest.update(block)
             if total == 0 or (length is not None and total != int(length)):
                 raise AssetFailure("upstream_error")
+            media = Message()
+            media["Content-Type"] = response.getheader("Content-Type", "application/octet-stream")
             return {"final_url": url, "downloaded_bytes": total,
-                    "content_type": response.getheader("Content-Type", "").split(";", 1)[0].lower()}
+                    "content_sha256": digest.hexdigest(), "fingerprint_kind": "file_bytes",
+                    "content_type": media.get_content_type(), "charset": media.get_content_charset()}
         except ssl.SSLCertVerificationError as error:
             if error.verify_code not in {20, 21} or origin in contexts or connection_factory is not None:
                 raise AssetFailure("certificate_error") from None

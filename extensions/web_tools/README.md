@@ -1,11 +1,11 @@
-# Optional web tools: search, pages, files, OCR, and vision
+# Optional web tools: search, URL reading, OCR, vision, and cited research
 
 This extension adds `search_web` (your own SearXNG instance) and `read_url`
 (local Crawl4AI with Chromium). `WEB_TOOLS_ENABLED=false` is the default.
 The existing ingestion commands, lakehouse build, dependencies, data, and tests keep
 their original behavior. No web service or browser is required for the baseline.
 
-For optional PDF, XLSX/XLS, CSV, DOCX, image discovery, local OCR, and Kloudeks MIA
+For optional PDF, XLSX/XLS, CSV, DOCX, TXT/Markdown/JSON, image discovery, local OCR, and Kloudeks MIA
 vision/OCR, follow the [step-by-step file and image guide](ASSETS.md). Those features
 have independent switches, limits, and an additional isolated Docker image target.
 
@@ -13,6 +13,11 @@ have independent switches, limits, and an additional isolated Docker image targe
 
 | Your goal | Read |
 | --- | --- |
+| Set up the extension and use it from an existing app | [Developer quick start](DEVELOPER_GUIDE.md) — baseline isolation, setup, Python integration and troubleshooting |
+| Instruct an AI bot or implement its tool dispatch | [AI integration guide](AI_USAGE.md) — routing policy, validated calls and evidence contracts |
+| Run the full search → read → cited answer demonstration | [Demo guide](DEMO.md) — self-contained commands and output files |
+| Research and compare several sources | [Multi-source guide](MULTISOURCE.md) — coverage, conflicts, retained evidence and question-level limits |
+| Connect the team's existing agent and compare branches | [Team integration](TEAM_INTEGRATION.md) — adapter and table-validation contract |
 | Test the tools yourself, from Docker to saved results | [Testing walkthrough](TESTING.md) — commands, expected output, cache/limit checks, and shutdown |
 | Understand which tool to call and connect an AI agent | [AI and developer reference](AI_USAGE.md) — signatures, result contracts, evidence handling, and Python example |
 | Configure file/image formats, OCR, MIA, and all resource limits | [File/image configuration guide](ASSETS.md) |
@@ -32,9 +37,12 @@ callers use an explicit configuration mapping or process environment.
 | --- | --- | --- | --- |
 | `search` | `search_web` | Ranked URLs, titles, snippets, and search engine availability | Master switch only |
 | `read` | `read_url` | HTML page text as Markdown, title, source URL, and fetch time | Master switch only |
+| `url` | `read_web_url` | Automatically route HTML, documents, text and images | Master switch; detected file type also needs its capability enabled |
 | `assets` | `get_page_assets` | File links and image URLs on a page; linked assets are not downloaded | `WEB_LINKS_ENABLED=true` |
-| `document` | `read_document` | PDF text/tables, XLSX/XLS/CSV rows, DOCX paragraphs/tables | `WEB_DOCUMENTS_ENABLED=true` |
+| `document` | `read_document` | PDF text/tables, XLSX/XLS/CSV rows, DOCX, TXT/Markdown/JSON text | `WEB_DOCUMENTS_ENABLED=true` |
 | `image` | `read_image` | Image metadata; text with OCR; interpretation with vision | `WEB_IMAGES_ENABLED=true` |
+| `ask` | `research(question, ...)` | Bounded tool selection, answer, citations, trace and usage | `WEB_AGENT_ENABLED=true`, worker MIA key |
+| `schemas` | `tool_schemas(config, ...)` | Framework-neutral function schemas | Master switch |
 
 Every callable also requires `WEB_TOOLS_ENABLED=true`. OCR is separately allowed
 by `WEB_OCR_ENABLED`; vision requires `WEB_VISION_ENABLED` **and** `--vision` on
@@ -49,16 +57,16 @@ is in pixels. Keep source URLs and page/sheet locations with the answer. See
 
 ## Where this connects
 
-The current project contains the deterministic ingestion/lakehouse pipeline and
-these optional tools. There is **no implemented agent loop or application API**
-that automatically chooses tools and answers a question. LangGraph/application
-orchestration is still planned in `Launch.MD`. Running a CLI command produces JSON;
-it does not start an AI research conversation.
+The optional `ask` command now selects web tools and produces an answer with source
+IDs, URLs and page/section locations. It is a bounded, single-question web research
+runner, not the team's full multi-turn analytical application. It uses ordinary
+MIA chat with strictly validated JSON decisions; it does not require a vendor SDK.
+It refuses unknown tools and citations to sources that were never read.
 
 `backend.tools.get_tools()` is a small new integration seam: a mapping of tool
 names to synchronous Python callables. It returns an empty mapping while disabled,
 before importing extension code. Future orchestration can register these callables
-alongside its own tools. There is no agent framework here. Optional image/OCR
+alongside its own tools. The optional runner adds no agent-framework dependency. Image/OCR
 interpretation uses one new Kloudeks client abstraction under `backend/model_clients/`;
 the existing analytical spreadsheet parsers remain unchanged.
 
@@ -68,7 +76,8 @@ Deployment, tests, configuration, and these instructions live here.
 
 ```mermaid
 flowchart LR
-    Caller["Person using CLI / future Python agent"] --> Tools["backend.tools callables"]
+    Caller["Person using CLI / Python agent"] --> Tools["backend.tools callables"]
+    Research["Optional ask: bounded MIA research"] --> Tools
     Tools --> Search["SearXNG: search results"]
     Tools --> Worker["Isolated crawler worker"]
     Worker --> HTML["Crawl4AI: HTML text and links"]
@@ -78,7 +87,8 @@ flowchart LR
     HTML --> Evidence
     Files --> Evidence
     Model --> Evidence
-    Evidence --> Answer["Human or future agent checks evidence and writes answer"]
+    Evidence --> Research
+    Research --> Answer["Answer + source citations + trace"]
 ```
 
 Website access and model requests from the worker pass through the validating

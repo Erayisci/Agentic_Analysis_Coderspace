@@ -85,6 +85,19 @@ class AssetIntegrationTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertEqual(result["sections"][0]["location"], "Page 2")
 
+    def test_pdf_model_failure_keeps_native_text_and_metadata(self):
+        from backend.model_clients.kloudeks import KloudeksClient, ModelFailure
+        from backend.extensions.web_tools.asset_cache import AssetStore
+        config = replace(self.config, vision_enabled=True, kloudeks_api_key="fixture-only")
+        with patch.object(AssetStore, "consume_model_call"), patch.object(
+                KloudeksClient, "interpret", side_effect=ModelFailure("model_timeout")):
+            result = self.parse(self.text_pdf(), "report.pdf", config=config, max_pages=1, vision=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("revenue 12345 TRY", result["content"])
+        self.assertEqual(result["model_calls"], 1)
+        self.assertEqual(result["processing_errors"][0]["code"], "model_timeout")
+        self.assertIsNone(result["error"])
+
     def test_pdf_table_retains_rows_and_source_page(self):
         from pypdf import PdfReader, PdfWriter
         from pypdf.generic import NameObject, DecodedStreamObject

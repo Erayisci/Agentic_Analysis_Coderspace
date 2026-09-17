@@ -158,7 +158,7 @@ def check(env):
                 requested = AssetConfig.from_environ(env)
                 capabilities = payload.get("capabilities", {})
                 checks[service]["capabilities"] = capabilities
-                for name in ("documents", "images", "links", "ocr", "vision"):
+                for name in ("documents", "images", "links", "ocr", "vision", "agent"):
                     if getattr(requested, name + "_enabled") and not capabilities.get(name):
                         raise ValueError(f"{name} is disabled in the running service; run web-tools start with the same settings")
         except (ToolFailure, ValueError) as error:
@@ -191,7 +191,7 @@ def main(argv=None):
         "as part of the Crawl4AI project (https://github.com/unclecode/crawl4ai)."
     ))
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("setup", "start", "check", "logs", "stop", "test", "browser-test", "asset-test", "config"):
+    for name in ("setup", "start", "check", "logs", "stop", "test", "browser-test", "asset-test", "config", "schemas"):
         sub.add_parser(name)
     search_parser = sub.add_parser("search")
     search_parser.add_argument("query")
@@ -204,7 +204,7 @@ def main(argv=None):
     read_parser.add_argument("--max-chars", type=int)
     assets_parser = sub.add_parser("assets", help="Discover public document/image links without downloading them")
     assets_parser.add_argument("url")
-    for name in ("document", "image"):
+    for name in ("document", "image", "url"):
         parser_asset = sub.add_parser(name)
         parser_asset.add_argument("url")
         parser_asset.add_argument("--max-chars", type=int)
@@ -212,11 +212,18 @@ def main(argv=None):
         parser_asset.add_argument("--vision", action="store_true")
         parser_asset.add_argument("--question", default="")
         parser_asset.add_argument("--refresh", action="store_true")
-        if name == "document":
+        if name in {"document", "url"}:
             parser_asset.add_argument("--max-pages", type=int)
             parser_asset.add_argument("--start-page", type=int, default=1)
     smoke_parser = sub.add_parser("smoke")
     smoke_parser.add_argument("query", nargs="?", default="SearXNG documentation")
+    ask_parser = sub.add_parser("ask", help="Bounded optional MIA web research with source citations")
+    ask_parser.add_argument("question")
+    ask_parser.add_argument("--url", action="append", default=[], help="Starting URL; repeat to read several sources")
+    ask_parser.add_argument("--require", action="append", dest="requirements", help="Required question to cover; repeat as needed")
+    ask_parser.add_argument("--min-sources", type=int, default=1, help="Minimum distinct cited documents (not proof of independence)")
+    ask_parser.add_argument("--allow-vision", action="store_true")
+    ask_parser.add_argument("--max-tool-calls", type=int)
     args = parser.parse_args(argv)
     try:
         if args.command == "setup":
@@ -256,22 +263,30 @@ def main(argv=None):
         if args.command == "smoke":
             return smoke(env, args.query)
         tools = tool_mapping(env)
-        if args.command == "search":
+        if args.command == "schemas":
+            from backend.extensions.web_tools.agent_protocol import tool_schemas
+            emit(tool_schemas(assets_config, allow_vision=assets_config.vision_enabled))
+            return 0
+        if args.command == "ask":
+            from backend.extensions.web_tools.research import research
+            result = research(args.question, environ=env, urls=args.url, allow_vision=args.allow_vision,
+                              max_tool_calls=args.max_tool_calls, requirements=args.requirements, min_sources=args.min_sources)
+        elif args.command == "search":
             result = tools["search_web"](args.query, args.max_results, args.language, args.time_range, args.domains)
         elif args.command == "read":
             result = tools["read_url"](args.url, args.max_chars)
         else:
-            tool = {"document": "read_document", "image": "read_image", "assets": "get_page_assets"}[args.command]
+            tool = {"document": "read_document", "image": "read_image", "url": "read_web_url", "assets": "get_page_assets"}[args.command]
             if tool not in tools:
                 raise ValueError(f"feature_disabled: enable the corresponding WEB_DOCUMENTS_ENABLED, WEB_IMAGES_ENABLED, or WEB_LINKS_ENABLED flag for {args.command}")
             kwargs = {} if args.command == "assets" else {
                 "max_chars": args.max_chars, "ocr": args.ocr, "vision": args.vision,
                 "question": args.question, "refresh": args.refresh}
-            if args.command == "document":
+            if args.command in {"document", "url"}:
                 kwargs.update(max_pages=args.max_pages, start_page=args.start_page)
             result = tools[tool](args.url, **kwargs)
         emit(result)
-        return 1 if result.get("status") == "error" else 0
+        return 1 if result.get("status") == "error" or result.get("error") else 0
     except (OSError, ValueError) as error:
         print("web-tools: " + str(error), file=sys.stderr)
         return 2

@@ -1,5 +1,109 @@
 # Verification record
 
+## Multi-source enhancement, 2026-09-17
+
+Implemented on the existing `perhat` working tree, preserving the earlier changes
+and stash. No other branch was changed. See [MULTISOURCE_PLAN.md](MULTISOURCE_PLAN.md)
+for acceptance criteria and [MULTISOURCE.md](MULTISOURCE.md) for the demo and contract.
+
+| Executed check | Result |
+| --- | --- |
+| Extension host suite | 96 passed; 15 optional Docker tests skipped; 111 discovered |
+| New multi-source scenarios | Distinct-document and exact-copy grouping; redirected aliases; preserved extraction after context trimming; local evidence windows; source/download/output/deadline stops; caller/service limits; incomplete-answer follow-up; coverage and conflict reference validation |
+| Streaming file fingerprint and worker download allowance | Passed with controlled transport/worker fixtures |
+| Baseline cached ingestion | 1,139 workbooks rendered |
+| Baseline lakehouse build | Successful; 135,513 observations across 17 bulletin tables |
+| Baseline pytest | 57 passed |
+| Blocking repository lint and `git diff --check` | Passed |
+| Actual configured secrets in changed/untracked files | Zero matches |
+| Current Docker/parser/browser/live MIA pipeline | **Not rerun: Docker is unavailable in this WSL session; ports 8888 and 8932 are unreachable.** |
+
+The new research scenarios use controlled tools/model decisions. They validate
+orchestration and provenance checks, **not** the live model's ability to produce
+the expanded coverage/conflict schema. The previous live run below predates this
+enhancement and must not be presented as verification of the new pipeline.
+
+Validation dependencies were installed in a separate
+`/tmp/web-multisource-validation-venv`; baseline dependencies and startup were
+not edited. Logs are `/tmp/web-multisource-host-tests.log`,
+`/tmp/web-multisource-baseline-render.log`, `/tmp/web-multisource-baseline-build.log`
+and `/tmp/web-multisource-baseline-tests.log`. Temporary paths may disappear after
+a WSL restart.
+
+Once Docker is available, run the setup and two-document example in
+[MULTISOURCE.md](MULTISOURCE.md), plus `web-tools asset-test` and
+`web-tools browser-test`. Record the real MIA result, coverage, document count,
+citations, usage and stop reason here. Until then live verification remains open.
+
+## Previous continuation: complete web pipeline, 2026-09-16
+
+Work resumed on `perhat` from `15eb915`. The user-created stash was restored and
+retained; the local MIA debugging change was saved under
+`/tmp/web-tools-before-resume-hdrhr234` before replacing raw provider-body printing
+with sanitized error codes/HTTP status. No teammate or backup branch was changed.
+See [TEAM_INTEGRATION.md](TEAM_INTEGRATION.md) for the two inspected team branches.
+
+| Executed check | Result |
+| --- | --- |
+| Host tests | 75 passed; 15 optional Docker cases skipped; 90 discovered |
+| Docker file/OCR tests | 10 passed, including real PDF native-text recovery on a simulated MIA timeout |
+| Docker Chromium tests | 5 passed |
+| Blocking repository lint and `git diff --check` | Passed |
+| Baseline cached ingestion | 1,139 workbooks rendered |
+| Baseline lakehouse build | 25 checks; 135,513 observations across 17 bulletin tables; successful DuckDB/Parquet output |
+| Baseline pytest | 57 passed |
+| Actual SearXNG BDDK search | `ok`, 3 results |
+| Automatic HTML routing | Read the BDDK quarterly-report landing page |
+| Link discovery | Returned attachment URLs; explicit partial status for bounded discovery |
+| Automatic extensionless PDF routing | Read physical PDF page 5 of BDDK `EkGetir/8?ekId=625`; native text and table evidence |
+| Cache | Identical repeated PDF request returned `cache.hit: true` |
+| Plain text URL | Read RFC 9110 from `https://www.rfc-editor.org/rfc/rfc9110.txt`, bounded at 1,500 characters |
+| CSV URL | Read Plotly's public `2014_usa_states.csv`; returned table rows |
+| Explicit table contract | Validated 52 CSV data rows with source metadata and supplied column/unit/period contract |
+| XLSX URL | Read pandas' public `pandas/tests/io/data/excel/test1.xlsx`; partial result explicitly reported sheet limit |
+| Image URL and local OCR | Read Python's public `python-logo.png`; extracted `python` (plus a recognition artifact), with zero model calls |
+| Live MIA vision | Interpreted BDDK physical PDF page 5 with one call, no processing errors, and native evidence preserved |
+| Live MIA OCR | Generated scan containing `BANK REPORT 2026` and `REVENUE 12345 TRY`; expected text/digits returned in one MIA call |
+| Natural-language page research | Search → official HTML read → Turkish answer with source IDs; 2 tool calls, 3 model calls |
+| Natural-language report research | Search → landing page → PDF page 5 → cited Turkish answer; 3 tool calls, 4 model calls; no top-level error |
+
+The report answer cited `[S2]`, physical PDF page 5, and reproduced the native
+source's function-group shares 84/7/9 and ownership-group shares 47/29/24 without
+calculating new values. The result was `partial` because only selected report
+pages/evidence excerpts were read, not because the model failed.
+
+The first longer research run exposed a planner/caller policy mismatch: the
+service allowed OCR arguments while the caller had OCR disabled. A regression
+test now covers explicit `ocr=false`, and model planning receives the intersection
+of caller and service capabilities and text/page limits. The rerun completed.
+
+Chat/vision now disable optional Qwen thinking, using the same payload setting
+already measured by the team's MIA client. Live vision succeeded with the
+2,048-token budget. The earlier generic `model_unavailable` response did not
+retain enough diagnostics to prove its original cause. Current failures separate
+access denial, timeout, exhausted output and invalid decisions; raw provider
+bodies, API keys and reasoning text are never returned or logged.
+
+Public format checks used real URL downloads. The live MIA OCR check used a
+generated local fixture sent to the actual API; its `fixture.example.org` URL was
+metadata, not an external download. Deterministic tests use no model quota.
+Baseline packages were installed in `/tmp/web-tools-validation-venv`, not into
+the user's baseline environment. The requested baseline run regenerated ignored
+workbooks and derived lakehouse outputs from committed inputs.
+
+Result JSON, a readable cited answer, and test/build logs are saved locally in
+`/tmp/web-full-pipeline-pmmmjoc7` (temporary artifacts, not committed). Docker
+services were left healthy with test capabilities enabled. The ignored `.env`
+values were preserved; follow [DEMO.md](DEMO.md) for the matching terminal exports.
+The real extension secrets were checked against changed files: no matches.
+
+The team's broader analytical agent was inspected and an adapter was tested, but
+that branch was not merged or deployed. Source-ID checking and table-contract
+validation do not guarantee factual truth, OCR accuracy or automatic lakehouse
+normalization. Hard process deadlines can still terminate an entire extraction.
+
+## Earlier verification history
+
 Initial baseline and isolated runtime checks completed on 2026-09-14 in the
 existing WSL checkout. Docker deployment, the localhost ingress fix, and the BDDK
 certificate-chain handling fix were verified on 2026-09-15 in that same checkout.
@@ -225,11 +329,12 @@ ARM has not been tested. Debian browser support packages are installed
 from Debian repositories at image build time, so that OS package layer is not
 fully locked. See `THIRD_PARTY.md` for upstream references and update guidance.
 
-There is no baseline agent loop, LangGraph registration layer, or application API
+As of the original 2026-09-15 verification, there was no baseline agent loop, LangGraph registration layer, or application API
 yet. The Kloudeks client and private extension credential configuration now support
 optional MIA image/OCR calls. The callable mapping is tested, but an
 agent conversation that selects tools and writes a citation cannot be verified
-until that planned baseline functionality exists. No replacement agent was introduced.
+until that planned baseline functionality existed. See the 2026-09-16 continuation
+below for the now-implemented optional web research runner and team adapter.
 
 ## Review scope
 

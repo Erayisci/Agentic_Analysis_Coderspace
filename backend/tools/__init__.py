@@ -1,4 +1,4 @@
-"""Opt-in callable tools for a future agent; importing this module starts nothing."""
+"""Opt-in callable tools for agent integration; importing starts nothing."""
 
 import os
 from collections.abc import Callable, Mapping
@@ -8,7 +8,7 @@ def get_tools(environ: Mapping[str, str] | None = None) -> dict[str, Callable]:
     """Return enabled tools without loading crawler packages or starting services.
 
     Keep the returned mapping for the lifetime of the caller so its web tools
-    share a concurrency limit. The current repository has no agent runner.
+    share a concurrency limit. Optional web research lives in web_tools.research.
     """
     environ = os.environ if environ is None else environ
     enabled = environ.get("WEB_TOOLS_ENABLED", "false").strip().lower()
@@ -24,10 +24,10 @@ def get_tools(environ: Mapping[str, str] | None = None) -> dict[str, Callable]:
     web = WebTools(WebToolsConfig.from_environ(environ))
     assets = AssetConfig.from_environ(environ)
     web.asset_config = assets
-    result = {"search_web": web.search_web, "read_url": web.read_url}
+    from backend.extensions.web_tools.asset_client import AssetTools
+    extra = AssetTools(web, assets)
+    result = {"search_web": web.search_web, "read_url": web.read_url, "read_web_url": extra.read_web_url}
     if assets.needs_image or assets.links_enabled:
-        from backend.extensions.web_tools.asset_client import AssetTools
-        extra = AssetTools(web, assets)
         if assets.documents_enabled:
             result["read_document"] = extra.read_document
         if assets.images_enabled:

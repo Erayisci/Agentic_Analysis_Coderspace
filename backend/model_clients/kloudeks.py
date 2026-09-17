@@ -7,8 +7,9 @@ from urllib.parse import urlsplit
 
 
 class ModelFailure(Exception):
-    def __init__(self, code):
+    def __init__(self, code, http_status=None):
         self.code = code
+        self.http_status = http_status
         super().__init__(code)
 
 
@@ -39,6 +40,19 @@ class KloudeksClient:
         if ocr:
             payload.update({"skip_special_tokens": False,
                             "vllm_xargs": {"ngram_size": 35, "window_size": 128 if len(images) == 1 else 1024}})
+        else:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        return self._complete(payload)
+
+    def chat(self, messages, *, model, max_tokens):
+        """Bounded text planning/synthesis through the same MIA abstraction."""
+        return self._complete({"model": model, "messages": messages,
+                               "max_tokens": max_tokens, "temperature": 0.0,
+                               "chat_template_kwargs": {"enable_thinking": False}})
+
+    def _complete(self, payload):
+        if not self.api_key:
+            raise ModelFailure("model_not_configured")
         target, proxy = urlsplit(self.base_url), urlsplit(self.proxy)
         if (target.scheme != "https" or not target.hostname or not target.hostname.endswith(".kloudeks.com")
                 or target.port not in {None, 443} or target.username or target.password or target.query or target.fragment):
@@ -52,7 +66,10 @@ class KloudeksClient:
                                    "Content-Type": "application/json", "Accept": "application/json"})
             response = connection.getresponse()
             if response.status != 200:
-                raise ModelFailure("model_rate_limited" if response.status == 429 else "model_unavailable")
+                code = "model_rate_limited" if response.status == 429 else (
+                    "model_access_denied" if response.status in {401, 403} else "model_unavailable")
+                # Never print provider bodies: they can echo credentials/prompts.
+                raise ModelFailure(code, http_status=response.status)
             raw = response.read(1048577)
             if len(raw) > 1048576:
                 raise ModelFailure("model_limit")
@@ -60,10 +77,12 @@ class KloudeksClient:
             choice = result["choices"][0]
             text = choice["message"]["content"]
             if not isinstance(text, str) or not text.strip():
-                raise ModelFailure("model_unavailable")
-            return {"text": text, "truncated": choice.get("finish_reason") == "length", "model": model}
+                raise ModelFailure("model_output_limit" if choice.get("finish_reason") == "length" else "model_unavailable")
+            return {"text": text, "truncated": choice.get("finish_reason") == "length", "model": payload["model"]}
         except ModelFailure:
             raise
+        except TimeoutError:
+            raise ModelFailure("model_timeout") from None
         except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError):
             raise ModelFailure("model_unavailable") from None
         finally:

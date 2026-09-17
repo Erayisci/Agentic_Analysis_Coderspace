@@ -5,17 +5,23 @@ lakehouse, built so an LLM agent never has to do arithmetic or schema reasoning 
 
 Submission for the **KKB Hackathon 2026 — Lakehouse Agent Builder and Data Analytics**.
 
-Current state: the ingestion, validation and lakehouse layers are implemented and tested. The agent
-and API are designed in [`Launch.MD`](Launch.MD) but not yet written.
+Current state on `perhat`: the ingestion, validation and lakehouse layers are implemented and tested.
+The optional web extension also provides bounded MIA research with source citations. The team's
+broader analytical agent lives on a separate branch; see the [integration notes](extensions/web_tools/TEAM_INTEGRATION.md).
 
 An optional [SearXNG + Crawl4AI web-tools extension](extensions/web_tools/README.md) provides
-`search_web` and `read_url` callables for the future agent, with separately optional
+`search_web`, HTML `read_url`, and automatic `read_web_url` callables, with separately optional
 [file, image, OCR, and Kloudeks vision tools](extensions/web_tools/ASSETS.md). Each capability
 has switches and resource limits. Dependencies run in separate containers; all tools are
 disabled by default and do not change the pipeline setup below.
 
 To try the web tools yourself, use the [Docker-to-results testing walkthrough](extensions/web_tools/TESTING.md).
+For developer onboarding without changing the baseline environment, start with
+the [developer guide](extensions/web_tools/DEVELOPER_GUIDE.md).
 For AI integration, see the [tool contracts and usage reference](extensions/web_tools/AI_USAGE.md).
+For the complete search-to-answer demo, see [DEMO.md](extensions/web_tools/DEMO.md).
+For several sources, explicit coverage and conflict reporting, see the
+[multi-source research guide](extensions/web_tools/MULTISOURCE.md).
 
 ---
 

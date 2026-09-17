@@ -1,5 +1,10 @@
 # Test the web tools yourself
 
+For the newest self-contained search-to-answer walkthrough, including `url` and
+`ask`, use [DEMO.md](DEMO.md). The steps below retain the explicit individual tools.
+For a two-document comparison and whole-question budgets, use
+[MULTISOURCE.md](MULTISOURCE.md).
+
 This walkthrough starts with the existing checkout, exercises each capability, and
 saves results you can inspect. You need Docker with working WSL integration,
 Python 3, and internet access for builds and public sources. You do not need the
@@ -85,15 +90,15 @@ loads `extensions/web_tools/.env`. See [configuration precedence](ASSETS.md#2-en
 ./extensions/web_tools/web-tools asset-test
 ```
 
-Expected on the implementation verified on 2026-09-15:
+Expected on the implementation verified on 2026-09-16:
 
 | Command | Expected result | What it exercises |
 | --- | --- | --- |
-| `test` | `OK (skipped=14)`; 61 passed, 75 discovered | Host contracts, disabled flags, URL rules, limits, model payload fixtures, configuration |
+| `test` | `OK`; Docker cases skipped here | Host contracts, disabled flags, routing, text, recovery, research budgets/citations, table validation |
 | `browser-test` | 5 tests, `OK` | Real Chromium, JavaScript, redirects, private destinations, and certificate rejection |
-| `asset-test` | 9 tests, `OK` | Real PDF/XLSX/XLS/CSV/DOCX/image parsers, local scan OCR, limits, cache, and model batching fixtures |
+| `asset-test` | 10 tests, `OK` | Real PDF/XLSX/XLS/CSV/DOCX/image parsers, local scan OCR, native PDF recovery, limits, cache, and model batching fixtures |
 
-The 14 skipped cases in `test` are the 5 browser and 9 asset cases you run separately.
+The skipped cases in `test` are the 5 browser and 10 asset cases you run separately.
 Counts may grow with later changes; failures/errors are the important signals.
 These fixture tests do not contact public websites or spend MIA quota. The image
 and scanned-PDF tests assert that local OCR reads `BANK REPORT` and `12345` from
@@ -249,9 +254,9 @@ your account quota. Configure the key locally; the input below is hidden and
 does not place the key in shell history:
 
 ```bash
-read -rsp 'MIA API key: ' WEB_KLOUDEKS_API_KEY
-echo
-export WEB_KLOUDEKS_API_KEY
+# The key is already in extensions/web_tools/.env; no repeated prompt is needed.
+: "${WEB_RESULTS_DIR:?Run step 2 in this terminal to create the output directory}"
+: "${WEB_REPORT_URL:?Run step 6 in this terminal to select a report}"
 export WEB_KLOUDEKS_BASE_URL='https://mia.csp.kloudeks.com/v1'
 export WEB_KLOUDEKS_VISION_MODEL='kkbhackathon2026/Qwen3.8-27B'
 export WEB_VISION_ENABLED=true
@@ -277,11 +282,12 @@ For MIA OCR, use `WEB_OCR_PROVIDER=kloudeks`,
 scan with `--ocr` and without `--vision`. See the [MIA configuration details](ASSETS.md#5-enable-kloudeks-mia-vision-or-ocr).
 Set `WEB_OCR_PROVIDER=local` and restart to return to Tesseract.
 
-No real MIA key was provided during implementation, so live model behavior was
-not verified then. Payload, image/token limits, and error handling were tested
-with fixtures. `model_not_configured` means the service needs the key and a
-restart; `model_unavailable` requires checking credentials, model access, or the
-endpoint. `model_rate_limited` means MIA returned 429.
+Live MIA OCR and vision were verified after a key was configured on 2026-09-16.
+`model_not_configured` means the service needs the key and a restart;
+`model_access_denied` identifies HTTP 401/403; `model_rate_limited` identifies 429.
+`model_timeout` and `model_output_limit` distinguish time and output-budget failures.
+Usable native text survives optional model failures in `partial` responses with
+`processing_errors`. See [DEMO.md](DEMO.md) for troubleshooting and cited research.
 
 ## 10. Demonstrate resource limits and the off switch
 
@@ -344,11 +350,11 @@ the current shell; edit existing entries in the ignored extension `.env` if you
 want these settings in future CLI sessions. Process exports take precedence.
 
 For routine diagnosis use `web-tools check`, `web-tools config` (key redacted),
-and `web-tools logs`. CLI exit codes are 0 for a returned non-error result
-(including `partial` and `empty`), 1 for a tool error, and 2 for command/configuration
+and `web-tools logs`. CLI exit codes are 0 for a result with no top-level error
+(including usable `partial` and `empty`), 1 for a tool/research error, and 2 for command/configuration
 errors; lifecycle/test commands propagate their subprocess exit code. A zero exit
 code alone does not prove that enough evidence was extracted.
 
 To understand how this evidence reaches an AI answer, continue with
-[AI_USAGE.md](AI_USAGE.md). The tool commands currently return evidence JSON;
-automatic orchestration into an answer is a separate, not-yet-implemented agent layer.
+[AI_USAGE.md](AI_USAGE.md). Individual tools return evidence JSON; the optional
+`ask` command selects tools and produces a cited answer. See [DEMO.md](DEMO.md).

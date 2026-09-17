@@ -21,6 +21,14 @@ class AssetConfig:
     links_enabled: bool = False
     ocr_enabled: bool = False
     vision_enabled: bool = False
+    agent_enabled: bool = False
+    agent_max_tool_calls: int = 6
+    agent_max_model_calls: int = 6
+    agent_max_context_chars: int = 20000
+    agent_max_sources: int = 6
+    agent_max_download_bytes: int = 20971520
+    agent_max_evidence_bytes: int = 8388608
+    agent_timeout_seconds: int = 300
     asset_cache_enabled: bool = False
     asset_max_bytes: int = 10485760
     asset_timeout_seconds: int = 120
@@ -45,11 +53,12 @@ class AssetConfig:
     kloudeks_base_url: str = "https://mia.csp.kloudeks.com/v1"
     kloudeks_vision_model: str = "kkbhackathon2026/Qwen3.8-27B"
     kloudeks_ocr_model: str = "kkbhackathon2026/Unlimited-OCR"
+    kloudeks_chat_model: str = "kkbhackathon2026/Qwen3.8-27B"
     kloudeks_api_key: str = field(default="", repr=False)
 
     @property
     def needs_image(self):
-        return self.documents_enabled or self.images_enabled
+        return self.documents_enabled or self.images_enabled or self.agent_enabled
 
     def __post_init__(self):
         bounds = {
@@ -62,6 +71,10 @@ class AssetConfig:
             "asset_cache_ttl_seconds": (1, 604800), "asset_cache_max_bytes": (1048576, 1073741824),
             "ocr_max_pages": (1, 20), "model_max_calls_per_read": (0, 5),
             "model_max_calls_per_hour": (0, 1000), "model_max_tokens": (128, 8192),
+            "agent_max_tool_calls": (1, 12), "agent_max_model_calls": (1, 12),
+            "agent_max_context_chars": (2000, 24000),
+            "agent_max_sources": (1, 12), "agent_max_download_bytes": (1024, 209715200),
+            "agent_max_evidence_bytes": (4096, 33554432), "agent_timeout_seconds": (5, 1800),
         }
         for name, (lower, upper) in bounds.items():
             value = getattr(self, name)
@@ -79,7 +92,7 @@ class AssetConfig:
                 or not parts.hostname.endswith(".kloudeks.com") or parts.port not in {None, 443}
                 or parts.username is not None or parts.password is not None or parts.query or parts.fragment):
             raise ValueError("WEB_KLOUDEKS_BASE_URL must be an HTTPS Kloudeks URL without credentials")
-        for name in ("kloudeks_vision_model", "kloudeks_ocr_model"):
+        for name in ("kloudeks_vision_model", "kloudeks_ocr_model", "kloudeks_chat_model"):
             value = getattr(self, name)
             if not value.startswith("kkbhackathon2026/") or len(value) > 200 or any(ord(c) < 33 for c in value):
                 raise ValueError(f"WEB_{name.upper()} must use the exact kkbhackathon2026/ model ID")

@@ -16,7 +16,7 @@ def public_assets(records, maximum):
             continue
         seen.add(url)
         suffix = urlsplit(url).path.rsplit(".", 1)[-1].lower()
-        hint = suffix if suffix in {"pdf", "xlsx", "xls", "csv", "docx", "png", "jpg", "jpeg", "webp", "tif", "tiff"} else "html"
+        hint = suffix if suffix in {"pdf", "xlsx", "xls", "csv", "docx", "txt", "md", "json", "png", "jpg", "jpeg", "webp", "tif", "tiff"} else "html"
         label = str(record.get("text", ""))[:500]
         if hint == "html" and (record.get("download") is True or record.get("type_hint") == "document" or re.search(
                 r"\b(download|dok[üu]man linki|indir)\b", label, re.IGNORECASE)):

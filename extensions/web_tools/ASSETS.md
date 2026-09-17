@@ -9,6 +9,10 @@ defaults to **off**. PDF, spreadsheet, DOCX, image, and OCR dependencies are ins
 only in the optional Docker image; the baseline Python environment and lakehouse
 commands do not change. Search, HTML reading, file extraction, and local OCR need
 no model API key. MIA vision and MIA OCR require your Kloudeks credentials and quota.
+Plain TXT, Markdown and JSON documents are also supported under the document
+switch. Their declared charset or Unicode BOM is honored; otherwise UTF-8 is used.
+Undecodable text fails explicitly. `url` automatically routes supported formats;
+see [DEMO.md](DEMO.md) for the optional `ask` research runner and its limits.
 
 ## 1. Prepare Docker and this checkout
 
@@ -263,6 +267,7 @@ export WEB_LINKS_ENABLED=false
 export WEB_OCR_ENABLED=false
 export WEB_VISION_ENABLED=false
 export WEB_ASSET_CACHE_ENABLED=false
+export WEB_AGENT_ENABLED=false
 ./extensions/web_tools/web-tools start
 ```
 
@@ -277,12 +282,13 @@ extension's services as well. Persist desired flags in `.env` for new terminals.
 
 Successful results contain `content` plus `sections` with a `location`, `method`,
 and text; detected tables also include `rows` when they fit the output budget.
-Methods distinguish PDF text, tables, DOCX text, local OCR, MIA OCR, and MIA vision.
+Methods distinguish plain text, HTML, PDF text, tables, DOCX text, local OCR, MIA OCR, and MIA vision.
 Keep `final_url`, `fetched_at`, and the page/sheet/block location with any excerpt
 passed to an agent so it can cite its evidence.
 
-Check `status`, `error`, `warnings`, and `truncated` before reasoning. `partial`
-means a page, row, text, OCR, image, or model limit omitted something. `empty` is
+Check `status`, `error`, `processing_errors`, `warnings`, and `truncated` before reasoning. `partial`
+means a limit omitted something or an optional model operation failed while usable
+text was preserved. `processing_errors` distinguishes the latter. `empty` is
 not an interpretation of an image. `original_chars` counts extracted sections
 visited during this bounded read; it is not the length of the entire original
 file. PDF table extraction is heuristic. Spreadsheet formulas/macros are never
@@ -317,12 +323,17 @@ report = tools["read_document"](
 ```
 
 `get_tools()` reads the supplied mapping or process environment, not `.env`.
-It returns synchronous callables. The baseline still has no implemented agent
-loop. A future agent should search, discover, select relevant files, read a small
+It returns synchronous callables. The optional `ask` runner can search, discover,
+select relevant files, read a small
 page range, and request more pages or vision only when necessary. Feed only
 relevant sections into its context, preserve citations, and perform calculations
 with deterministic analytics tools. File/image content and model interpretations
 remain untrusted evidence and must never become system instructions.
+
+Raw table sections carry `validation.ready_for_calculation: false`. Use the
+explicit schema/unit/period validation helper described in
+[TEAM_INTEGRATION.md](TEAM_INTEGRATION.md) before calculations. It does not
+automatically normalize or import data into the lakehouse.
 
 ## Troubleshooting
 
@@ -335,6 +346,8 @@ remain untrusted evidence and must never become system instructions.
 | `model_not_configured` | Set the key locally, then rerun `start`; never paste the key into chat. |
 | `model_limit` | Review per-read and hourly budgets; a later UTC hour resets the hourly window. |
 | `model_rate_limited` | MIA returned 429; wait or check the provider quota. |
+| `model_access_denied` | MIA returned 401/403; check the private worker key and model access. |
+| `model_timeout` / `model_output_limit` | Time or output budget was exhausted. Use preserved native text, a smaller request, or explicitly revise the budget. |
 | `model_unavailable` | Check endpoint, exact model ID, credentials, and model access. Provider error bodies are not exposed. |
 | `certificate_error` | The source certificate could not be verified. Missing intermediates can be recovered from a verified Chromium connection; roots and verification remain unchanged. |
 | `parse_error` / `unsupported_content_type` | Check whether the URL returns a supported, unencrypted file rather than an HTML/login/error page. |

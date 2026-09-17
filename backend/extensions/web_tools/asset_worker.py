@@ -33,7 +33,7 @@ def process(payload, proxy, config=None):
             return cached
     with tempfile.TemporaryDirectory(prefix="web-asset-") as directory:
         path = Path(directory) / "download.bin"
-        metadata = download(request["url"], proxy, path, config.asset_max_bytes, config.asset_timeout_seconds)
+        metadata = download(request["url"], proxy, path, request["max_bytes"], config.asset_timeout_seconds)
         result = extract(path, request, metadata, config, proxy)
     if store:
         store.put(key, result)
@@ -62,13 +62,20 @@ def run_isolated(request, proxy, timeout, popen=subprocess.Popen):
 
 
 def main():
+    from backend.model_clients.kloudeks import ModelFailure
     payload = json.loads(sys.stdin.buffer.read(32769))
     url = payload.get("request", {}).get("url")
     with open(os.devnull, "w") as silent, contextlib.redirect_stdout(silent), contextlib.redirect_stderr(silent):
         try:
-            result = process(payload["request"], payload["proxy"])
-        except AssetFailure as error:
+            if payload["request"].get("operation") == "agent-model":
+                from .agent_protocol import model_decision
+                result = model_decision(payload["request"], payload["proxy"], AssetConfig.from_environ())
+            else:
+                result = process(payload["request"], payload["proxy"])
+        except (AssetFailure, ModelFailure) as error:
             result = failure(error.code, url)
+            if getattr(error, "http_status", None) is not None:
+                result["error"]["http_status"] = error.http_status
         except UnsafeURL:
             result = failure("invalid_url", url)
         except (ModuleNotFoundError, ImportError, FileNotFoundError):
