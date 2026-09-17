@@ -23,15 +23,69 @@ not an answer"). Both are best-effort here -- the raw column header if the
 caller gives nothing better -- and are stated as such in the citation, so the
 composer can hedge instead of asserting them as fact.
 """
+import re
 from io import BytesIO
 from typing import NamedTuple, Optional
 
 import pandas as pd
+from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype
 
 from . import web_url
 from .transforms import resample_to_monthly
 
 MIN_DATE_PARSE_RATE = 0.9  # a period column must parse on (almost) every row
+PLAUSIBLE_YEARS = (1900, 2100)  # anything outside is a mis-parse, not a date
+
+# Turkish month names, as the regulators print them ("Ocak", "Şubat / February",
+# "Mayıs 2026"); ASCII spellings included because Excel exports often drop the
+# diacritics. Mapped onto English so pandas' parser can read them.
+_TR_MONTHS = {
+    "ocak": "January", "şubat": "February", "subat": "February", "mart": "March",
+    "nisan": "April", "mayıs": "May", "mayis": "May", "haziran": "June", "temmuz": "July",
+    "ağustos": "August", "agustos": "August", "eylül": "September", "eylul": "September",
+    "ekim": "October", "kasım": "November", "kasim": "November", "aralık": "December",
+    "aralik": "December",
+}
+_TR_MONTH_RE = re.compile("|".join(sorted(_TR_MONTHS, key=len, reverse=True)), re.IGNORECASE)
+_BILINGUAL_SUFFIX_RE = re.compile(r"\s*/\s*[A-Za-z]+")  # "Ocak / January" -> "Ocak"
+
+_TR_NUMBER_RE = re.compile(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$|^-?\d+,\d+$")   # 93.824.682.381 / 12,5
+_EN_NUMBER_RE = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")               # 93,824,682,381.5
+
+
+def _parse_periods(raw: pd.Series) -> pd.Series:
+    """Dates from a column, Turkish-aware: day-first (`03.02.2021` is 3 Feb),
+    Turkish month names, and the bilingual `Ocak / January` labels the BIST
+    and BDDK publications use. Unparseable cells become NaT."""
+    if is_datetime64_any_dtype(raw):
+        return pd.to_datetime(raw, errors="coerce")
+    text = raw.astype("string").str.strip()
+    text = text.str.replace(_BILINGUAL_SUFFIX_RE, "", regex=True)
+    text = text.str.replace(_TR_MONTH_RE, lambda m: _TR_MONTHS[m.group(0).lower()], regex=True)
+    return pd.to_datetime(text, errors="coerce", dayfirst=True, format="mixed")
+
+
+def _parse_numbers(raw: pd.Series) -> pd.Series:
+    """Numbers from a column, with the separator convention decided per column.
+
+    Turkish publications group thousands with `.` and mark decimals with `,`,
+    so `pd.to_numeric` alone reads `1.017` as 1.017 (a thousandfold error, in
+    silence) and drops `93.824.682.381` as unparseable. The convention is
+    sniffed over the whole column -- one `93.824.682.381` settles it for the
+    `1.017` beside it -- because a lone `1.017` is genuinely ambiguous and, on
+    its own, stays a decimal.
+    """
+    if is_numeric_dtype(raw):
+        return pd.to_numeric(raw, errors="coerce")
+    text = raw.astype("string").str.strip().str.replace("\u00a0", "", regex=False) \
+        .str.replace(" ", "", regex=False).str.rstrip("%")
+    values = text.dropna()
+    turkish = values.str.match(_TR_NUMBER_RE).any() and not values.str.match(_EN_NUMBER_RE).any()
+    if turkish:
+        text = text.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    elif values.str.match(_EN_NUMBER_RE).any():
+        text = text.str.replace(",", "", regex=False)
+    return pd.to_numeric(text, errors="coerce")
 
 
 class ExternalSeriesResult(NamedTuple):
@@ -47,6 +101,7 @@ class ExternalSeriesResult(NamedTuple):
     sheet: Optional[str] = None
     monthly_rule: str = "last"
     temporal_semantics: str = "unknown"
+    n_dropped_rows: int = 0     # rows with no parseable date or number, dropped
 
     @property
     def source(self) -> str:
@@ -76,6 +131,7 @@ class ExternalSeriesResult(NamedTuple):
             "unit": self.unit, "temporal_semantics": self.temporal_semantics,
             "period_start": self.period_start, "period_end": self.period_end,
             "n_points": int(len(self.values)),
+            "n_dropped_rows": int(self.n_dropped_rows),
             "unit_verified": False,
         }
 
@@ -118,9 +174,15 @@ def _detect_period_column(frame: pd.DataFrame, exclude: str) -> str:
     for column in frame.columns:
         if column == exclude:
             continue
-        parsed = pd.to_datetime(frame[column], errors="coerce")
+        # A numeric column is never a period: pandas would happily read every
+        # float as an epoch-nanosecond timestamp (100% "success", all of 1970),
+        # and the plausible-year check below is the second line of defence.
+        if is_numeric_dtype(frame[column]) or is_bool_dtype(frame[column]):
+            continue
+        parsed = _parse_periods(frame[column])
         rate = parsed.notna().mean() if len(frame) else 0.0
-        if rate >= MIN_DATE_PARSE_RATE:
+        years = parsed.dropna().dt.year
+        if rate >= MIN_DATE_PARSE_RATE and years.between(*PLAUSIBLE_YEARS).all():
             candidates.append((column, rate))
     if not candidates:
         raise ValueError(
@@ -170,10 +232,11 @@ def ingest_external_series(
     else:
         period_column = _detect_period_column(frame, exclude=value_column)
 
-    periods = pd.to_datetime(frame[period_column], errors="coerce")
-    values = pd.to_numeric(frame[value_column], errors="coerce")
+    periods = _parse_periods(frame[period_column])
+    values = _parse_numbers(frame[value_column])
     series = pd.Series(values.to_numpy(), index=periods).dropna()
     series = series[~series.index.isna()]
+    n_dropped_rows = len(frame) - len(series)
     if series.empty:
         raise ValueError(
             f"no row has both a parseable {period_column!r} date and a numeric {value_column!r} value"
@@ -187,4 +250,5 @@ def ingest_external_series(
     return ExternalSeriesResult(
         values=monthly, url=url, value_column=str(value_column), period_column=str(period_column),
         unit=unit or str(value_column), sheet=sheet, monthly_rule=monthly_rule,
+        n_dropped_rows=n_dropped_rows,
     )

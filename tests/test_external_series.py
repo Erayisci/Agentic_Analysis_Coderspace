@@ -226,6 +226,66 @@ def test_non_numeric_or_undated_rows_are_dropped_not_fatal(monkeypatch):
 
     assert result.period_column == "Tarih"
     assert len(result.values) == 18  # 20 rows minus the one NaT minus the one missing value
+    assert result.citation()["n_dropped_rows"] == 2  # dropped, but counted -- never silently
+
+
+# --- Turkish-published files ---------------------------------------------------
+
+def test_a_numeric_column_left_of_the_date_is_not_mistaken_for_the_period(monkeypatch):
+    """pandas parses a float column as epoch-nanosecond timestamps at 100%
+    "success", so without a dtype guard a leftmost numeric column won the
+    period detection and dated every value to 1970."""
+    frame = pd.DataFrame({
+        "Sira": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "Tarih": pd.date_range("2021-01-01", periods=6, freq="MS"),
+        "V": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+    })
+    _mock_fetch(
+        monkeypatch, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _excel_bytes(frame),
+    )
+
+    result = E.ingest_external_series("https://example.com/x.xlsx", value_column="V")
+
+    assert result.period_column == "Tarih"
+    assert result.values.index.min().year == 2021
+
+
+def test_turkish_thousands_and_decimal_separators_are_parsed(monkeypatch):
+    """`93.824.682.381` is 93 billion, `1.017` beside it is 1017 (not 1.017 --
+    a thousandfold error that nothing downstream would catch), `12,5` is 12.5."""
+    csv = "Tarih,Hacim\n2021-01-01,93.824.682.381\n2021-02-01,1.017\n2021-03-01,\"12,5\"\n"
+    _mock_fetch(monkeypatch, "text/csv", csv.encode("utf-8"))
+
+    result = E.ingest_external_series("https://example.com/x.csv", value_column="Hacim")
+
+    assert list(result.values) == [93824682381.0, 1017.0, 12.5]
+    assert result.citation()["n_dropped_rows"] == 0
+
+
+def test_a_lone_dotted_number_with_no_other_evidence_stays_a_decimal(monkeypatch):
+    csv = "Tarih,V\n2021-01-01,1.017\n2021-02-01,2.5\n"
+    _mock_fetch(monkeypatch, "text/csv", csv.encode("utf-8"))
+
+    result = E.ingest_external_series("https://example.com/x.csv", value_column="V")
+
+    assert list(result.values) == [1.017, 2.5]
+
+
+def test_turkish_day_first_dates_and_month_names_are_parsed(monkeypatch):
+    csv = ("Tarih,V\n03.02.2021,1\nOcak 2021,2\nŞubat / February 2021,3\n"
+           "Mart 2021,4\nNisan 2021,5\nMayıs 2021,6\n")
+    _mock_fetch(monkeypatch, "text/csv", csv.encode("utf-8"))
+
+    result = E.ingest_external_series(
+        "https://example.com/x.csv", value_column="V", monthly_rule="sum")
+
+    # 03.02.2021 is 3 February, not 2 March; it lands in the February bucket
+    # together with "Şubat / February 2021".
+    assert [d.strftime("%Y-%m") for d in result.values.index] == \
+        ["2021-01", "2021-02", "2021-03", "2021-04", "2021-05"]
+    assert result.values.loc["2021-02-01"] == 4.0
+    assert result.citation()["n_dropped_rows"] == 0
 
 
 # --- SSRF guard is genuinely shared, not re-implemented ----------------------

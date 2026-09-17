@@ -242,7 +242,8 @@ class Executor:
         self.session.cite(series.citation())
         return (f"{name}: {len(series.values)} points from {step.url} "
                 f"(value_column={series.value_column!r}, period_column={series.period_column!r}, "
-                f"unit={series.unit!r} unverified)")
+                f"unit={series.unit!r} unverified"
+                + (f", {series.n_dropped_rows} row(s) dropped" if series.n_dropped_rows else "") + ")")
 
     def _search_step(self, step: Step, plan: Plan) -> str:
         if self._search is None:
