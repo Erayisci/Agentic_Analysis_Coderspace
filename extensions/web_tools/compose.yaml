@@ -1,0 +1,93 @@
+services:
+  searxng:
+    image: searxng/searxng:2026.9.13-32f2da4ef@sha256:e4d74653dd655e15710221bda37864cb6d6b1634b72196021b20866f91bb730e
+    ports:
+      - "127.0.0.1:${WEB_SEARCH_PORT:-8888}:8080"
+    environment:
+      SEARXNG_SECRET: "${SEARXNG_SECRET:?Run ./extensions/web_tools/web-tools setup first}"
+      SEARXNG_BASE_URL: "http://127.0.0.1:${WEB_SEARCH_PORT:-8888}/"
+      SEARXNG_LIMITER: "false"
+      SEARXNG_PUBLIC_INSTANCE: "false"
+      FORCE_OWNERSHIP: "false"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+    networks:
+      - search-outbound
+    healthcheck:
+      test: ["CMD", "/usr/local/searxng/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"]
+      interval: 15s
+      timeout: 8s
+      retries: 6
+      start_period: 30s
+    restart: "no"
+
+  egress:
+    build:
+      context: ../..
+      dockerfile: extensions/web_tools/Dockerfile
+      target: egress
+    # Forward localhost ingress to crawler:8932 without giving the browser an
+    # outbound network. The public-web proxy on 3128 remains unpublished.
+    ports:
+      - "127.0.0.1:${WEB_CRAWLER_PORT:-8932}:8932"
+    networks:
+      - crawler-internal
+      - crawler-outbound
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3128/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+    restart: "no"
+
+  crawler:
+    build:
+      context: ../..
+      dockerfile: extensions/web_tools/Dockerfile
+      target: crawler
+    environment:
+      WEB_EGRESS_PROXY: http://egress:3128
+      WEB_LINKS_ENABLED: "${WEB_LINKS_ENABLED:-false}"
+      WEB_ASSET_MAX_LINKS: "${WEB_ASSET_MAX_LINKS:-50}"
+      WEB_CRAWL_TIMEOUT_SECONDS: "${WEB_CRAWL_TIMEOUT_SECONDS:-45}"
+      WEB_MAX_CONTENT_CHARS: "${WEB_MAX_CONTENT_CHARS:-20000}"
+      WEB_MAX_CONCURRENCY: "${WEB_MAX_CONCURRENCY:-2}"
+    depends_on:
+      egress:
+        condition: service_healthy
+    # The browser has no direct Internet route. Every proxy destination is checked.
+    networks:
+      - crawler-internal
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+    shm_size: 512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8932/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 45s
+    restart: "no"
+
+networks:
+  search-outbound: {}
+  crawler-outbound: {}
+  crawler-internal:
+    internal: true
+
+volumes:
+  searxng-cache: {}

@@ -39,4 +39,8 @@ kkb-build = "backend.lakehouse.build:main"
 include = ["backend*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# extensions/web_tools/tests is perhat's unittest suite (15 of its tests skip without
+# WEB_TOOLS_TEST_ASSETS / WEB_TOOLS_TEST_BROWSER). importlib mode: both dirs hold a
+# `test_tools.py` and neither is a package, so the default import mode collides.
+testpaths = ["tests", "extensions/web_tools/tests"]
+addopts = "--import-mode=importlib"

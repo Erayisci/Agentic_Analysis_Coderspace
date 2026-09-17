@@ -10,7 +10,7 @@ The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 .venv/bin/pip install -e ".[dev]"           # once; makes `backend` importable
 .venv/bin/python -m backend.ingestion.bddk_bulletin --from-cache  # render workbooks, no network
 .venv/bin/python -m backend.lakehouse.build # full build: parse -> validate -> parquet + duckdb
-.venv/bin/pytest -q                         # all 246 tests (build must have run first)
+.venv/bin/pytest -q                         # all tests, incl. extensions/web_tools/tests (build must have run first)
 .venv/bin/pytest tests/test_bulletin.py -q  # parser/label invariants only — needs no build
 .venv/bin/pytest tests/test_lakehouse.py::test_period_coverage -q
 .venv/bin/pytest -q -k risk_weight          # one test by name, across files
@@ -42,6 +42,14 @@ The downloader skips files already on disk, so a failed run is resumed by re-run
 directly (it also installs a `kkb-build` console script for `backend.lakehouse.build:main`). CI
 (`.github/workflows/python-app.yml`) runs lint → `--from-cache` render → build → pytest in that order.
 `requirements.txt` only forwards to `pyproject.toml` (`-e .[dev]`) — add dependencies in `pyproject.toml`.
+
+`pytest` also collects `extensions/web_tools/tests`, the web-tools extension's unittest suite (15 of
+its tests skip unless `WEB_TOOLS_TEST_ASSETS` / `WEB_TOOLS_TEST_BROWSER` point at running containers),
+in `--import-mode=importlib` because both directories hold a `test_tools.py`. The extension itself is
+off unless `WEB_TOOLS_ENABLED=true`; when on, `backend/api/main.py` wires its `search_web` in as the
+agent's web-search backend. The in-process `backend/tools/web_url.py` stays the URL reader either way,
+and `KLOUDEKS_API_KEY` serves both the team client and the extension's own client (a second Kloudeks
+client under `backend/model_clients/` — unifying the two is open work).
 
 The four test files differ in what they need, and the difference is in the fixtures:
 

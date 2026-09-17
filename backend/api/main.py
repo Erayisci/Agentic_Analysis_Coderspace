@@ -14,6 +14,11 @@ Sessions live in one process-lifetime `Agent` instance, in memory, keyed by
 scope boundary for a hackathon demo (a restart loses every open conversation)
 and not a decision the API layer should quietly grow past on its own; adding
 one is future work, not a bug in this file.
+
+Web search is optional: with `WEB_TOOLS_ENABLED=true` (and the SearXNG /
+crawler containers from `extensions/web_tools/` running) the extension's
+`search_web` becomes the agent's search backend; otherwise it is None. The URL
+reader is always the in-process `backend.tools.web_url.read_url`.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -43,9 +48,24 @@ def _build_client() -> Optional[KloudeksClient]:
     return KloudeksClient()
 
 
+def _build_web_search():
+    """The web-tools extension's SearXNG search when WEB_TOOLS_ENABLED=true;
+    None otherwise, so a `search` step fails as one step with the executor's
+    own "no web search backend configured" error rather than at startup."""
+    from ..extensions.web_tools.team_adapter import WebEvidenceError, get_team_tools
+    try:
+        return get_team_tools()["web_search"]
+    except WebEvidenceError:
+        return None
+    except ValueError as exc:  # WEB_TOOLS_ENABLED=garbage or a bad WEB_* value
+        logger.warning("Web tools misconfigured (%s); search disabled.", exc)
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.agent = Agent(client=_build_client(), url_reader=read_url, web_search=None)
+    app.state.agent = Agent(client=_build_client(), url_reader=read_url,
+                            web_search=_build_web_search())
     try:
         yield
     finally:

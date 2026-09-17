@@ -6,9 +6,25 @@ lakehouse, built so an LLM agent never has to do arithmetic or schema reasoning 
 Submission for the **KKB Hackathon 2026 — Lakehouse Agent Builder and Data Analytics**.
 
 Current state: the ingestion, validation and lakehouse layers are implemented and tested, and the
-agent layer runs end to end against the Kloudeks/MIA open-weight endpoint — a typed plan DSL, six of
-the brief's tools, a verifier and a cited answer. The FastAPI service, frontend and deployment
-described in [`Launch.MD`](Launch.MD) are not yet written.
+agent layer runs end to end against the Kloudeks/MIA open-weight endpoint — a typed plan DSL, the
+brief's tools, a verifier and a cited answer — behind a FastAPI service with a React frontend
+(`backend/api/`, `frontend/`). Docker packaging and deployment are still to come.
+
+An optional [SearXNG + Crawl4AI web-tools extension](extensions/web_tools/README.md) provides
+`search_web`, HTML `read_url`, and automatic `read_web_url` callables, with separately optional
+[file, image, OCR, and Kloudeks vision tools](extensions/web_tools/ASSETS.md). Each capability
+has switches and resource limits. Dependencies run in separate containers; all tools are
+disabled by default (`WEB_TOOLS_ENABLED`) and do not change the pipeline setup below. When enabled,
+the API wires the extension's `search_web` in as the agent's web-search backend; the in-process
+`backend/tools/web_url.py` remains the URL reader either way.
+
+To try the web tools yourself, use the [Docker-to-results testing walkthrough](extensions/web_tools/TESTING.md).
+For developer onboarding without changing the baseline environment, start with
+the [developer guide](extensions/web_tools/DEVELOPER_GUIDE.md).
+For AI integration, see the [tool contracts and usage reference](extensions/web_tools/AI_USAGE.md).
+For the complete search-to-answer demo, see [DEMO.md](extensions/web_tools/DEMO.md).
+For several sources, explicit coverage and conflict reporting, see the
+[multi-source research guide](extensions/web_tools/MULTISOURCE.md).
 
 ---
 
@@ -206,4 +222,7 @@ These are enforced in code and documented at length in [`CLAUDE.md`](CLAUDE.md).
 |---|---|
 | [`Launch.MD`](Launch.MD) | Architecture and execution blueprint: stack, agent design, roadmap |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes for contributors and coding agents: invariants, traps, refresh procedure |
+| [`extensions/web_tools/README.md`](extensions/web_tools/README.md) | Optional web tools overview and fresh-clone onboarding |
+| [`extensions/web_tools/TESTING.md`](extensions/web_tools/TESTING.md) | Manual testing, expected results, saved output, limits, and shutdown |
+| [`extensions/web_tools/AI_USAGE.md`](extensions/web_tools/AI_USAGE.md) | Python tool contracts and guidance for AI consumers |
 | `data/analytics/schema_card.md` | Generated, agent-facing description of the lakehouse |
