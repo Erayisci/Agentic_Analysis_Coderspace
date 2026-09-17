@@ -1,6 +1,52 @@
 # Verification record
 
-## Multi-source enhancement, 2026-09-17
+## Live acceptance of `ee7513f`, 2026-09-17
+
+The clean `perhat` checkout and local `origin/perhat` reference matched `ee7513f`
+before testing. The user reported pushing that commit. A fresh remote query was
+unavailable because this shell lacked GitHub HTTPS authentication.
+
+| Executed check | Result |
+| --- | --- |
+| Host extension suite | 96 passed; 15 Docker cases skipped by this invocation |
+| Docker document/parser/OCR suite | All 10 passed |
+| Docker Chromium suite | All 5 passed |
+| Service startup/readiness | All three services healthy |
+| Live BDDK search | `ok`, 3 results |
+| HTML read and attachment discovery | Usable content/links; discovery explicitly partial under its list limits |
+| Extensionless BDDK PDF | Physical page 5 extracted, 3,223 characters; zero model calls; no processing errors |
+| Text, CSV and XLSX URLs | Actual public downloads parsed; text/Excel truncation limits explicitly reported |
+| Public image and local OCR | Python logo text extracted; zero model calls; no processing errors |
+| MIA PDF vision | One call, native text plus interpretation retained; no processing errors |
+| Two supplied text documents → answer | Two distinct documents, two tool calls, one model call; both requirements supported, `[S1]`/`[S2]` citations, no missing information |
+| Model-directed search → two HTML reads → answer | Three tool calls, four model calls; two distinct documents, both requirements supported, valid citations, no missing information |
+
+Both research runs compared the scope of RFC 9110 and RFC 9111 in Turkish and
+returned `stop_reason: sufficient_evidence`, with `error: null`. Their overall
+status was `partial` because only bounded excerpts of the long documents were
+read. This is disclosed scope, not a model or transport failure. The PDF/vision
+reads likewise processed only the explicitly requested physical page.
+
+In total, all 111 extension tests were exercised across the host and Docker
+suites. The existing 57-test baseline result below remains applicable: this
+acceptance run changed no application code or baseline dependencies. The model
+tests used six calls in total and did not raise or reset quota limits. Coverage
+assessments and valid citation IDs still do not establish semantic entailment or
+independent corroboration.
+
+Logs and complete result JSON are saved in the ignored local directory
+`extensions/web_tools/.cache/acceptance-5kb904q_/`; `summary.json` records statuses
+and usage. These artifacts are local, not part of the Git handoff. Previous worker
+capabilities were restored after testing: documents, links and agent enabled;
+images, OCR and vision disabled. The private `.env` was not rewritten.
+
+The standalone tools are ready for team integration within the documented limits.
+Connecting the main analytical agent, preserving limitations in its UI, verifying
+another developer's setup, and deploying the combined application remain shared
+team acceptance work. An extension-specific CI job is a useful follow-up; the
+current baseline workflow does not execute these optional tests.
+
+## Earlier multi-source local verification, 2026-09-17
 
 Implemented on the existing `perhat` working tree, preserving the earlier changes
 and stash. No other branch was changed. See [MULTISOURCE_PLAN.md](MULTISOURCE_PLAN.md)

@@ -9,12 +9,12 @@ are separately enabled capabilities. All tools are disabled by default.
 
 ## 1. Get the code and prerequisites
 
-Use your existing checkout. The latest implementation was developed on `perhat`;
-teammates need the commits containing these changes published to a shared branch
-before pulling them. A branch name alone does not include uncommitted work.
+Use your existing checkout. The implementation was published by the owner on
+`perhat` as commit `ee7513f`; use that commit or a later reviewed version containing
+it. A branch name alone does not include subsequent uncommitted work.
 Do not overwrite local changes or switch another developer's branch automatically.
 
-Only if you do not already have a checkout, after the changes are published:
+Only if you do not already have a checkout:
 
 ```bash
 git clone --branch perhat https://github.com/Erayisci/Agentic_Analysis_Coderspace.git
@@ -228,9 +228,10 @@ already-running containers. Optional capabilities can be disabled individually.
 Before team handoff, publish all required code/docs on the agreed branch, run
 `web-tools test`, run `asset-test` and `browser-test` with the matching Docker
 capabilities, and exercise the live research example if delivering that feature.
-The latest recorded local run passed 96 extension tests and 57 baseline tests;
-15 Docker cases and the enhanced live MIA flow still need rerunning. See
-[VERIFICATION.md](VERIFICATION.md) for dated evidence and current open checks.
+The recorded acceptance run passed 96 host extension tests plus 15 Docker tests
+and exercised live MIA research with two sources. The earlier baseline run passed
+57 tests. See [VERIFICATION.md](VERIFICATION.md) for dated evidence and the remaining
+combined-application integration checks.
 
 ## Short team explanation / Kısa ekip açıklaması
 
@@ -238,10 +239,12 @@ The latest recorded local run passed 96 extension tests and 57 baseline tests;
 baseline Python environment and startup separate. Developers start the services
 and register the Python callables with their agent. Search, URL reading, OCR,
 vision and multi-source research have separate settings and resource limits.
-Publishing the latest changes and live Docker/MIA verification remain pending.
+The implementation is on `perhat`; live Docker/MIA acceptance passed. Integration
+and deployment of the team's combined application remain separate work.
 
 **Türkçe:** Web araçları, mevcut Python ortamını ve başlangıç akışını değiştirmeyen,
 isteğe bağlı bir Docker eklentisidir. Geliştiriciler servisleri başlatıp Python
 fonksiyonlarını kendi ajanlarına bağlayabilir. Arama, URL okuma, OCR, görsel
 yorumlama ve çok kaynaklı araştırma ayrı ayarlar ve kaynak limitleriyle çalışır.
-Son değişikliklerin paylaşılması ve canlı Docker/MIA doğrulaması henüz tamamlanmadı.
+Kod `perhat` dalında paylaşıldı ve canlı Docker/MIA kabul testleri geçti. Ekibin
+ana uygulamasına entegrasyon ve dağıtım ayrı işler olarak devam ediyor.

@@ -1,8 +1,9 @@
 # Multi-source research implementation plan
 
-Progress (2026-09-17): steps 1–4 implemented; step 5 host tests and baseline checks
-passed. Docker/parser/browser and live MIA verification are pending Docker
-availability in this WSL session. See [VERIFICATION.md](VERIFICATION.md).
+Progress (2026-09-17): steps 1–5 completed for the standalone extension. All 111
+extension tests passed across host and Docker suites, and live multi-source MIA
+research passed with supplied URLs and with model-directed search. Baseline checks
+previously passed. See [VERIFICATION.md](VERIFICATION.md) for scope and evidence.
 
 Scope: extend the optional `ask` runner on `perhat`. Preserve the existing search,
 HTML, document, OCR and vision tools and their default-off configuration.
