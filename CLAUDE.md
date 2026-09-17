@@ -561,7 +561,7 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 246 tests.
+macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 397 tests (15 of the web-tools extension's skip without its containers).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
 pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web

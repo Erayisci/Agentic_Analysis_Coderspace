@@ -40,7 +40,7 @@ pip install -e ".[dev]"
 
 python -m backend.ingestion.bddk_bulletin --from-cache  # raw workbooks from the archived responses
 python -m backend.lakehouse.build                       # parse -> validate -> parquet + duckdb
-pytest -q                                               # 246 tests
+pytest -q                                               # 397 tests (382 run, 15 skip without the web-tools containers)
 ```
 
 That produces `data/lakehouse.duckdb` and `data/analytics/schema_card.md`. The whole thing runs offline
