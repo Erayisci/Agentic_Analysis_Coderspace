@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies, detect_anomalies_in_series
+from ..tools.causality import analyze_causality
 from ..tools.charts import build_chart, chart_summary
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
@@ -200,7 +201,10 @@ class Executor:
         elif step.method == "causality":
             other = self._resolve_column(step.against or step.other_column,
                                          required="causality needs a second column")
-            result = self._causality(column, other)
+            result = analyze_causality(
+                cause=self.session.artifact.frame[other],
+                effect=self.session.artifact.frame[column],
+                cause_name=other, effect_name=column)
         else:
             raise ValueError(f"unknown analysis method {step.method!r}")
         self.session.facts.setdefault("analysis", {})[f"{step.method}:{column}"] = result
@@ -334,45 +338,3 @@ class Executor:
                 "method": "PELT (rbf, pen=5)", "n_breakpoints": len(breaks),
                 "breakpoints": [series.index[i].strftime("%Y-%m") for i in breaks],
                 "segments": segments}
-
-    def _causality(self, column: str, other: str) -> Dict[str, Any]:
-        """Granger causality other -> column, on differenced series if needed.
-
-        Reported as evidence, never as proof: the test says one series helps
-        predict another, which is not the same claim as causation, and the
-        wording here is what the composer is allowed to repeat.
-        """
-        import numpy as np
-        from statsmodels.tsa.stattools import adfuller, grangercausalitytests
-
-        frame = self.session.artifact.frame[[column, other]].dropna()
-        if len(frame) < 24:
-            raise ValueError(f"need at least 24 aligned observations, have {len(frame)}")
-
-        differenced = False
-        values = frame.copy()
-        for name in (column, other):
-            if adfuller(values[name].to_numpy(dtype=float), autolag="AIC")[1] > 0.05:
-                differenced = True
-        if differenced:
-            values = values.diff().dropna()
-
-        max_lag = min(6, max(1, len(values) // 5 - 1))
-        raw = grangercausalitytests(values[[column, other]].to_numpy(dtype=float), maxlag=max_lag)
-        # int(...): statsmodels' lag keys are numpy.int64, which json.dumps
-        # refuses as a dict key -- this result reaches the API response.
-        by_lag = {int(lag): round(float(stats[0]["ssr_ftest"][1]), 5) for lag, stats in raw.items()}
-        best_lag = min(by_lag, key=by_lag.get)
-        p_value = by_lag[best_lag]
-        correlation = float(np.corrcoef(frame[column], frame[other])[0, 1])
-        return {
-            "target": column, "predictor": other, "differenced": differenced,
-            "max_lag": max_lag, "p_values_by_lag": by_lag,
-            "best_lag": best_lag, "best_p_value": p_value,
-            "correlation": round(correlation, 4),
-            "verdict": ("predictive" if p_value < 0.05 else "not predictive"),
-            "interpretation": (
-                f"{other} Granger-{'oncüler' if p_value < 0.05 else 'oncülemez'} {column} "
-                f"(lag={best_lag}, p={p_value:.4f}). Granger nedensellik ONGORULEBILIRLIKTIR, "
-                "nedensellik KANITI DEGILDIR."),
-        }

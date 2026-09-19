@@ -232,7 +232,7 @@ CLAUSE_SPLIT = re.compile(
     r"[.,;?!]|\bbuna ek olarak\b|\bayrica\b|\bayrıca\b|\bve\b|\bile\b|\bda\b|\bde\b", re.I)
 
 
-def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
+def discover_concepts(question: str, per_concept: int = 5, limit: int = 8):
     """Discovery over a whole question, by splitting it into concepts first.
 
     A demo question is a paragraph -- "...konut kredilerinin dagilimini aylik
@@ -241,6 +241,15 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
     among thirty filler ones. No weighting fixes that: the sentence genuinely
     contains two questions. Splitting on clause boundaries and searching each
     piece recovers both, which is what the planner needs to see.
+
+    A causality question -- "konut kredisi faizi konut kredisi hacmini
+    etkiliyor mu" -- is the case CLAUSE_SPLIT cannot separate at all: Turkish
+    puts the verb last, so both series sit in one clause with no delimiter
+    between them, and per_concept=3 only had room for the rate series (the
+    volume series, `tuketici_kredileri_konut`, measured at rank 4 in exactly
+    this clause) -- the planner never saw the second half of the question it
+    was asked to relate. per_concept=5 was the smallest bump that recovered
+    it without needing to solve subject/object splitting.
     """
     chunks = [chunk.strip() for chunk in CLAUSE_SPLIT.split(question or "") if chunk.strip()]
     chunks = [chunk for chunk in chunks

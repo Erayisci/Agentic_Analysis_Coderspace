@@ -68,7 +68,9 @@ class Step(BaseModel):
     # analyze / find_periods
     method: Optional[Method] = None
     direction: Optional[Literal["up", "down"]] = None
-    against: Optional[str] = Field(None, description="second column for a coincidence question")
+    against: Optional[str] = Field(
+        None, description="second column: the compared series for find_periods, or the "
+                          "candidate cause/predictor series for analyze(method=causality)")
     against_direction: Optional[Literal["up", "down"]] = None
 
     # read_url / search / ingest_external
@@ -93,6 +95,8 @@ class Step(BaseModel):
         missing = [field for field in REQUIRED[self.op] if getattr(self, field, None) in (None, "")]
         if missing:
             raise ValueError(f"step op={self.op!r} is missing required field(s): {missing}")
+        if self.op == "analyze" and self.method == "causality" and not (self.against or self.other_column):
+            raise ValueError("causality analysis requires against or other_column (the candidate cause series)")
         return self
 
     def arguments(self) -> dict:
@@ -129,6 +133,10 @@ Adimlar:
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda).
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: anomaly, changepoint veya causality.
+  causality icin column=hedef seri ve against=olasi neden/oncul seri OLMAK ZORUNDADIR --
+  ikisi de once fetch_series ile tabloda olmali. "X Y'yi etkiliyor mu", "X Y'nin oncusu mu",
+  "aralarinda nedensellik var mi" gibi sorularda ILGISIZ bir seri CEKME/CIZME -- dogrudan
+  analyze(method=causality, column=Y, against=X) kullan.
 - chart: grafik ciz.
 - read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa. read_url sadece OKUR
   (metin/onizleme dondurur), tabloya sutun EKLEMEZ.

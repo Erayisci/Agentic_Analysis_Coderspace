@@ -12,12 +12,13 @@ lakehouse keys that discovery already found, and the columns the current table
 holds. A 27B model asked to plan without that invents keys; asked to choose
 among candidates it was handed, it mostly picks correctly.
 """
+import re
 from typing import Any, Dict, List, Optional
 
 from ..llm import KloudeksClient, LLMError
 from ..tools.lakehouse import discover, discover_concepts
 from .composer import compose
-from .executor import Executor
+from .executor import Executor, _column_name, _normalise_key
 from .planner import Plan, Step, planner_messages, template_plan
 from .router import Route, route
 from .state import Session
@@ -27,6 +28,47 @@ from .verifier import verify
 # slot with rate series and the planner never saw the loan series it was asked
 # about. Twelve costs ~200 prompt tokens and gives each corpus four seats.
 MAX_CANDIDATES_IN_CONTEXT = 12
+
+# Measured against the live model, two separate failure modes for the same
+# question ("faiz krediyi etkiliyor mu"): (1) it fetches both series -- so
+# discovery and key selection work fine -- but then only charts them, never
+# emitting the analyze step the question actually asked for; (2) it tries to,
+# but folds both series into `against` and leaves `column` empty, which fails
+# Plan validation outright and discards the *entire* plan, landing on the
+# discovery-based deterministic fallback -- same failure shape as no model
+# being reachable at all. Both are repaired the same way as a missing read_url
+# step is repaired below: insert the step the question named, on top of
+# whichever plan (model's or fallback's) made it through, rather than betting
+# on the next prompt tweak to fix the model.
+CAUSALITY_TRIGGER = re.compile(
+    r"\b(nedensellik|neden[- ]sonu[çc]|etkiliyor\s*mu|etkiler\s*mi|etkiledi[ğg]ini|"
+    r"öncü\s*g[öo]sterge|granger|causalit(y|e)|causal\b)", re.I)
+
+
+def _ensure_causality_step(plan: Plan, question: str) -> Plan:
+    """If the question asks for causality and the plan fetched two series but
+    never ran the test, run it instead of only charting (or discovering) them."""
+    if not CAUSALITY_TRIGGER.search(question or ""):
+        return plan
+    if any(step.op == "analyze" and step.method == "causality" for step in plan.steps):
+        return plan
+    producing = [step for step in plan.steps if step.op in ("fetch_series", "transform", "ingest_external")]
+    if len(producing) < 2:
+        return plan  # nothing to point `column`/`against` at -- not this repair's job
+
+    def _name(step: Step) -> str:
+        fallback = _normalise_key(step.key) if step.key else "series"
+        return _column_name(step, fallback)
+
+    # The first two series are what the question named; anything fetched after
+    # that is more likely exploratory (or, per the mis-route this repairs,
+    # spurious) than the intended second half of the pair.
+    cause, effect = _name(producing[0]), _name(producing[1])
+    if cause == effect:
+        return plan
+    insert_at = next((i for i, step in enumerate(plan.steps) if step.op == "chart"), len(plan.steps))
+    plan.steps.insert(insert_at, Step(op="analyze", method="causality", column=effect, against=cause))
+    return plan
 
 
 def build_context(question: str, session: Session, route_result: Route) -> str:
@@ -93,23 +135,47 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
                 steps=steps, reasoning="deterministic: top-ranked discovery candidates")
 
 
+def _fallback_plan(question: str, route_result: Route) -> Plan:
+    if route_result.intent in ("series_analysis", "followup"):
+        return deterministic_series_plan(question, route_result)
+    return template_plan(route_result.intent, question, route_result.urls,
+                         route_result.start, route_result.end)
+
+
+DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external")
+
+
 def make_plan(question: str, session: Session, route_result: Route,
               client: Optional[KloudeksClient]) -> Plan:
-    """A validated plan: from the model when possible, from a template otherwise."""
+    """A validated plan: from the model when possible, from a template otherwise.
+
+    Both paths go through the same repairs below, `_ensure_causality_step`
+    included -- a model that names the wrong field for its second series (seen
+    live: both series folded into `against`, `column` left empty) fails
+    validation entirely and lands on the *deterministic* fallback same as a
+    model that isn't reachable at all, so the fallback needs the same repair
+    the model's own plan gets, not a lesser one.
+    """
     if client is None:
-        if route_result.intent in ("series_analysis", "followup"):
-            return deterministic_series_plan(question, route_result)
-        return template_plan(route_result.intent, question, route_result.urls,
-                             route_result.start, route_result.end)
-    try:
-        plan = client.structured(
-            planner_messages(question, build_context(question, session, route_result)),
-            Plan, max_tokens=1400)
-    except LLMError:
-        if route_result.intent in ("series_analysis", "followup"):
-            return deterministic_series_plan(question, route_result)
-        return template_plan(route_result.intent, question, route_result.urls,
-                             route_result.start, route_result.end)
+        plan = _fallback_plan(question, route_result)
+    else:
+        try:
+            plan = client.structured(
+                planner_messages(question, build_context(question, session, route_result)),
+                Plan, max_tokens=1400)
+        except LLMError:
+            plan = _fallback_plan(question, route_result)
+
+        # A plan that only discovers (and maybe charts nothing) is a *valid*
+        # plan but a dead end -- measured live, a model handed a starting-from-
+        # empty question sometimes emits just `discover` and stops rather than
+        # committing to the fetch it just found candidates for. Rule 1 in the
+        # prompt ("don't invent a key") makes this the *safe* failure, but a
+        # safe non-answer is still not an answer: the same deterministic
+        # fallback used for an unreachable model recovers a real table here too.
+        if (route_result.intent in ("series_analysis", "followup") and not session.has_artifact()
+                and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
+            plan = _fallback_plan(question, route_result)
 
     # The router's regex read of the date range beats the model's: it is exact,
     # and a plan that silently drops the window returns 67 months for a
@@ -129,6 +195,7 @@ def make_plan(question: str, session: Session, route_result: Route,
         plan.end = plan.end or index.max().strftime("%Y-%m-%d")
     if route_result.urls and not any(step.op == "read_url" for step in plan.steps):
         plan.steps = template_plan("url_analysis", question, route_result.urls).steps + plan.steps
+    plan = _ensure_causality_step(plan, question)
     return plan
 
 

@@ -7,10 +7,13 @@ number is testable. The model's own reliability is measured separately, by
 than of this code.
 """
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
 
+from backend.agent.composer import deterministic_summary
 from backend.agent.executor import Executor, _normalise_key
+from backend.agent.pipeline import _ensure_causality_step, make_plan
 from backend.agent.planner import Plan, Step, template_plan
 from backend.agent.router import extract_window, route
 from backend.agent.state import AnalysisArtifact, ColumnLineage, Session
@@ -321,10 +324,9 @@ def test_a_series_carries_its_provenance():
 
 
 def test_causality_result_is_json_serialisable():
-    """Regression test: statsmodels' grangercausalitytests keys p_values_by_lag
-    by numpy.int64, and json.dumps refuses a non-native-int dict key -- this
-    result reaches the API response verbatim via session.facts, so it must
-    round-trip through json.dumps, not just look right when printed."""
+    """Regression test: the causality tool's stats (numpy floats/ints from
+    statsmodels) must round-trip through json.dumps, not just look right when
+    printed -- this result reaches the API response verbatim via session.facts."""
     import json
 
     needs_lakehouse()
@@ -338,9 +340,143 @@ def test_causality_result_is_json_serialisable():
     assert session.audit[-1].ok, session.audit[-1].detail
 
     result = session.facts["analysis"]["causality:konut"]
-    assert type(result["best_lag"]) is int  # not numpy.int64
-    assert all(type(lag) is int for lag in result["p_values_by_lag"])
+    assert type(result["lag_selection"]["selected_lag"]) is int  # not numpy.int64
     json.dumps(result)  # raises if a numpy scalar leaked through
+
+
+def test_causality_step_without_a_second_series_is_rejected_at_the_plan_level():
+    """A model that mis-routes "is there causality between X and Y" into
+    analyze(method=causality) without naming the predictor series must fail
+    plan validation, not silently run a one-column analysis (or, upstream,
+    fall back to fetching an unrelated series) -- see the against/other_column
+    field, which is the only place the second series can come from."""
+    with pytest.raises(ValueError, match="causality analysis requires against or other_column"):
+        Step(op="analyze", method="causality", column="konut")
+
+
+def _synthetic_rate_and_loan(seed: int, n: int = 100):
+    """rate[t-2] contributes to loan[t], so rate should Granger-predict loan."""
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2018-01-01", periods=n, freq="MS")
+    rate = rng.normal(size=n)
+    loan = rng.normal(scale=0.3, size=n)
+    for t in range(2, n):
+        loan[t] += 0.8 * rate[t - 2]
+
+    artifact = AnalysisArtifact()
+    artifact.add_column("rate", pd.Series(rate, index=index),
+                        ColumnLineage(column="rate", label="Rate", source="macro",
+                                      unit="%", temporal_semantics="rate", key="rate"))
+    artifact.add_column("loan", pd.Series(loan, index=index),
+                        ColumnLineage(column="loan", label="Loan", source="bulletin",
+                                      unit="milyon TL", temporal_semantics="stock", key="loan"))
+    return artifact
+
+
+def test_executor_runs_causality_on_artifact_columns():
+    """The executor delegates causality to the deterministic tool rather than
+    computing it inline, and both directions are named by the analysis, not
+    guessed from column order."""
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="analyze", method="causality", column="loan", against="rate"),
+    ])
+    session = Executor(Session(artifact=_synthetic_rate_and_loan(123))).run(plan)
+    assert session.audit[0].ok
+
+    result = session.facts["analysis"]["causality:loan"]
+    assert result["cause"] == "rate"
+    assert result["effect"] == "loan"
+    assert result["forward"]["significant"]
+
+
+class _StubPlanClient:
+    """A fake KloudeksClient that returns one fixed plan, for testing the
+    repairs make_plan applies to whatever the model handed back."""
+
+    def __init__(self, plan: Plan):
+        self._plan = plan
+
+    def structured(self, messages, schema, max_tokens=1400, **kwargs):
+        return self._plan
+
+
+def test_make_plan_falls_back_when_the_model_only_discovers_and_stops():
+    """Measured live: a model handed a fresh question sometimes emits a
+    single `discover` step and stops, rather than committing to the fetch it
+    already found candidates for -- a plan that is *valid* (discover needs
+    only `query`) but produces an empty table, which is a worse failure than
+    no fallback at all. make_plan treats it the same as an unreachable model."""
+    needs_lakehouse()
+    question = "Konut kredisi faizi konut kredisi hacmini etkiliyor mu?"
+    dead_end = Plan(intent="series_analysis", steps=[Step(op="discover", query="konut kredisi hacmi")])
+    route_result = route(question, has_artifact=False, client=None)
+    plan = make_plan(question, Session(), route_result, _StubPlanClient(dead_end))
+    assert any(step.op == "fetch_series" for step in plan.steps)
+    # the causality repair still applies on top of the recovered fallback
+    assert any(step.op == "analyze" and step.method == "causality" for step in plan.steps)
+
+
+def test_make_plan_keeps_a_discover_only_plan_for_a_followup_with_an_existing_table():
+    """The dead-end repair is for a *fresh* question with nothing to show for
+    it -- a follow-up that already has a table is not a dead end just because
+    this particular step only re-discovers a key."""
+    needs_lakehouse()
+    dead_end = Plan(intent="followup", steps=[Step(op="discover", query="ek bir seri")])
+    artifact = AnalysisArtifact()
+    artifact.add_column("konut", pd.Series([1.0, 2.0], index=pd.date_range("2021-01-01", periods=2, freq="MS")),
+                        ColumnLineage(column="konut", label="Konut", source="bulletin",
+                                      unit="milyon TL", temporal_semantics="stock"))
+    session = Session(artifact=artifact)
+    route_result = route("ek bir seri bul", has_artifact=True, client=None)
+    plan = make_plan("ek bir seri bul", session, route_result, _StubPlanClient(dead_end))
+    assert plan.steps == dead_end.steps
+
+
+def test_ensure_causality_step_repairs_a_plan_that_fetched_but_forgot_to_test():
+    """Measured against the live model: asked "faiz krediyi etkiliyor mu", it
+    reliably fetches both series but then only charts them -- a plan that is
+    valid for a different question. The pipeline-level repair inserts the
+    analyze step the question actually asked for, before any chart step."""
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="TP.KTF10", source="macro"),
+        Step(op="fetch_series", key="krediler", source="bulletin", dataset="bilanco"),
+        Step(op="chart"),
+    ])
+    repaired = _ensure_causality_step(plan, "Faiz ile kredi arasinda nedensellik var mi?")
+    ops = [(s.op, s.method) for s in repaired.steps]
+    assert ("analyze", "causality") in ops
+    causality_step = next(s for s in repaired.steps if s.op == "analyze")
+    assert causality_step.column == "krediler"
+    assert causality_step.against == "TP_KTF10"
+    assert ops.index(("analyze", "causality")) < ops.index(("chart", None))
+
+
+def test_ensure_causality_step_is_a_noop_without_the_trigger_phrase():
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="TP.KTF10", source="macro"),
+        Step(op="fetch_series", key="krediler", source="bulletin", dataset="bilanco"),
+        Step(op="chart"),
+    ])
+    repaired = _ensure_causality_step(plan, "Faiz ve kredi hacmini grafikle goster.")
+    assert not any(s.op == "analyze" for s in repaired.steps)
+
+
+def test_ensure_causality_step_is_a_noop_with_fewer_than_two_series():
+    plan = Plan(intent="series_analysis", steps=[Step(op="discover", query="konut kredisi hacmi")])
+    repaired = _ensure_causality_step(plan, "Konut kredisi faizi hacmini etkiliyor mu?")
+    assert not any(s.op == "analyze" for s in repaired.steps)
+
+
+def test_deterministic_summary_includes_causality_result():
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="analyze", method="causality", column="loan", against="rate"),
+    ])
+    session = Executor(Session(artifact=_synthetic_rate_and_loan(321))).run(plan)
+
+    summary = deterministic_summary(session, "Faiz kredileri etkiliyor mu?")
+    assert "Nedensellik analizi" in summary
+    assert "rate -> loan" in summary
+    assert "nedensellik kaniti degil" in summary
 
 
 # --- executor end to end ----------------------------------------------------

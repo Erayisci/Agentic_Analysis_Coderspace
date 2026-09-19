@@ -97,6 +97,21 @@ def deterministic_summary(session: Session, question: str) -> str:
                       f"{found.get('against', '-')} beklendigi gibi davranmadigi "
                       f"{found['n_periods']} donem: {months or '-'}"]
 
+    for key, analysis in session.facts.get("analysis", {}).items():
+        if not key.startswith("causality:"):
+            continue
+        cause = analysis.get("cause", "?")
+        effect = analysis.get("effect", "?")
+        forward = analysis.get("forward", {})
+        reverse = analysis.get("reverse", {})
+        lag = analysis.get("lag_selection", {}).get("selected_lag")
+        classification = analysis.get("classification", "unknown")
+        lines += ["", (f"Nedensellik analizi ({cause} -> {effect}): "
+                       f"Granger ileri yon p={forward.get('p_value')}, "
+                       f"ters yon p={reverse.get('p_value')}, "
+                       f"secili gecikme={lag}, siniflandirma={classification}."),
+                  "Bu sonuc nedensellik kaniti degil, ongorulebilirlik/predictive precedence gostergesidir."]
+
     caveats = session.facts.get("verification", {}).get("caveats", [])
     if caveats:
         lines += ["", "Uyarilar: " + "; ".join(caveats[:3])]
