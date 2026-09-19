@@ -26,6 +26,8 @@ Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
              "read_url", "search", "chart", "ingest_external", "clear_table"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio"]
 Method = Literal["anomaly", "changepoint", "causality"]
+Kind = Literal["auto", "level", "trend", "volatility"]          # changepoint: what kind of change
+Sensitivity = Literal["low", "medium", "high"]                  # changepoint: how eager to cut
 Source = Literal["bulletin", "weekly", "macro"]
 MonthlyRule = Literal["last", "avg", "sum"]
 
@@ -35,7 +37,7 @@ REQUIRED: dict = {
     "discover": ("query",),
     "fetch_series": ("key",),
     "transform": ("operation", "column"),
-    "analyze": ("method", "column"),
+    "analyze": ("method",),          # column required too; resolved at Plan level (Plan._fill_analyze_columns)
     "find_periods": ("column",),
     "read_url": ("url",),
     "search": ("query",),
@@ -67,6 +69,10 @@ class Step(BaseModel):
 
     # analyze / find_periods
     method: Optional[Method] = None
+    kind: Optional[Kind] = Field(None, description="changepoint only: volatility when the question is about "
+                                                   "stability (dalgalanma/oynaklik); otherwise leave unset (auto)")
+    sensitivity: Optional[Sensitivity] = Field(None, description="changepoint only: high to surface smaller "
+                                                                 "shifts, low for only the major ones")
     direction: Optional[Literal["up", "down"]] = None
     against: Optional[str] = Field(None, description="second column for a coincidence question")
     against_direction: Optional[Literal["up", "down"]] = None
@@ -115,6 +121,27 @@ class Plan(BaseModel):
             raise ValueError("a plan must have at least one step unless intent is 'unsupported'")
         return self
 
+    @model_validator(mode="after")
+    def _fill_analyze_columns(self) -> "Plan":
+        """An analyze step must name a column. Small models reliably forget
+        this right after fetching the very series they mean; when the plan
+        makes it unambiguous -- the most recent step that put a column on the
+        table -- fill it in rather than fail the whole plan. Fail, with the
+        same message as any other missing field, only when nothing precedes.
+        """
+        produced: list = []
+        for i, step in enumerate(self.steps):
+            if step.op in ("fetch_series", "transform", "ingest_external") and step.as_name:
+                produced.append(step.as_name)
+            elif step.op == "fetch_series" and step.key:
+                produced.append(step.key)       # executor names an as_name-less fetch by its key
+            elif step.op == "analyze" and not step.column:
+                if not produced:
+                    raise ValueError(f"step {i} op='analyze' is missing required field(s): ['column'] "
+                                     "and no earlier step put a column on the table")
+                step.column = produced[-1]
+        return self
+
 
 PLANNER_SYSTEM = """Sen bir finansal veri analiz ajanisin. Turkiye bankacilik (BDDK) ve makro (TCMB EVDS) \
 verilerini iceren bir lakehouse uzerinde calisiyorsun.
@@ -128,7 +155,11 @@ Adimlar:
 - transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda).
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
-- analyze: anomaly, changepoint veya causality.
+- analyze: method (anomaly, changepoint veya causality) ve column ZORUNLU. column = analiz edilecek
+  sutunun adi, yani onceki fetch_series/transform adiminda verdigin as_name (ornegin "konut").
+  changepoint icin: soru dalgalanma / oynaklik / istikrar hakkindaysa kind=volatility; aksi halde kind
+  BOS birak (otomatik secilir). Kucuk kirilmalar da istenirse sensitivity=high, sadece buyuk kirilmalar
+  istenirse sensitivity=low; varsayilan medium. causality icin ikinci sutun: against (veya other_column).
 - chart: grafik ciz.
 - read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa. read_url sadece OKUR
   (metin/onizleme dondurur), tabloya sutun EKLEMEZ.

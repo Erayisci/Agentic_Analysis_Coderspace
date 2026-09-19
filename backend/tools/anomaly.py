@@ -24,52 +24,44 @@ flagged numbers are.
 """
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
+from .frequency import find_gaps, infer_frequency
+from .outliers import classify_flags, default_lookahead, score_outliers, validate_params
 from .series import load_series
 
 
-def _score(series: pd.Series, on: str, window: int, z_threshold: float, iqr_multiplier: float) -> dict:
+def _score(series: pd.Series, on: str, window: int, z_threshold: float, iqr_multiplier: float,
+           lookahead: Optional[int] = None) -> dict:
     """The method itself, over a plain series -- shared by both entry points
     below so "loaded from the lakehouse" and "already have it in hand" (an
-    external or derived column) can never silently score differently."""
-    if on not in ("change", "level"):
-        raise ValueError(f"on must be 'change' or 'level', got {on!r}")
-    if window < 3:
-        raise ValueError("window must be >= 3")
+    external or derived column) can never silently score differently.
 
-    scored = series.pct_change(fill_method=None) * 100 if on == "change" else series
-    scored = scored.dropna()
-
-    if len(scored) <= window:
-        raise ValueError(
-            f"series has {len(scored)} scoreable point(s), need more than "
-            f"window={window} to compute a rolling baseline"
-        )
-
-    roll_mean = scored.rolling(window, min_periods=window).mean()
-    roll_std = scored.rolling(window, min_periods=window).std(ddof=0)
-    z_score = (scored - roll_mean) / roll_std.replace(0, np.nan)
-
-    roll_q1 = scored.rolling(window, min_periods=window).quantile(0.25)
-    roll_q3 = scored.rolling(window, min_periods=window).quantile(0.75)
-    roll_iqr = roll_q3 - roll_q1
-    lower_fence = roll_q1 - iqr_multiplier * roll_iqr
-    upper_fence = roll_q3 + iqr_multiplier * roll_iqr
-
-    z_flag = z_score.abs() >= z_threshold
-    iqr_flag = (scored < lower_fence) | (scored > upper_fence)
-    is_anomaly = (z_flag & iqr_flag).fillna(False)
+    The maths lives in `tools.outliers.score_outliers` so that change
+    detection applies the very same rule before it looks for breaks; each
+    flag is then classified by `tools.outliers.classify_flags` as a one-off
+    `spike`, a `regime_start` (the series stays outside the fence afterwards
+    -- a change point, not an anomaly) or `undetermined` (nothing after it).
+    """
+    validate_params(on, window)
+    scores = score_outliers(series, on=on, window=window, z_threshold=z_threshold,
+                            iqr_multiplier=iqr_multiplier)
+    scored, roll_mean, z_score = scores.scored, scores.roll_mean, scores.z_score
+    if lookahead is None:
+        lookahead = default_lookahead(window)
+    kinds = classify_flags(scores, lookahead)
+    fmt = infer_frequency(series.index)[2] if len(series) >= 3 else "%Y-%m"   # YYYY-MM-DD for weekly/daily
+    gaps = find_gaps(series.index, fmt) if len(series) >= 3 else []
 
     anomalies = []
-    for period in scored.index[is_anomaly]:
+    for period in scores.periods:
         anomalies.append({
-            "period": period.strftime("%Y-%m"),
+            "period": period.strftime(fmt),
             "scored_value": round(float(scored.loc[period]), 6),
             "raw_value": float(series.loc[period]),
             "z_score": round(float(z_score.loc[period]), 3),
             "direction": "above" if scored.loc[period] > roll_mean.loc[period] else "below",
+            "kind": kinds[period],
         })
 
     return {
@@ -77,11 +69,14 @@ def _score(series: pd.Series, on: str, window: int, z_threshold: float, iqr_mult
         "window": window,
         "z_threshold": z_threshold,
         "iqr_multiplier": iqr_multiplier,
-        "period_start": series.index.min().strftime("%Y-%m"),
-        "period_end": series.index.max().strftime("%Y-%m"),
+        "lookahead": lookahead,
+        "period_start": series.index.min().strftime(fmt),
+        "period_end": series.index.max().strftime(fmt),
         "n_points": int(len(series)),
         "n_scored": int(len(scored)),
         "n_anomalies": len(anomalies),
+        "kinds": {k: sum(a["kind"] == k for a in anomalies) for k in ("spike", "regime_start", "undetermined")},
+        "gaps": gaps,
         "anomalies": anomalies,
     }
 
@@ -96,6 +91,7 @@ def detect_anomalies(
     window: int = 12,
     z_threshold: float = 3.0,
     iqr_multiplier: float = 1.5,
+    lookahead: Optional[int] = None,
 ) -> dict:
     """Flag periods where a series' rolling z-score AND IQR fence both breach.
 
@@ -122,7 +118,7 @@ def detect_anomalies(
     """
     loaded = load_series(key, source=source, dataset=dataset, currency=currency, metric=metric)
     return {**loaded.describe(), "citation": loaded.citation(),
-            **_score(loaded.values, on, window, z_threshold, iqr_multiplier)}
+            **_score(loaded.values, on, window, z_threshold, iqr_multiplier, lookahead)}
 
 
 def detect_anomalies_in_series(
@@ -133,6 +129,7 @@ def detect_anomalies_in_series(
     window: int = 12,
     z_threshold: float = 3.0,
     iqr_multiplier: float = 1.5,
+    lookahead: Optional[int] = None,
 ) -> dict:
     """Same method as `detect_anomalies`, for a series that is already in
     hand rather than loadable from the lakehouse -- an `ingest_external`
@@ -143,4 +140,4 @@ def detect_anomalies_in_series(
     (mirroring `SeriesResult.describe()`/`.citation()`'s shape) so the caller
     states what the series actually is instead of this function guessing.
     """
-    return {**describe, "citation": citation, **_score(series, on, window, z_threshold, iqr_multiplier)}
+    return {**describe, "citation": citation, **_score(series, on, window, z_threshold, iqr_multiplier, lookahead)}
