@@ -16,6 +16,7 @@ from ..transform.bulletin import (
     check_decumulation,
     decumulate,
 )
+from ..transform.finturk import build_finturk_metrics
 from ..validation import identities as validate
 from ..core.config import (
     ANALYTICS_DIR,
@@ -23,6 +24,7 @@ from ..core.config import (
     EVDS_CATALOG_DIR,
     PROCESSED_DIR,
     RAW_BDDK_DIR,
+    RAW_BDDK_FINTURK_JSON_DIR,
     RAW_BDDK_JSON_DIR,
     RAW_BDDK_WEEKLY_DIR,
     RAW_EVDS_JSON_DIR,
@@ -33,6 +35,7 @@ from ..core.config import (
 from ..domain.bulletin_tables import TABLES as BULLETIN_TABLES
 from ..parsing.bddk_sectoral import parse_bddk_directory
 from ..parsing.bddk_bulletin import parse_bulletin_footnotes, parse_bulletin_table
+from ..parsing.bddk_finturk import parse_finturk_archive
 from ..parsing.bddk_weekly import parse_weekly_archive
 from ..parsing.evds import load_catalogue, parse_archive
 from ..parsing.tbb import parse_tbb_directory
@@ -205,6 +208,13 @@ def main() -> int:
           f"{weekly_obs.period.nunique()} weeks, {len(weekly_report)} lifecycle/identity note(s), "
           f"{len(weekly_vs_monthly)} cross-checks against the monthly bulletin passed")
 
+    print("Parsing BDDK FinTurk (il-bazli) tables...")
+    finturk_obs = parse_finturk_archive(RAW_BDDK_FINTURK_JSON_DIR)
+    finturk_metrics = build_finturk_metrics(finturk_obs)
+    print(f"  {len(finturk_obs):,} observations across {finturk_obs.dataset.nunique()} tables, "
+          f"{finturk_obs.province.nunique()} provinces, {finturk_obs.period.nunique()} quarters, "
+          f"{len(finturk_metrics)} metrics indexed")
+
     print("Parsing TCMB EVDS archive...")
     macro_series, macro_native, macro_monthly, macro_coverage = build_macro_tables()
     print(f"  {len(macro_series):,} series, {len(macro_native):,} native observations, "
@@ -243,6 +253,8 @@ def main() -> int:
         "weekly_observations": weekly_obs,
         "weekly_items": weekly_items,
         "weekly_lifecycle_report": weekly_report,
+        "finturk_observations": finturk_obs,
+        "finturk_metrics": finturk_metrics,
         "macro_series": macro_series,
         "macro_observations": macro_monthly,
         "macro_observations_native": macro_native,
@@ -253,6 +265,7 @@ def main() -> int:
                        "bulletin_observations", "bulletin_entities", "bulletin_metrics",
                        "bulletin_footnotes",
                        "weekly_observations", "weekly_items",
+                       "finturk_observations", "finturk_metrics",
                        "macro_series", "macro_observations",
                        "macro_observations_native"}
     connection = duckdb.connect(str(DUCKDB_PATH))

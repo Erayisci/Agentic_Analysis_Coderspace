@@ -193,6 +193,7 @@ def test_the_plan_schema_is_flat_enough_for_guided_decoding():
     ("macro/TP.KTF12", "TP.KTF12"),
     ("TP.KTF12", "TP.KTF12"),
     ("mevduat_katilim_fonu/b_vadeli_mevduat", "mevduat_katilim_fonu/b_vadeli_mevduat"),
+    ("finturk/bireysel_bankacilik/konut_kredisi", "konut_kredisi"),
 ])
 def test_key_normalisation_strips_only_a_source_prefix(raw, expected):
     """A parent/child bulletin key legitimately contains a slash; a model
@@ -321,6 +322,48 @@ def test_a_series_carries_its_provenance():
     assert citation["table"] == "bulletin_observations"
     assert citation["filters"]["entity_key"] == "tuketici_kredileri_konut"
     assert citation["unit"] == "milyon TL" and citation["temporal_semantics"] == "stock"
+
+
+def test_fetch_series_loads_a_finturk_metric_for_one_province():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk",
+             dataset="bireysel_bankacilik", province="İSTANBUL", as_name="konut_istanbul"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    lineage = session.artifact.lineage["konut_istanbul"]
+    assert lineage.source == "finturk" and lineage.unit == "bin TL"
+    assert lineage.citation["filters"]["province"] == "İSTANBUL"
+    assert len(session.artifact.frame) == 22          # 2021-Q1..2026-Q2
+
+
+def test_fetch_series_resolves_a_finturk_province_case_and_dotless_i_safely():
+    """Python's plain `.upper()` turns 'istanbul' into 'ISTANBUL', not the DB's
+    'İSTANBUL' -- a model or user typing the ASCII-only spelling would
+    otherwise get a silent 'no rows' failure for one of the most-asked
+    provinces. See tools.series._finturk, which resolves through
+    core.labels.slugify instead of a naive case-fold."""
+    needs_lakehouse()
+    for spelling in ("Istanbul", "istanbul", "İstanbul", "ISTANBUL"):
+        plan = Plan(intent="series_analysis", steps=[
+            Step(op="fetch_series", key="konut_kredisi", source="finturk",
+                 dataset="bireysel_bankacilik", province=spelling, as_name="konut"),
+        ])
+        session = Executor(Session()).run(plan)
+        assert session.audit[-1].ok, f"{spelling!r}: {session.audit[-1].detail}"
+        assert session.artifact.lineage["konut"].citation["filters"]["province"] == "İSTANBUL"
+
+
+def test_fetch_series_sums_provinces_for_a_finturk_metric_without_one():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk",
+             dataset="bireysel_bankacilik", as_name="konut_turkiye"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    assert "Türkiye" in session.artifact.lineage["konut_turkiye"].label
 
 
 def test_causality_result_is_json_serialisable():

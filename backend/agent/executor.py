@@ -45,7 +45,7 @@ def _normalise_key(key: str) -> str:
     if "/" not in key:
         return key
     head, _, tail = key.rpartition("/")
-    if head.split("/")[0] in ("bulletin", "weekly", "macro"):
+    if head.split("/")[0] in ("bulletin", "weekly", "macro", "finturk"):
         return tail
     return key
 
@@ -117,11 +117,13 @@ class Executor:
     def _fetch(self, step: Step, plan: Plan) -> str:
         key = _normalise_key(step.key)
         source = step.source or ("macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin")
-        currency = step.currency if step.currency is not None else ("total" if source != "macro" else None)
+        currency = step.currency if step.currency is not None else (
+            "total" if source not in ("macro", "finturk") else None)
         resolved_by = ""
         try:
             series = fetch_series(key, source=source, dataset=step.dataset, currency=currency,
-                                  metric=step.metric, start=plan.start, end=plan.end)
+                                  metric=step.metric, start=plan.start, end=plan.end,
+                                  province=step.province)
         except (ValueError, KeyError) as exc:
             # A key the model invented is the most common plan defect -- it wrote
             # TP.TUFE where the corpus publishes TP.GENENDEKS.T1. Discovery already
@@ -132,8 +134,8 @@ class Executor:
                 raise ValueError(f"{exc}; discovery found no alternative for {key!r}") from exc
             best = candidates[0]
             series = fetch_series(best["key"], source=best["source"],
-                                  dataset=best["dataset"] if best["source"] == "bulletin" else None,
-                                  currency="total" if best["source"] != "macro" else None,
+                                  dataset=best["dataset"] if best["source"] in ("bulletin", "finturk") else None,
+                                  currency="total" if best["source"] not in ("macro", "finturk") else None,
                                   start=plan.start, end=plan.end)
             resolved_by = f" (key {key!r} not found; resolved to {best['key']!r} by discovery)"
 

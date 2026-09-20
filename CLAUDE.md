@@ -21,6 +21,9 @@ The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 .venv/bin/python -m backend.ingestion.bddk_bulletin --list          # the 17 bulletin tables
 .venv/bin/python -m backend.ingestion.bddk_weekly --list            # the 9 weekly tables
 .venv/bin/python -m backend.ingestion.bddk_weekly --catalog --fetch # refresh the weekly archive
+.venv/bin/python -m backend.ingestion.bddk_finturk --list            # the 7 il-bazli tables
+.venv/bin/python -m backend.ingestion.bddk_finturk --fetch           # refresh the FinTurk archive (2021-Q1..2026-Q2)
+.venv/bin/pytest tests/test_finturk.py -q  # parser/label invariants only — needs no build
 .venv/bin/pytest tests/test_weekly.py -q    # weekly parser/validation; 3 lakehouse tests skip without a build
 .venv/bin/python -m backend.ingestion.bddk_bulletin --year 2021     # all 17 tables for a year
 .venv/bin/python -m backend.ingestion.bddk_bulletin --year 2026 --months 1-7 --tables 4,5
@@ -51,12 +54,13 @@ agent's web-search backend. The in-process `backend/tools/web_url.py` stays the 
 and `KLOUDEKS_API_KEY` serves both the team client and the extension's own client (a second Kloudeks
 client under `backend/model_clients/` — unifying the two is open work).
 
-The four test files differ in what they need, and the difference is in the fixtures:
+These test files differ in what they need, and the difference is in the fixtures:
 
 | File | Needs a build? |
 |---|---|
 | `tests/test_bulletin.py` | No — parses `bddk_aylik_bulten/_raw_json/` directly, runs on a bare clone |
 | `tests/test_weekly.py` | Mostly no — parses `bddk_haftalik_bulten/_raw/`; its 3 `connection` tests **skip** without `data/lakehouse.duckdb` |
+| `tests/test_finturk.py` | Mostly no — parses `bddk_finturk/_raw_json/`; its 2 `connection` tests **skip** without the database |
 | `tests/test_evds.py` | Mostly no — parses `evds/_raw_json/`; its 6 `connection` tests **skip** without the database |
 | `tests/test_lakehouse.py` | **Yes, hard** — its `connection` fixture calls `pytest.fail`, not `skip` |
 
@@ -74,6 +78,10 @@ for why the request matters.
 The endpoint response carries two fields the Excel rendering drops, and the parser cannot work without
 either: `colModels` (column names, so measures are found by name rather than position) and `BasitFont`
 (the only signal that separates the six different `a) Gerçek Kişiler` rows in the deposit tables).
+
+**`bddk_finturk/_raw_json/` is the source of truth for the FinTurk tables, and it is committed**
+(154 files, 7 tables × 22 quarters). Every cell already arrives as a JSON number, so unlike the
+bulletin archive there is no string-to-number coercion for the parser to depend on getting right.
 
 **`bddk_aylik_bulten/<NN>_<slug>/*.xlsx` is gitignored** — those workbooks are a rendering the downloader
 writes from the same HTTP response as the JSON, so committing both would mean two copies of one dataset
@@ -210,8 +218,47 @@ The brief's required corpus is **2021-01 through 2026-06**, and it is wider than
 | BDDK Aylık Bülten — all 17 tables | **built** (2021-01..2026-07), 135,513 observations |
 | TCMB EVDS — 44 data groups, 1,515 series | **built** (2021-01..2026-07), 158,179 native / 89,680 monthly rows |
 | BDDK Haftalık Bülten — all 9 tables | **built** (2021-01-08..2026-09-04), 163,740 observations |
-| BDDK FinTürk (İllere Göre) | not acquired |
+| BDDK FinTürk (İllere Göre) | **built** (2021-Q1..2026-Q2, 22 quarters), 905,620 observations |
 | TBB Risk Merkezi sectoral | built (2022-01..2026-06) — **supplementary, not required by the brief** |
+
+### BDDK FinTürk (il-bazlı / geographic distribution)
+
+A third BDDK release, separate from both bulletins: **quarterly** (Mar/Jun/Sep/Dec, not monthly
+or weekly) and broken down by **province** (81 iller + `YURT DIŞI`), not by balance-sheet line.
+Fetched from `POST https://www.bddk.org.tr/BultenFinturk/tr/Home/VeriGetir`, which returns the
+same JSON envelope shape as the monthly bulletin (`Json.colModels`, `colNames`,
+`data.rows[].cell`) but needs no session/CSRF handshake, unlike the weekly bulletin's
+`__RequestVerificationToken` dance. Measured live: `tarafList`/`sehirList` accept every value in
+one POST (repeated form keys, ASP.NET's ordinary `List<T>` binding), so the whole corpus is
+`7 tables × 22 quarters` = 154 requests, not that times 7 taraf groups times 82 provinces.
+
+7 tables (`krediler`, `mevduat`, `bireysel_bankacilik`, `sektorel_krediler`, `oranlar`,
+`subeler_ve_nufus`, `altin`), landing in `finturk_observations`:
+`period, source, dataset, province, taraf_code, taraf_name, metric, metric_name, value, unit`.
+
+**No column states an arithmetic formula** (unlike both bulletins' row labels), so there is no
+`formula`/`parent_key` here and nothing resembling `WEEKLY_FORMULA_OVERRIDES` — see
+`domain.finturk_tables` for why that is a fact about the source, not a gap in the parser.
+`taraf_code` 10001 (SEKTÖR) is the whole sector; 10002..10007 break it down by ownership
+(Mevduat, Kalkınma ve Yatırım, Katılım, Yabancı, Kamu, Yerli Özel) — summing all seven
+double-counts, since 10001 already IS their sum. **There is no published national-total row**;
+a Türkiye-wide figure is `SUM(value) GROUP BY period` over every province.
+
+The endpoint's PascalCase field ids (`colModels[i]['name']`, e.g. `AltinDepoGercek`) do not
+derive predictably from the Turkish label BDDK shows for the same column (`colNames[i]`,
+"Altın Mevduatı-Gerçek Kişi") — measured across all seven tables, so `domain.finturk_tables`
+does not hardcode either column list. The parser reads both straight out of each archived
+response and keys `metric` on `core.labels.slugify(colNames[i])`.
+
+`finturk_metrics` (76 rows, one per `(dataset, metric)`) is the discovery index, mirroring
+`bulletin_metrics` — without it an agent would have to `SELECT DISTINCT` over 905k fact rows to
+learn what FinTurk publishes. It is in `tools.lakehouse.discover`'s default search set alongside
+the bulletin/weekly/macro indexes, and both `finturk_observations` and `finturk_metrics` are in
+`ALLOWED_TABLES` for `run_sql`. `fetch_series`/`tools.series.load_series` carry the `province`
+dimension the fact table needs: naming an il (`Step.province`) filters to it, and leaving it out
+sums every province (there is no published Türkiye-wide row in this product) — `taraf_code` is
+pinned to 10001 (SEKTÖR, the whole sector) the same way the monthly bulletin pins its own `taraf`,
+and is not a caller-facing filter.
 
 ### TCMB EVDS
 
@@ -560,8 +607,10 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 ## Project stage
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
-tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 397 tests (15 of the web-tools extension's skip without its containers).
+tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the BDDK
+FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corpus (44 groups,
+2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables, 436 tests (15 of the
+web-tools extension's skip without its containers).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
 pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web
@@ -577,6 +626,4 @@ producible from the lakehouse in SQL alone, and
 `tests/test_agent.py::test_the_reference_scenario_runs_from_a_hand_written_plan` proves the execution
 layer produces it with no model involved. If the second passes and a live turn still fails, the defect
 is in the prompt or the plan, not in the data or the tools — which is the point of having both.
-
-BDDK FinTürk (İllere Göre) remains unacquired.
 

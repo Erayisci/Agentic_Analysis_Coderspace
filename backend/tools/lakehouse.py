@@ -4,9 +4,10 @@ Discovery is the tool that matters most. A 27B model asked "konut kredileri"
 cannot be expected to know that housing loans live in `tuketici_kredileri` and
 not in the sectoral table, that the row is keyed `tuketici_kredileri_konut`,
 that it publishes three currencies, or that the interest rate is an EVDS series
-in a different table entirely. `discover` answers all of that from the three
-index tables the build maintains -- `bulletin_entities`, `weekly_items` and
-`macro_series` -- so the planner names a concept and gets back keys.
+in a different table entirely. `discover` answers all of that from the four
+index tables the build maintains -- `bulletin_entities`, `weekly_items`,
+`macro_series` and `finturk_metrics` -- so the planner names a concept and
+gets back keys.
 
 Search runs on the ASCII-slugified key as well as the published name, because
 Turkish case folding breaks the obvious approach: 'I'.lower() is not 'i', so an
@@ -33,6 +34,7 @@ ALLOWED_TABLES = {
     "weekly_items", "weekly_observations", "macro_series", "macro_observations",
     "macro_observations_native", "data_quality_report", "reconciliation_monitor",
     "bulletin_lifecycle_report", "weekly_lifecycle_report",
+    "finturk_observations", "finturk_metrics",
 }
 
 FORBIDDEN_SQL = re.compile(
@@ -308,7 +310,7 @@ def discover(query: str, source=None, limit: int = 8):
     con = _connect()
     try:
         pooled = []
-        wanted = {source} if source else {"bulletin", "macro", "weekly"}
+        wanted = {source} if source else {"bulletin", "macro", "weekly", "finturk"}
         words = [term for term, _ in terms]
 
         if "bulletin" in wanted:
@@ -337,6 +339,16 @@ def discover(query: str, source=None, limit: int = 8):
                 "NULL AS metrics, NULL AS tier, NULL AS n_periods, NULL AS first_period, NULL AS last_period "
                 f"FROM weekly_items WHERE retired_on IS NULL AND ({where})",
                 [f"%{term}%" for term in words]).df().to_dict("records")
+
+        if "finturk" in wanted:
+            where = " OR ".join(["metric ILIKE ? OR metric_name ILIKE ? OR dataset ILIKE ?"] * len(words))
+            params = [p for term in words for p in (f"%{term}%", f"%{term}%", f"%{term}%")]
+            pooled += con.execute(
+                "SELECT 'finturk' AS source, dataset, metric AS key, metric_name AS name, unit, "
+                "temporal_semantics, NULL AS currencies, NULL AS metrics, NULL AS tier, "
+                "n_observations AS n_periods, first_period::VARCHAR AS first_period, "
+                "last_period::VARCHAR AS last_period "
+                f"FROM finturk_metrics WHERE {where}", params).df().to_dict("records")
     finally:
         con.close()
 

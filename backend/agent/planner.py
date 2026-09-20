@@ -26,7 +26,7 @@ Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
              "read_url", "search", "chart", "ingest_external", "clear_table"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio"]
 Method = Literal["anomaly", "changepoint", "causality"]
-Source = Literal["bulletin", "weekly", "macro"]
+Source = Literal["bulletin", "weekly", "macro", "finturk"]
 MonthlyRule = Literal["last", "avg", "sum"]
 
 # Which fields each op actually needs. Checked after parsing, because guided
@@ -51,12 +51,15 @@ class Step(BaseModel):
     op: Op = Field(description="which action to run")
 
     # fetch_series / discover
-    key: Optional[str] = Field(None, description="entity_key (bulletin, weekly) or series_code (macro)")
+    key: Optional[str] = Field(
+        None, description="entity_key (bulletin, weekly), series_code (macro), or metric (finturk)")
     source: Optional[Source] = Field(None, description="which corpus the key belongs to")
-    dataset: Optional[str] = Field(None, description="bulletin table slug, when the key is ambiguous")
+    dataset: Optional[str] = Field(None, description="bulletin/finturk table slug, when the key is ambiguous")
     currency: Optional[str] = Field(None, description="'total' (TL+FX), 'TL' or 'FX'")
     metric: Optional[str] = Field(None, description="only for tables whose metric is a bucket")
     as_name: Optional[str] = Field(None, description="column name to store the result under")
+    province: Optional[str] = Field(
+        None, description="finturk only: an il name. Omit for the Turkiye total (summed across provinces)")
 
     # transform
     operation: Optional[Operation] = Field(None, description="which transform to apply")
@@ -129,6 +132,11 @@ Sadece hangi adimlarin hangi sirayla calisacagini belirle.
 Adimlar:
 - discover: bir kavramin lakehouse anahtarini bul (key). Anahtari bilmiyorsan ONCE bunu kullan.
 - fetch_series: bir seriyi tabloya sutun olarak ekle. key ve source zorunlu.
+  source="finturk" ICE BDDK'nin IL BAZLI (FinTurk) verisidir -- CEYREKLIK'tir (Mart/Haziran/
+  Eylul/Aralik), ay bazli degildir. dataset o 7 tablodan biri (discover sonucundan al),
+  key=metric. province BOS birakilirsa TURKIYE GENELI (tum illerin toplami) doner; bir il
+  adi (orn. "İSTANBUL") verilirse sadece o ile filtrelenir. Kullanici bir il/sehir adi
+  soylediyse province'i MUTLAKA doldur.
 - transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda).
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.

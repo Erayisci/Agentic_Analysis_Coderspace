@@ -94,7 +94,7 @@ def build_context(question: str, session: Session, route_result: Route) -> str:
     if found["candidates"]:
         lines = "\n".join(
             f"  - key={c['key']} | source={c['source']}"
-            + (f" | dataset={c['dataset']}" if c["source"] == "bulletin" else "")
+            + (f" | dataset={c['dataset']}" if c["source"] in ("bulletin", "finturk") else "")
             + f" | {c['name']} | {c['unit']} | {c['temporal_semantics']}"
             for c in found["candidates"])
         blocks.append("BULUNAN ANAHTARLAR (key alanina TAM olarak bunlardan birini yaz):\n" + lines)
@@ -128,7 +128,7 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
         return template_plan("metadata", question)
 
     steps = [Step(op="fetch_series", key=c["key"], source=c["source"],
-                  dataset=c["dataset"] if c["source"] == "bulletin" else None,
+                  dataset=c["dataset"] if c["source"] in ("bulletin", "finturk") else None,
                   as_name=None) for c in chosen]
     steps.append(Step(op="chart", title=question[:80]))
     return Plan(intent="series_analysis", start=route_result.start, end=route_result.end,
