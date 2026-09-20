@@ -613,13 +613,15 @@ FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corp
 web-tools extension's skip without its containers).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
-pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web
-URL, plus charts). Two tools are stubs the executor already routes to but nothing implements — **web
-search** needs an open backend (ddgs or a SearXNG container), and the **image path of the Web URL
-tool** raises `NotImplementedError` pending a call to `Unlimited-OCR`, which MIA does expose. A ninth
-op, `ingest_external`, adds a column from an external Excel/CSV URL to the current session's table
-only (see "The agent layer" above) — a team-added capability, not one of the brief's six named tools.
-Not yet written: the FastAPI service, the frontend, Docker, and deployment.
+pipeline stages, and all six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality,
+Web URL — text/PDF/Excel/CSV/HTML and, via `KloudeksClient.ocr` (the `Unlimited-OCR` model), images
+— plus charts). **Web search** is still a stub the executor routes to but nothing answers without
+`WEB_TOOLS_ENABLED=true` and the SearXNG/crawler containers running. A ninth op, `ingest_external`,
+adds a column from an external Excel/CSV URL to the current session's table only (see "The agent
+layer" above) — a team-added capability, not one of the brief's six named tools.
+`backend/api/main.py` (FastAPI) and `frontend/` (React) exist. Not yet written: Docker packaging and
+deployment — `README.md` says so directly, and the brief's "a live deployed system" requirement is
+the largest open item.
 Two tests pin the reference scenario from opposite ends:
 `tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` proves the demo table is
 producible from the lakehouse in SQL alone, and

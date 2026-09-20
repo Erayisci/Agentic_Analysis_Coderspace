@@ -18,10 +18,15 @@ one is future work, not a bug in this file.
 Web search is optional: with `WEB_TOOLS_ENABLED=true` (and the SearXNG /
 crawler containers from `extensions/web_tools/` running) the extension's
 `search_web` becomes the agent's search backend; otherwise it is None. The URL
-reader is always the in-process `backend.tools.web_url.read_url`.
+reader is always the in-process `backend.tools.web_url.read_url`, with its
+image path bound to `KloudeksClient.ocr` when a Kloudeks key is configured --
+without one it falls back to `read_url`'s own "no OCR callable configured"
+error for that one content kind, the same degradation every other model-backed
+path in this file already gets from a missing key.
 """
 import logging
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -62,9 +67,14 @@ def _build_web_search():
         return None
 
 
+def _build_url_reader(client: Optional[KloudeksClient]):
+    return read_url if client is None else partial(read_url, ocr=client.ocr)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.agent = Agent(client=_build_client(), url_reader=read_url,
+    client = _build_client()
+    app.state.agent = Agent(client=client, url_reader=_build_url_reader(client),
                             web_search=_build_web_search())
     try:
         yield
