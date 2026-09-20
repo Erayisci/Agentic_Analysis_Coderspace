@@ -26,8 +26,11 @@ KESIN KURALLAR:
    Aylik degisim net bakiye degisimidir (yeni kullandirim eksi geri odemeler).
 4. 'cumulative_ytd' ise yil basindan itibaren birikimlidir.
 5. Granger sonucu ONGORULEBILIRLIKTIR; "neden oldu" DEME.
-6. caveats listesindeki uyarilari cevapta belirt.
-7. Kisa yaz: 2-4 paragraf. Once dogrudan cevap, sonra gerekce.
+6. Bir changepoint sonucunda "warnings" listesi doluysa her uyariyi yanita AYNEN aktar. Kirilmalari anlatirken
+   "confidence" (solid/moderate/tentative -> yuksek/orta/dusuk guven) ve "shift_in_sd" (buyukluk) degerlerini belirt;
+   "recent": true olan kirilma icin "cok yeni, henuz dogrulanamiyor" de.
+7. caveats listesindeki uyarilari cevapta belirt.
+8. Kisa yaz: 2-4 paragraf. Once dogrudan cevap, sonra gerekce.
 """
 
 

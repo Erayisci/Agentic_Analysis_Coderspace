@@ -25,7 +25,8 @@ from typing import Any, Dict, Optional
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies, detect_anomalies_in_series
 from ..tools.causality import analyze_causality
-from ..tools.charts import build_chart, chart_summary
+from ..tools.change_detection import detect_change_points
+from ..tools.charts import build_chart, chart_summary, mark_breaks
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
 from .planner import Plan, Step
@@ -199,7 +200,7 @@ class Executor:
                              "value_column": column},
                     citation=lineage.citation)
         elif step.method == "changepoint":
-            result = self._changepoint(column)
+            result = self._changepoint(column, step.kind, step.sensitivity)
         elif step.method == "causality":
             other = self._resolve_column(step.against or step.other_column,
                                          required="causality needs a second column")
@@ -273,9 +274,19 @@ class Executor:
             groups = sorted(T.columns_sharing_unit(artifact), key=len, reverse=True)[:2]
             columns = [c for group in groups for c in group]
             figure = build_chart(artifact, columns, step.title)
+        # If change detection already ran on any charted column, draw its
+        # breaks on the chart so the reader sees where the regimes change.
+        charted = columns or artifact.column_names()
+        analysis = self.session.facts.get("analysis", {})
+        breaks_by_column = {c: analysis[f"changepoint:{c}"]["breaks"]
+                            for c in charted if f"changepoint:{c}" in analysis
+                            and analysis[f"changepoint:{c}"].get("breaks")}
+        if breaks_by_column:
+            figure = mark_breaks(figure, breaks_by_column)
         self.session.facts["chart"] = chart_summary(artifact, columns)
         self.session.facts["figure"] = figure
-        return f"chart with {len(figure['data'])} trace(s)"
+        marks = sum(len(b) for b in breaks_by_column.values())
+        return f"chart with {len(figure['data'])} trace(s)" + (f", {marks} break marker(s)" if marks else "")
 
     def _clear_table(self, step: Step, plan: Plan) -> str:
         """Empty this session's working table -- and only this session's.
@@ -317,26 +328,19 @@ class Executor:
             return partial[0]
         raise ValueError(f"column {name!r} is not in the table; have {columns}")
 
-    def _changepoint(self, column: str) -> Dict[str, Any]:
-        """PELT change points on the column's own values."""
-        import numpy as np
-        import ruptures
+    def _changepoint(self, column: str, kind: Optional[str] = None,
+                     sensitivity: Optional[str] = None) -> Dict[str, Any]:
+        """Change points on the column, via tools.change_detection.
 
+        The plan may set kind (volatility when the question is about
+        stability) and sensitivity; when it does not, kind="auto" picks level
+        for rates/ratios/% and trend for everything else from the column's
+        lineage, and sensitivity is medium. The lineage also drives the
+        year-to-date guard.
+        """
+        lineage = self.session.artifact.lineage[column]
         series = self.session.artifact.frame[column].dropna()
-        if len(series) < 10:
-            raise ValueError(f"{column!r} has {len(series)} points; need at least 10 for change detection")
-        values = series.to_numpy(dtype=float).reshape(-1, 1)
-        indices = ruptures.Pelt(model="rbf", min_size=3).fit(values).predict(pen=5.0)
-        breaks = [i for i in indices if 0 < i < len(series)]
-        segments = []
-        previous = 0
-        for cut in breaks + [len(series)]:
-            block = series.iloc[previous:cut]
-            segments.append({"from": block.index[0].strftime("%Y-%m"),
-                             "to": block.index[-1].strftime("%Y-%m"),
-                             "mean": round(float(np.mean(block)), 4), "n": int(len(block))})
-            previous = cut
-        return {"column": column, "unit": self.session.artifact.lineage[column].unit,
-                "method": "PELT (rbf, pen=5)", "n_breakpoints": len(breaks),
-                "breakpoints": [series.index[i].strftime("%Y-%m") for i in breaks],
-                "segments": segments}
+        series.name = column
+        result = detect_change_points(series, kind=kind or "auto", sensitivity=sensitivity or "medium",
+                                      temporal_semantics=lineage.temporal_semantics, unit=lineage.unit)
+        return {"column": column, **result}
