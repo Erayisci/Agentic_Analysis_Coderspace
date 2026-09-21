@@ -20,8 +20,9 @@ the whole question -- the demo-day failure mode that matters most.
 """
 import re
 import time
-from typing import List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
+from ..core.labels import slugify
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies_in_series
 from ..tools.causality import granger_both_directions
@@ -29,7 +30,7 @@ from ..tools.change_detection import detect_change_points
 from ..tools.charts import build_chart, chart_summary, mark_breaks
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series, footnotes
-from ..tools.series import load_series
+from ..tools.series import SeriesResult, load_series
 from .planner import Plan, Step
 from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
@@ -42,6 +43,87 @@ DATASET_SOURCES = ("bulletin", "finturk")
 # Sources with no currency dimension: an EVDS series is one number a month,
 # and FinTurk publishes a province split instead of a TL/FX one.
 NO_CURRENCY_SOURCES = ("macro", "finturk")
+
+# `Step` fields that only mean something for a subset of sources, because they
+# select a dimension that source's own fact table actually publishes. Naming
+# one is a real narrowing request, not an optional hint -- so a `source` guess
+# incompatible with a filter the step set is a plan defect to correct or
+# reject, never a filter to quietly drop. `province` is the one entry today
+# (only `finturk_observations` carries a province column). Measured live: a
+# model that named province="ANKARA" but wrote source="bulletin" for a key
+# that also happens to be a valid *national* bulletin entity_key raised no
+# error at all -- `load_series` for source="bulletin" just ignores `province`
+# -- so nothing ever ran the fallback below, and the Turkiye-wide bulletin
+# total reached the composer captioned as the Ankara answer. If a future field
+# turns out to have the same shape, it belongs here too, so the one
+# compatibility check below covers it rather than another one-off branch.
+FIELD_SOURCES: Dict[str, FrozenSet[str]] = {
+    "province": frozenset({"finturk"}),
+}
+
+
+def _compatible_sources(step: Step) -> Optional[FrozenSet[str]]:
+    """Sources compatible with every narrowing field the step set.
+
+    `None` means no narrowing field was set -- every source is still valid.
+    An empty frozenset means the step named filters no single source supports
+    together (unreachable with one entry in FIELD_SOURCES today, but kept so
+    a second entry fails safe rather than picking one arbitrarily).
+    """
+    compatible: Optional[FrozenSet[str]] = None
+    for field, sources in FIELD_SOURCES.items():
+        if getattr(step, field, None):
+            compatible = sources if compatible is None else (compatible & sources)
+    return compatible
+
+
+def _resolve_source(step: Step, default_source: str) -> str:
+    """The source to query: the model's guess, corrected only when a filter
+    the step actually set proves that guess cannot be right.
+
+    An explicit, already-compatible `source` is left untouched -- a model
+    that wrote source="finturk" with province="ANKARA" is already correct.
+    It is overridden only when a narrowing field is incompatible with it, and
+    only when the compatible set names a single alternative; otherwise this
+    raises rather than guessing, matching "fail explicit, never degrade".
+    """
+    compatible = _compatible_sources(step)
+    source = step.source or default_source
+    if compatible is None:
+        return source
+    if not compatible:
+        named = {f: getattr(step, f) for f in FIELD_SOURCES if getattr(step, f, None)}
+        raise ValueError(f"step names filters no single source supports together: {named}")
+    if source in compatible:
+        return source
+    if len(compatible) == 1:
+        return next(iter(compatible))
+    raise ValueError(f"source={source!r} does not support "
+                     f"{[f for f in FIELD_SOURCES if getattr(step, f, None)]}; "
+                     f"compatible sources: {sorted(compatible)}")
+
+
+def _validate_series_matches_request(step: Step, series: SeriesResult) -> None:
+    """The resolved series must carry every narrowing filter the step named,
+    not merely have been fetched without raising.
+
+    This is the backstop for the whole mechanism above: even if a source swap
+    or a fallback-discovery pick goes wrong in some way this file did not
+    anticipate, a broader aggregate must never reach the artifact labelled as
+    the answer to a narrower request -- e.g. a Turkiye-wide bulletin or
+    finturk sum standing in for one province.
+    """
+    if step.province:
+        if series.source != "finturk" or not series.province:
+            raise ValueError(
+                f"requested province={step.province!r} but the resolved series "
+                f"{series.source}:{series.key!r} is not province-level "
+                f"(province={series.province!r}); refusing to return a broader aggregate "
+                "as a province-level answer")
+        if slugify(series.province) != slugify(step.province):
+            raise ValueError(
+                f"requested province={step.province!r} but the resolved series covers "
+                f"{series.province!r}; refusing to return a mismatched province")
 
 
 def _monthly_rule(semantics: Optional[str]) -> str:
@@ -170,7 +252,11 @@ class Executor:
 
     def _fetch(self, step: Step, plan: Plan) -> str:
         key = _normalise_key(step.key)
-        source = step.source or ("macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin")
+        default_source = "macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin"
+        # Treat the model's own source/dataset/filter fields as hints, not a
+        # routing decision: `_resolve_source` corrects `source` only when a
+        # field like `province` proves it cannot be right (see FIELD_SOURCES).
+        source = _resolve_source(step, default_source)
         currency = step.currency if step.currency is not None else (
             "total" if source not in NO_CURRENCY_SOURCES else None)
         resolved_by = ""
@@ -182,25 +268,45 @@ class Executor:
             # A key the model invented is the most common plan defect -- it wrote
             # TP.TUFE where the corpus publishes TP.GENENDEKS.T1. Discovery already
             # knows the real key, so resolve it here rather than losing the column.
-            candidates = discover(step.as_name or key, source=source, limit=1)["candidates"] \
-                or discover(step.as_name or key, limit=1)["candidates"]
-            if not candidates:
-                raise ValueError(f"{exc}; discovery found no alternative for {key!r}") from exc
-            best = candidates[0]
+            # `source` was already corrected by `_resolve_source` above to satisfy
+            # any narrowing field (province today) the step set, so the primary
+            # search below uses it directly rather than searching unrestricted and
+            # filtering after: this discover() has no per-source seat floor (see
+            # its own docstring), so an unrestricted search for a query like
+            # "toplam_mevduat" is dominated by bulletin's exact-key matches and
+            # never surfaces the finturk candidate at all. The unrestricted
+            # fallback is tried only when nothing narrowed the source to begin
+            # with -- reaching for it after a province was named would silently
+            # reopen the exact bug this closes.
+            compatible = _compatible_sources(step)
+            pool = discover(step.as_name or key, source=source, limit=1)["candidates"]
+            if not pool and compatible is None:
+                pool = discover(step.as_name or key, limit=1)["candidates"]
+            if not pool:
+                extra = f" compatible with {sorted(compatible)}" if compatible else ""
+                raise ValueError(f"{exc}; discovery found no alternative{extra} for {key!r}") from exc
+            best = pool[0]
             series = fetch_series(best["key"], source=best["source"],
                                   dataset=best["dataset"] if best["source"] in DATASET_SOURCES else None,
                                   currency=best.get("currency") or (
                                       "total" if best["source"] not in NO_CURRENCY_SOURCES else None),
                                   start=plan.start, end=plan.end,
                                   province=step.province if best["source"] == "finturk" else None)
-            resolved_by = f" (key {key!r} not found; resolved to {best['key']!r} by discovery)"
+            resolved_by = f" (key {key!r} not found; resolved to {best['source']}:{best['key']!r} by discovery)"
+
+        # Post-fetch backstop: whatever path produced `series`, it must still
+        # satisfy every narrowing filter the step named -- never a broader
+        # aggregate silently standing in for a narrower request.
+        _validate_series_matches_request(step, series)
 
         # The weekly bulletin is observed on Fridays. Joining it into a
         # month-indexed table raw does not add a column -- it adds 296 new index
         # entries and turns a 60-row answer into a 308-row one. Aggregate to the
-        # monthly grain using the rule the series' own semantics imply.
+        # monthly grain using the rule the series' own semantics imply. Uses the
+        # series' own resolved source, not the pre-fetch guess, since a fallback
+        # above may have resolved to a different source than first attempted.
         values, transform = series.values, None
-        if source == "weekly":
+        if series.source == "weekly":
             rule = _monthly_rule(series.temporal_semantics)
             values = T.resample_to_monthly(series.values, rule)
             transform = f"resample_to_monthly({rule})"

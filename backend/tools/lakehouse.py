@@ -318,6 +318,13 @@ QUALIFIERS = {
     # ratio outranked the count it is computed from.
     "ipotekli": ("ipotekli", "mortgaged", "ipotek"),
     "dovize_endeksli": ("dovize", "endeksli", "fx-indexed"),
+    # "Diger Mevduat" (Other Deposits, a specific leftover bucket) is a sibling
+    # of "Toplam Mevduat" (Total Deposits) inside the same FinTurk table, close
+    # enough in every other word that a plain "toplam mevduat" question (with
+    # "toplam" stopped, see STOPWORDS above) scored "diger_mevduat" 0.02 points
+    # above the row actually asked for. A question does not mean the "Diger"
+    # bucket unless it says so, the same as every other qualifier here.
+    "diger": ("diger", "diğer", "other"),
     "reeskont": ("reeskont", "accrual"),
     "bilgi": ("bilgi",),
     "verilen_faizler": ("verilen", "odenen", "gider"),
@@ -331,6 +338,16 @@ STOPWORDS = {
     # Turkish question boilerplate. A demo question is a sentence, not a keyword:
     # without these, "gosteriniz" and "dagilimini" score as loudly as "konut" and
     # the series the question is actually about falls out of the candidate list.
+    # "total"/"toplam" stays a stopword on purpose, even though it looks like the
+    # same trap "agirlikli" is not: letting it score as a normal word fixed
+    # "Ankara'da toplam mevduat hacmi" (see the "diger" qualifier below for the
+    # fix that was actually used) but broke a pinned, harder case the other way
+    # -- "toplam konut kredilerinin dagilimini" then outranked the housing-loan
+    # line with "Toplam Krediler" (the whole bank's loan book, matching only
+    # "toplam"), because a bare `key.startswith("toplam")` bonus outweighs one
+    # matching "konut" concept. A qualifier can be undone with one word telling
+    # it what NOT to be; "toplam" scored as a term cannot be told what it must
+    # additionally match, so the general-purpose fix is the wrong shape for it.
     "total", "toplam", "olarak", "icin", "için", "nedir", "nasil", "nasıl",
     "grafik", "tablo", "aylik", "aylık", "veri", "veriler", "veriden", "turkiye",
     "türkiye", "turkey", "goster", "göster", "gosteriniz", "gösteriniz",
@@ -549,8 +566,18 @@ def _score(candidate, terms, province_named: bool = False) -> float:
     return round(score, 3)
 
 
+# The negative lookbehind on "da"/"de" is load-bearing, not decorative: Turkish
+# attaches the locative case suffix to a place name with an apostrophe and no
+# space -- "Ankara'da", "İstanbul'de" -- and `\bda\b` alone cannot tell that
+# apart from the standalone conjunction "da" ("too/also"), because an
+# apostrophe is already a non-word character and satisfies `\b` on its own.
+# Measured live: "Ankara'da toplam mevduat hacmi ne kadar?" split into
+# "Ankara'" and "toplam mevduat hacmi ne kadar" -- severing the province name
+# from the question that named it, so no finturk candidate downstream ever saw
+# it named a province and the national bulletin total answered in its place.
 CLAUSE_SPLIT = re.compile(
-    r"[.,;?!]|\bbuna ek olarak\b|\bayrica\b|\bayrıca\b|\bve\b|\bile\b|\bda\b|\bde\b", re.I)
+    r"[.,;?!]|\bbuna ek olarak\b|\bayrica\b|\bayrıca\b|\bve\b|\bile\b|"
+    r"(?<!['’])\bda\b|(?<!['’])\bde\b", re.I)
 
 
 def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):

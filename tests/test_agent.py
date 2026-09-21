@@ -18,8 +18,8 @@ from backend.agent.verifier import unsupported_numbers, verify
 from backend.core.config import DUCKDB_PATH
 from backend.tools import transforms as T
 from backend.tools.charts import build_chart
-from backend.tools.lakehouse import ALLOWED_TABLES, discover, run_sql
-from backend.tools.series import load_series
+from backend.tools.lakehouse import ALLOWED_TABLES, discover, discover_concepts, run_sql
+from backend.tools.series import SeriesResult, load_series
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
@@ -252,6 +252,13 @@ def test_the_agent_sql_allowlist_excludes_the_second_bddk_vocabulary():
     ("takipteki konut kredileri", "takipteki_konut_kredileri"),
     ("konut satislari", "TP.AKONUTSAT1.KTRTOPLAM"),
     ("mevduat", "mevduat_katilim_fonu"),
+    # Regression: "Diger Mevduat" (Other Deposits) is a FinTurk sibling of
+    # "Toplam Mevduat" (Total Deposits) close enough in every other word that,
+    # with "toplam" itself stopped as boilerplate, it outranked the row this
+    # question actually asked for by 0.02 points -- see the "diger" QUALIFIERS
+    # entry, added instead of un-stopping "toplam" (that fixed this case but
+    # broke "toplam konut kredilerinin dagilimini" the other way).
+    ("Ankara'da toplam mevduat hacmi ne kadar?", "toplam_mevduat"),
 ])
 def test_discovery_ranks_the_right_key_first(query, expected_key):
     """Discovery is the tool everything else depends on: a wrong key here is a
@@ -1463,6 +1470,104 @@ def test_fetch_series_sums_provinces_for_a_finturk_metric_without_one_and_its_sq
                                    check_names=False, check_freq=False, check_dtype=False)
 
 
+def test_source_resolution_corrects_a_bulletin_guess_with_province_to_finturk():
+    """The regression this closes: the model wrote source="bulletin" with a
+    real bulletin entity_key ("mevduat_katilim_fonu", a valid national balance
+    sheet line -- so `load_series` raised nothing) but also filled
+    province="ANKARA", a field only finturk supports. Before this fix,
+    `_fetch` fetched the bulletin entity directly, and the Turkiye-wide
+    bulletin total reached the artifact captioned as the Ankara answer.
+    Naming a province must always resolve to finturk, the only source with a
+    province column, regardless of what `source` the plan wrote."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="toplam_mevduat", source="bulletin",
+             dataset="mevduat_turler", province="ANKARA", as_name="toplam_mevduat"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    lineage = session.artifact.lineage["toplam_mevduat"]
+    assert lineage.source == "finturk"
+    assert lineage.citation["filters"]["province"] == "ANKARA"
+
+
+@pytest.mark.parametrize("guessed_source", ["bulletin", "macro", None])
+def test_source_resolution_ignores_any_incompatible_guess_for_a_province_query(guessed_source):
+    """Whatever source the model guessed -- bulletin, macro, or none at all --
+    naming a province must land on finturk. Fallback discovery must not stay
+    confined to the model's wrong guess either: that is the mechanism that let
+    the bug through when the first fetch *did* raise (a bad dataset guess) --
+    the ValueError fallback searched the wrong source only and never got a
+    chance to look at finturk."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="toplam_mevduat", source=guessed_source,
+             dataset="mevduat_turler" if guessed_source == "bulletin" else None,
+             province="ANKARA", as_name="toplam_mevduat"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    lineage = session.artifact.lineage["toplam_mevduat"]
+    assert lineage.source == "finturk"
+    assert lineage.citation["filters"]["province"] == "ANKARA"
+
+
+def test_source_resolution_leaves_a_provinceless_bulletin_query_unchanged():
+    """No narrowing field set -- an explicit, valid source must pass through
+    untouched rather than being second-guessed."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    assert session.artifact.lineage["konut"].source == "bulletin"
+
+
+def test_a_province_query_with_no_compatible_candidate_fails_the_step_explicitly():
+    """When no finturk candidate matches at all, the step must fail loudly --
+    never silently fall back to a broader, non-province source."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="zzzzz_qqqqq_nonexistent_metric_xyz", source="bulletin",
+             province="ANKARA", as_name="x"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert not session.audit[-1].ok
+    assert "finturk" in session.audit[-1].detail
+
+
+def test_validate_series_matches_request_refuses_a_national_total_for_a_province_step():
+    """Backstop unit test: even a series that reached this point without
+    raising must still be province-level if the step asked for one -- a
+    Turkiye-wide finturk sum (province=None) can never stand in for a named
+    province, regardless of how it got here."""
+    from backend.agent.executor import _validate_series_matches_request
+
+    step = Step(op="fetch_series", key="toplam_mevduat", source="finturk", province="ANKARA")
+    national = SeriesResult(
+        values=pd.Series([1.0], index=pd.DatetimeIndex(["2021-03-01"])),
+        source="finturk", key="toplam_mevduat", name="Toplam Mevduat (Türkiye)",
+        unit="bin TL", temporal_semantics="stock", value_column="value",
+        dataset="mevduat", currency=None, metric="toplam_mevduat", province=None)
+    with pytest.raises(ValueError, match="not province-level"):
+        _validate_series_matches_request(step, national)
+
+
+def test_validate_series_matches_request_refuses_a_mismatched_province():
+    from backend.agent.executor import _validate_series_matches_request
+
+    step = Step(op="fetch_series", key="toplam_mevduat", source="finturk", province="ANKARA")
+    izmir = SeriesResult(
+        values=pd.Series([1.0], index=pd.DatetimeIndex(["2021-03-01"])),
+        source="finturk", key="toplam_mevduat", name="Toplam Mevduat (İZMİR)",
+        unit="bin TL", temporal_semantics="stock", value_column="value",
+        dataset="mevduat", currency=None, metric="toplam_mevduat", province="İZMİR")
+    with pytest.raises(ValueError, match="mismatched province"):
+        _validate_series_matches_request(step, izmir)
+
+
 def test_discover_prefers_the_bulletin_line_unless_a_province_is_named():
     """FinTurk republishes many bulletin concepts quarterly by province. A plain
     "konut kredisi" is the monthly national line; "İstanbul'da konut kredisi"
@@ -1475,6 +1580,43 @@ def test_discover_prefers_the_bulletin_line_unless_a_province_is_named():
     by_grain = discover("il bazında konut kredisi", limit=5)
     assert by_grain["sources"] == ["finturk"]
     assert all(c["source"] == "finturk" for c in by_grain["candidates"])
+
+
+def test_discover_concepts_does_not_split_the_locative_suffix_off_a_province():
+    """Measured live: "Ankara'da toplam mevduat hacmi ne kadar?" -- one clause,
+    no comma -- split into "Ankara'" and "toplam mevduat hacmi ne kadar" under
+    the old CLAUSE_SPLIT, because Turkish attaches the locative suffix to a
+    place name with an apostrophe and no space, and a bare `\\bda\\b` cannot
+    tell that apart from the standalone conjunction "da" (an apostrophe is
+    already a non-word character and satisfies `\\b` on its own). Severed from
+    its clause, the province name never reached finturk's scoring, and the
+    national bulletin total ("Mevduat (Katılım Fonu)") answered in its place --
+    this is the plan `deterministic_series_plan` fell back to live, and the
+    composer captioned it as Ankara's regardless. The standalone conjunction
+    case ("konut kredisi de yuksek mi") must still split."""
+    needs_lakehouse()
+    kept = discover_concepts("Ankara'da toplam mevduat hacmi ne kadar?", limit=8)
+    assert kept["n_concepts"] == 1, kept["concepts"]
+    assert kept["candidates"] and kept["candidates"][0]["source"] == "finturk", \
+        [c["key"] for c in kept["candidates"]]
+    assert kept["candidates"][0]["key"] == "toplam_mevduat"
+
+    conjunction = discover_concepts("konut kredisi de faiz oranlarini goster", limit=8)
+    assert conjunction["n_concepts"] == 2, conjunction["concepts"]
+
+
+def test_deterministic_series_plan_names_the_province_for_a_locative_question():
+    """The fallback path a validation-failing model plan lands on -- proven
+    live to be reached often enough to matter -- must resolve the same
+    province-named question a working model plan would."""
+    needs_lakehouse()
+    from backend.agent import pipeline
+
+    plan = pipeline.deterministic_series_plan(
+        "Ankara'da toplam mevduat hacmi ne kadar?", route_result=route(
+            "Ankara'da toplam mevduat hacmi ne kadar?", client=None))
+    fetches = [s for s in plan.steps if s.op == "fetch_series"]
+    assert any(s.source == "finturk" and s.province == "ANKARA" for s in fetches), fetches
 
 
 # --- causality routing: the branch's failure modes, guarded here --------------
