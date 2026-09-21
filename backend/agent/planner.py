@@ -135,7 +135,8 @@ Adimlar:
 - ingest_external: bir URL'deki Excel/CSV dosyasindan bir sutunu SAYISAL SERI olarak tabloya
   ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
   sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
-  bulunur. Bu ekleme SADECE bu oturum icindir, kalici veritabanina hicbir sey yazilmaz.
+  bulunur. Sayisal sutun bu oturum icindir; API kaynak ciktisini ayrica kalici kanit
+  veritabanina kaydeder. Lakehouse'daki dogrulanmis gozlemler degismez.
 - clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. Kullanici "tabloyu temizle",
   "sil", "bastan basla", "yeni tablo yap" gibi bir sey isterse kullan. Bu adim SADECE bu
   oturumun bellekteki calisma tablosunu bosaltir -- lakehouse.duckdb'ye HICBIR ETKISI YOKTUR,

@@ -1,4 +1,4 @@
-# Derived data - fully reproducible with: python -m backend.lakehouse.build
+# Analytics outputs plus local research.sqlite3 (persistent; back it up).
 data/
 
 # Spreadsheet lock files (created while a workbook is open)

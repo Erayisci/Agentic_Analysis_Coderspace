@@ -9,30 +9,33 @@ resilience `agent/planner.py`'s `template_plan` already gives the pipeline
 itself, extended to "the API has no key at all", not just "the model failed
 this turn".
 
-Sessions live in one process-lifetime `Agent` instance, in memory, keyed by
-`session_id` -- there is no persistence layer. That is a known, deliberate
-scope boundary for a hackathon demo (a restart loses every open conversation)
-and not a decision the API layer should quietly grow past on its own; adding
-one is future work, not a bug in this file.
+Working tables live in memory. Web evidence and completed responses are saved
+in research.sqlite3 and can be inspected after a restart or a chat reset.
 
 Web search is optional: with `WEB_TOOLS_ENABLED=true` (and the SearXNG /
 crawler containers from `extensions/web_tools/` running) the extension's
 `search_web` becomes the agent's search backend; otherwise it is None. The URL
 reader is always the in-process `backend.tools.web_url.read_url`.
+With WEB_AGENT_ENABLED=true, search questions and explicit research mode use
+the extension's adaptive search/read/model loop with per-tool evidence storage.
 """
 import logging
+import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..agent.executor import Executor
+from ..agent.evidence_store import EvidenceStore, EvidenceStorageError
 from ..agent.pipeline import Agent
 from ..agent.planner import Plan, Step
 from ..agent.verifier import verify
-from ..core.config import kloudeks_api_key
+from ..core.config import DATA_DIR, ROOT, kloudeks_api_key
 from ..llm import KloudeksClient
 from ..tools.web_url import read_url
 
@@ -62,10 +65,24 @@ def _build_web_search():
         return None
 
 
+def _build_research_runner():
+    from ..extensions.web_tools.asset_config import AssetConfig
+    from ..extensions.web_tools.research import research
+    try:
+        from ..tools import get_tools
+        if AssetConfig.from_environ().agent_enabled and get_tools():
+            return research
+    except ValueError as exc:
+        logger.warning("Web research misconfigured (%s); research disabled.", exc)
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.evidence_store = EvidenceStore(os.environ.get("RESEARCH_DB_PATH", DATA_DIR / "research.sqlite3"))
     app.state.agent = Agent(client=_build_client(), url_reader=read_url,
-                            web_search=_build_web_search())
+                            web_search=_build_web_search(), research_runner=_build_research_runner(),
+                            evidence_store=app.state.evidence_store)
     try:
         yield
     finally:
@@ -87,8 +104,16 @@ app.add_middleware(
 
 
 class AskRequest(BaseModel):
-    question: str = Field(min_length=1, description="the user's question, in Turkish or English")
+    question: str = Field(min_length=1, max_length=2000, description="the user's question, in Turkish or English")
     session_id: str = Field(default="default", description="conversation to continue, or a new one")
+    mode: Literal["auto", "research"] = "auto"
+
+    @field_validator("question")
+    @classmethod
+    def nonblank_question(cls, value):
+        if not value.strip():
+            raise ValueError("question must not be blank")
+        return value.strip()
 
 
 class IngestExternalRequest(BaseModel):
@@ -108,7 +133,15 @@ def _agent() -> Agent:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "model_configured": _agent().client is not None}
+    return {"status": "ok", "model_configured": _agent().client is not None,
+            "web_search_configured": _agent().web_search is not None,
+            "research_configured": _agent().research_runner is not None,
+            "evidence_storage": "enabled" if _agent().evidence_store is not None else "disabled"}
+
+
+@app.exception_handler(EvidenceStorageError)
+async def evidence_storage_error(request, exc):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.post("/ask")
@@ -116,8 +149,24 @@ def ask(request: AskRequest) -> Dict[str, Any]:
     """Run one turn and return the API payload `run_turn` already builds --
     everything except the raw `Session` object, which carries a pandas
     DataFrame and is not JSON-serialisable."""
-    result = _agent().ask(request.question.strip(), session_id=request.session_id)
+    if request.mode == "research" and _agent().research_runner is None:
+        raise HTTPException(503, "Web research is disabled. Enable WEB_TOOLS_ENABLED=true and "
+                            "WEB_AGENT_ENABLED=true on the API and web-tools worker, then start the services.")
+    result = _agent().ask(request.question, session_id=request.session_id, mode=request.mode)
     return {key: value for key, value in result.items() if key != "session"}
+
+
+@app.get("/session/{session_id}/research")
+def list_research(session_id: str, limit: int = Query(50, ge=1, le=100)):
+    return {"runs": app.state.evidence_store.list_runs(session_id, limit)}
+
+
+@app.get("/session/{session_id}/research/{run_id}")
+def get_research(session_id: str, run_id: str):
+    result = app.state.evidence_store.get_run(session_id, run_id)
+    if result is None:
+        raise HTTPException(404, "Research run not found for this session.")
+    return result
 
 
 @app.post("/debug/ingest_external")
@@ -178,3 +227,8 @@ def reset_session(session_id: str) -> Dict[str, str]:
     """Start a fresh conversation under the same id -- a frontend's 'new chat'."""
     _agent().sessions.pop(session_id, None)
     return {"status": "reset", "session_id": session_id}
+
+
+# A built frontend can use the API's origin. Vite proxies the same paths in dev.
+if (ROOT / "frontend" / "dist").is_dir():
+    app.mount("/", StaticFiles(directory=ROOT / "frontend" / "dist", html=True), name="website")

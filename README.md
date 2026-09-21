@@ -26,6 +26,10 @@ For the complete search-to-answer demo, see [DEMO.md](extensions/web_tools/DEMO.
 For several sources, explicit coverage and conflict reporting, see the
 [multi-source research guide](extensions/web_tools/MULTISOURCE.md).
 
+To test LLM-selected searches from the website and automatically save every
+returned tool result, follow the [website research guide](docs/web-research.md).
+It includes startup commands, the evidence viewer, and database/API inspection.
+
 ---
 
 ## Quick start
@@ -61,13 +65,15 @@ python -c "import duckdb; print(duckdb.connect('data/lakehouse.duckdb', read_onl
 
 ### Build
 
-| Command | What it does |
-|---|---|
-| `python -m backend.lakehouse.build` | The full build: parse → validate → Parquet + DuckDB + schema card. Aborts on any integrity failure. |
-| `pytest -q` | All tests. Needs a completed build (they read `data/lakehouse.duckdb`). |
-| `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics` | The blocking lint CI runs. |
+| Command                                                                | What it does                                                                                          |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `python -m backend.lakehouse.build`                                  | The full build: parse → validate → Parquet + DuckDB + schema card. Aborts on any integrity failure. |
+| `pytest -q`                                                          | All tests. Needs a completed build (they read`data/lakehouse.duckdb`).                              |
+| `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics` | The blocking lint CI runs.                                                                            |
 
-`data/` is fully derived — deleting it is always safe, the build recreates it.
+The analytics lakehouse and Parquet files are derived and can be rebuilt.
+`data/research.sqlite3` holds persistent web evidence collected by the website;
+back it up before deleting `data/`. The lakehouse build preserves this database.
 
 ### Ingestion
 
@@ -108,13 +114,13 @@ data problem first, not a test problem.
 
 The brief's target corpus is **2021-01 through 2026-06**.
 
-| Source | Status |
-|---|---|
-| BDDK Aylık Bülten — all 17 tables | ✅ built, 2021-01..2026-07, 135,513 observations |
-| TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency) |
-| BDDK Haftalık Bülten — all 9 tables | ✅ built, 2021-01-08..2026-09-04, 163,740 observations |
-| BDDK FinTürk (İllere Göre) | ❌ not acquired |
-| TBB Risk Merkezi sectoral | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
+| Source                                    | Status                                                                 |
+| ----------------------------------------- | ---------------------------------------------------------------------- |
+| BDDK Aylık Bülten — all 17 tables      | ✅ built, 2021-01..2026-07, 135,513 observations                       |
+| TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency)   |
+| BDDK Haftalık Bülten — all 9 tables    | ✅ built, 2021-01-08..2026-09-04, 163,740 observations                 |
+| BDDK FinTürk (İllere Göre)             | ❌ not acquired                                                        |
+| TBB Risk Merkezi sectoral                 | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
 
 ### Raw data
 
@@ -174,17 +180,17 @@ table 05, so the generic path cannot drift from the pinned one.
 
 ### Lakehouse tables
 
-| Table | Contents |
-|---|---|
-| `bulletin_observations` | All 17 BDDK bulletin tables, long format, generalised entity schema |
-| `observations` | BDDK sectoral + TBB sectoral, the pinned sector-grained corpus |
-| `sectors`, `metrics`, `sector_crosswalk` | Dimensions and the cross-source mapping |
-| `growth`, `ratios` | Month-over-month / year-over-year changes, derived ratios |
-| `macro_series`, `macro_observations`, `macro_observations_native` | TCMB EVDS series index, monthly-aligned values, and the native-frequency points |
-| `reconciliation_monitor` | BDDK vs TBB divergence with a mean ± 3σ band per series |
-| `bulletin_entities` | The agent's search surface: 519 monthly line items with unit, semantics, parent and period span |
-| `weekly_observations`, `weekly_items` | All 9 BDDK weekly tables; items carry `retired_on` and `is_informational` |
-| `data_quality_report`, `bulletin_lifecycle_report`, `weekly_lifecycle_report` | Validation evidence, persisted and quotable |
+| Table                                                                               | Contents                                                                                        |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bulletin_observations`                                                           | All 17 BDDK bulletin tables, long format, generalised entity schema                             |
+| `observations`                                                                    | BDDK sectoral + TBB sectoral, the pinned sector-grained corpus                                  |
+| `sectors`, `metrics`, `sector_crosswalk`                                      | Dimensions and the cross-source mapping                                                         |
+| `growth`, `ratios`                                                              | Month-over-month / year-over-year changes, derived ratios                                       |
+| `macro_series`, `macro_observations`, `macro_observations_native`             | TCMB EVDS series index, monthly-aligned values, and the native-frequency points                 |
+| `reconciliation_monitor`                                                          | BDDK vs TBB divergence with a mean ± 3σ band per series                                       |
+| `bulletin_entities`                                                               | The agent's search surface: 519 monthly line items with unit, semantics, parent and period span |
+| `weekly_observations`, `weekly_items`                                           | All 9 BDDK weekly tables; items carry`retired_on` and `is_informational`                    |
+| `data_quality_report`, `bulletin_lifecycle_report`, `weekly_lifecycle_report` | Validation evidence, persisted and quotable                                                     |
 
 `data/analytics/schema_card.md` is generated for an agent's context window, not for humans.
 
@@ -218,11 +224,11 @@ These are enforced in code and documented at length in [`CLAUDE.md`](CLAUDE.md).
 
 ## Documentation
 
-| File | Purpose |
-|---|---|
-| [`Launch.MD`](Launch.MD) | Architecture and execution blueprint: stack, agent design, roadmap |
-| [`CLAUDE.md`](CLAUDE.md) | Working notes for contributors and coding agents: invariants, traps, refresh procedure |
-| [`extensions/web_tools/README.md`](extensions/web_tools/README.md) | Optional web tools overview and fresh-clone onboarding |
-| [`extensions/web_tools/TESTING.md`](extensions/web_tools/TESTING.md) | Manual testing, expected results, saved output, limits, and shutdown |
-| [`extensions/web_tools/AI_USAGE.md`](extensions/web_tools/AI_USAGE.md) | Python tool contracts and guidance for AI consumers |
-| `data/analytics/schema_card.md` | Generated, agent-facing description of the lakehouse |
+| File                                                                    | Purpose                                                                                |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| [`Launch.MD`](Launch.MD)                                               | Architecture and execution blueprint: stack, agent design, roadmap                     |
+| [`CLAUDE.md`](CLAUDE.md)                                               | Working notes for contributors and coding agents: invariants, traps, refresh procedure |
+| [`extensions/web_tools/README.md`](extensions/web_tools/README.md)     | Optional web tools overview and fresh-clone onboarding                                 |
+| [`extensions/web_tools/TESTING.md`](extensions/web_tools/TESTING.md)   | Manual testing, expected results, saved output, limits, and shutdown                   |
+| [`extensions/web_tools/AI_USAGE.md`](extensions/web_tools/AI_USAGE.md) | Python tool contracts and guidance for AI consumers                                    |
+| `data/analytics/schema_card.md`                                       | Generated, agent-facing description of the lakehouse                                   |

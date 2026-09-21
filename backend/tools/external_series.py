@@ -62,7 +62,13 @@ def _parse_periods(raw: pd.Series) -> pd.Series:
     text = raw.astype("string").str.strip()
     text = text.str.replace(_BILINGUAL_SUFFIX_RE, "", regex=True)
     text = text.str.replace(_TR_MONTH_RE, lambda m: _TR_MONTHS[m.group(0).lower()], regex=True)
-    return pd.to_datetime(text, errors="coerce", dayfirst=True, format="mixed")
+    # ISO exports are year-month-day regardless of the locale. With dayfirst
+    # enabled, pandas can read 2021-02-01 as January 2 and collapse a whole
+    # monthly CSV into January's last value during resampling.
+    iso = text.str.match(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])", na=False)
+    parsed = pd.to_datetime(text.mask(iso), errors="coerce", dayfirst=True, format="mixed")
+    parsed.loc[iso] = pd.to_datetime(text[iso], errors="coerce", format="ISO8601")
+    return parsed
 
 
 def _parse_numbers(raw: pd.Series) -> pd.Series:

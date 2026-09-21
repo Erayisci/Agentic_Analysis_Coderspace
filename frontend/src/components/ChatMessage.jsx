@@ -1,5 +1,7 @@
 const COMPOSED_LABEL = {
   model: "model",
+  llm: "model",
+  unavailable: "cevap tamamlanamadı",
   template: "şablon (modelsiz)",
   skipped: "atlandı",
 };
@@ -17,6 +19,9 @@ export default function ChatMessage({ turn }) {
             <span className={`source-tag source-${turn.composed_by}`}>
               {COMPOSED_LABEL[turn.composed_by] || turn.composed_by}
             </span>
+            {turn.ingestion?.status === "saved" && <span className="source-tag">
+              Veritabanına kaydedildi · {turn.ingestion.tool_results} araç sonucu
+            </span>}
             {turn.unsupported_numbers?.length ? (
               <span className="source-tag source-warning">
                 ⚠ {turn.unsupported_numbers.length} doğrulanamayan sayı

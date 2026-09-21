@@ -38,12 +38,14 @@ def _fit_context(context, maximum):
 
 
 def research(question, *, environ=None, url=None, urls=None, requirements=None, min_sources=1,
-             allow_vision=False, max_tool_calls=None, tools=None, decide=None):
+             allow_vision=False, max_tool_calls=None, tools=None, decide=None, on_tool_result=None):
     """Run one question. Save returned JSON to keep all accepted extraction output.
 
     `tools` and `decide` are trusted synchronous test/embedding hooks. Custom tools
     must honor max_bytes; hook execution itself cannot be forcibly cancelled.
     Only a model decision can trigger subsequent tools; no recursive bulk crawl.
+    on_tool_result commits complete outputs before context/ledger limits apply.
+    Callback failures propagate so a caller cannot report unsaved evidence as saved.
     """
     from backend.tools import get_tools
     config = AssetConfig.from_environ(environ)
@@ -165,6 +167,8 @@ def research(question, *, environ=None, url=None, urls=None, requirements=None, 
                     evidence = ledger.inspect(**arguments)
                 else:
                     evidence = mapping[name](**arguments)
+            if on_tool_result is not None:
+                on_tool_result(name, arguments, evidence)
             if evidence.get("status") != "error":
                 actual = evidence.get("model_calls", 0)
                 usage["model_calls"] -= max(0, reserved_models - actual)

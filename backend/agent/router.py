@@ -29,7 +29,7 @@ FOLLOWUP_PATTERN = re.compile(
 
 SEARCH_PATTERN = re.compile(
     r"\b(haberler|son\s+geli[şs]me|internetten|web'?den|ara[şs]t[ıi]r|güncel\s+haber|"
-    r"search\s+the\s+web|latest\s+news)\b", re.I)
+    r"search\s+(the\s+)?(web|internet)|web\s+search|research\s+online|latest\s+news)\b", re.I)
 
 METADATA_PATTERN = re.compile(
     r"\b(hangi\s+(veri|tablo|seri|alan)|neler\s+var|listele|kapsam|hangi\s+dönemler|"

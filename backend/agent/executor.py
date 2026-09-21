@@ -28,6 +28,7 @@ from ..tools.charts import build_chart, chart_summary
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series
 from .planner import Plan, Step
+from .evidence_store import EvidenceStorageError
 from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
 MAX_URL_CHARS = 6000
@@ -58,11 +59,12 @@ def _column_name(step: Step, fallback: str) -> str:
 class Executor:
     """Executes plan steps against a Session, accumulating an artifact."""
 
-    def __init__(self, session: Session, url_reader=None, web_search=None):
+    def __init__(self, session: Session, url_reader=None, web_search=None, on_tool_result=None):
         self.session = session
         # Injected so a test -- and the eval harness -- never touches the network.
         self._read_url = url_reader
         self._search = web_search
+        self._on_tool_result = on_tool_result
 
     # -- entry point -------------------------------------------------------
 
@@ -73,6 +75,8 @@ class Executor:
             try:
                 detail = self._dispatch(step, plan)
                 ok = True
+            except EvidenceStorageError:
+                raise
             except Exception as exc:                                  # noqa: BLE001
                 # Deliberately broad: a tool raising anything must cost one step,
                 # never the turn. The message reaches the composer as a fact.
@@ -233,6 +237,12 @@ class Executor:
         series = ingest_external_series(
             step.url, step.value_column, period_column=step.period_column,
             sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last")
+        if self._on_tool_result is not None:
+            self._on_tool_result("ingest_external", step.arguments(), {
+                "status": "ok", "citation": series.citation(),
+                "values": [{"period": period.isoformat(), "value": float(value)}
+                           for period, value in series.values.items()],
+            })
         name = _column_name(step, re.sub(r"[^\w]+", "_", step.value_column))
         self.session.artifact.add_column(name, series.values, ColumnLineage(
             column=name, label=series.value_column, source=series.source, unit=series.unit,

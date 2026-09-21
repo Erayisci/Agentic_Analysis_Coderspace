@@ -5,7 +5,9 @@ function VerificationBadge({ verification }) {
   const ok = verification.passed;
   return (
     <span className={`badge ${ok ? "badge-ok" : "badge-warn"}`}>
-      {ok ? "Doğrulandı" : `${verification.n_errors} sorun`}
+      {verification.scope === "web_provenance"
+        ? (ok ? "Kaynaklar eşleşti" : "Araştırma eksik")
+        : (ok ? "Doğrulandı" : `${verification.n_errors} sorun`)}
     </span>
   );
 }

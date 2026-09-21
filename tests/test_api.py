@@ -18,7 +18,8 @@ def needs_lakehouse():
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "research.sqlite3"))
     with TestClient(app) as test_client:
         # Overrides whatever the real lifespan built from the ambient
         # environment (see module docstring) -- url_reader/web_search stay
