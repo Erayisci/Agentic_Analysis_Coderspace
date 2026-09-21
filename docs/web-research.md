@@ -9,6 +9,9 @@ when it is enabled. Supplied URLs are read first so the model can discover and
 follow attachment links before answering. Plans that fetch, ingest or transform
 numerical series keep using the existing analysis pipeline.
 
+For questions combining local BDDK values and an external file, use **Otomatik**.
+See [two mixed-source prompts and their verified answers](mixed-source-tests.md).
+
 ## Start the services and website
 
 Use Python 3.10+, Node compatible with the frontend's Vite version (22.16+ works),
@@ -77,23 +80,29 @@ Research can consume the configured Kloudeks quota.
 ## Database and API
 
 Evidence is automatically committed **before** a tool result reaches the model
-or is shortened for its context. The default is `data/research.sqlite3`, with
+or is shortened for its context. The default is `data/research.duckdb`, with
 `research_runs` and `research_tool_results` tables. Every result links to a run,
 session, question, tool and arguments; the completed response links answers and
 citations back to those results. If saving fails, the request returns an error
 instead of reporting a successful ingestion. Already committed results survive.
 
-This is a persistent evidence database alongside the validated analytics database
-`data/lakehouse.duckdb`. Extracted web text/tables remain source evidence and are
-not automatically converted into verified financial observations. The lakehouse
-build does not erase research history. **Back up the research database**; unlike
+This DuckDB database sits alongside `data/lakehouse.duckdb`. On startup, completed
+legacy runs from `data/research.sqlite3` are copied idempotently; the original
+file remains intact. A configured `.sqlite3` path is redirected to its `.duckdb`
+sibling and migrated too. The lakehouse build does not erase research history.
+**Back up the research database**; unlike
 the lakehouse it cannot be rebuilt from committed inputs. Set `RESEARCH_DB_PATH`
 to store it elsewhere. All website `/ask` turns, including ordinary search,
 URL-reading and model-selected external-series ingestion, use the evidence store.
-For series ingestion, the returned values and source/unit metadata are saved.
+For series ingestion, source/unit metadata goes into `external_series`, and
+typed `DATE`/`DOUBLE` observations go into `external_observations`, atomically
+with the tool result. `external_observations_latest` exposes the latest snapshot
+of each imported series while retaining earlier versions in the base table.
+The API response includes `ingestion.format: "duckdb"`. Unstructured pages and
+unsupported PDF layouts are retained as JSON evidence, not invented numeric rows.
 Standalone Python/CLI callers opt in
 with `Agent(evidence_store=...)` or the research runner's `on_tool_result` callback.
-The manual `/debug/ingest_external` helper still creates a session-only column.
+The manual `/debug/ingest_external` helper uses the same persistent DuckDB store.
 
 ```text
 POST /ask
@@ -111,13 +120,13 @@ To inspect a saved run directly without any network or model call:
 
 ```bash
 .venv/bin/python - <<'PY'
-import sqlite3
-with sqlite3.connect('data/research.sqlite3') as db:
+import duckdb
+with duckdb.connect('data/research.duckdb', read_only=True) as db:
     for row in db.execute('''
         SELECT r.question, r.status, t.tool, t.arguments_json, t.output_json
         FROM research_runs r JOIN research_tool_results t ON t.run_id = r.id
         ORDER BY t.id DESC LIMIT 5
-    '''):
+    ''').fetchall():
         print(row)
 PY
 ```

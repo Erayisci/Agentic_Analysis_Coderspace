@@ -140,6 +140,8 @@ class AnalysisArtifact:
                 "first_value": round(first, 4),
                 "last_period": series.index[-1].strftime("%Y-%m"),
                 "last_value": round(last, 4),
+                "change_value": round(last - first, 4),
+                "change_magnitude": round(abs(last - first), 4),
                 "change_pct": round(100 * (last / first - 1), 2) if first else None,
                 "min_value": round(float(series.min()), 4),
                 "min_period": series.idxmin().strftime("%Y-%m"),

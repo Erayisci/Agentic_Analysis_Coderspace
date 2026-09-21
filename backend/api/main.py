@@ -10,7 +10,7 @@ itself, extended to "the API has no key at all", not just "the model failed
 this turn".
 
 Working tables live in memory. Web evidence and completed responses are saved
-in research.sqlite3 and can be inspected after a restart or a chat reset.
+in research.duckdb and can be inspected after a restart or a chat reset.
 
 Web search is optional: with `WEB_TOOLS_ENABLED=true` (and the SearXNG /
 crawler containers from `extensions/web_tools/` running) the extension's
@@ -79,7 +79,9 @@ def _build_research_runner():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.evidence_store = EvidenceStore(os.environ.get("RESEARCH_DB_PATH", DATA_DIR / "research.sqlite3"))
+    app.state.evidence_store = EvidenceStore(
+        os.environ.get("RESEARCH_DB_PATH", DATA_DIR / "research.duckdb"),
+        legacy_path=None if os.environ.get("RESEARCH_DB_PATH") else DATA_DIR / "research.sqlite3")
     app.state.agent = Agent(client=_build_client(), url_reader=read_url,
                             web_search=_build_web_search(), research_runner=_build_research_runner(),
                             evidence_store=app.state.evidence_store)
@@ -136,7 +138,8 @@ def health() -> Dict[str, Any]:
     return {"status": "ok", "model_configured": _agent().client is not None,
             "web_search_configured": _agent().web_search is not None,
             "research_configured": _agent().research_runner is not None,
-            "evidence_storage": "enabled" if _agent().evidence_store is not None else "disabled"}
+            "evidence_storage": "enabled" if _agent().evidence_store is not None else "disabled",
+            "evidence_storage_format": "duckdb" if _agent().evidence_store is not None else None}
 
 
 @app.exception_handler(EvidenceStorageError)
@@ -189,9 +192,12 @@ def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
                 as_name=request.as_name, period_column=request.period_column,
                 sheet=request.sheet, unit=request.unit, monthly_rule=request.monthly_rule)
     plan = Plan(intent="url_analysis", steps=[step])
-    Executor(session, url_reader=_agent().url_reader, web_search=_agent().web_search).run(plan)
+    store = app.state.evidence_store
+    run_id = store.start(request.session_id, session.turns[-1]["question"], "debug_ingest")
+    Executor(session, url_reader=_agent().url_reader, web_search=_agent().web_search,
+             on_tool_result=lambda tool, arguments, output: store.record(run_id, tool, arguments, output)).run(plan)
     verification = verify(session)
-    return {
+    result = {
         "table": {
             "columns": session.artifact.column_names(),
             "units": session.artifact.units(),
@@ -201,6 +207,8 @@ def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
         "verification": verification,
         "audit": [a.to_dict() for a in session.audit],
     }
+    result["ingestion"] = store.finish(run_id, result, "ok" if verification["passed"] else "partial")
+    return result
 
 
 @app.get("/session/{session_id}")

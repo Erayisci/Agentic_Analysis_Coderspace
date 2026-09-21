@@ -10,7 +10,9 @@ async function request(path, options) {
     const detail = Array.isArray(body.detail)
       ? body.detail.map((item) => item.msg).join(", ")
       : body.detail || `İstek başarısız oldu (${response.status})`;
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }

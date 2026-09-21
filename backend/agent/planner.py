@@ -75,8 +75,7 @@ class Step(BaseModel):
     url: Optional[str] = None
     query: Optional[str] = None
 
-    # ingest_external only -- adds a column from an external file to the
-    # CURRENT SESSION'S table only; nothing is written to the lakehouse.
+    # ingest_external adds a column and persists its observations in research.duckdb.
     value_column: Optional[str] = Field(None, description="column in the external file holding the numbers")
     period_column: Optional[str] = Field(None, description="column holding the dates; auto-detected if omitted")
     sheet: Optional[str] = Field(None, description="Excel sheet name; ignored for CSV")
@@ -116,27 +115,50 @@ class Plan(BaseModel):
         return self
 
 
+class URLPlan(Plan):
+    """URL routing is already decided; choose actions without reclassifying it."""
+
+    intent: Literal["url_analysis"] = "url_analysis"
+    steps: List[Step] = Field(min_length=1, max_length=14)
+
+
 PLANNER_SYSTEM = """Sen bir finansal veri analiz ajanisin. Turkiye bankacilik (BDDK) ve makro (TCMB EVDS) \
 verilerini iceren bir lakehouse uzerinde calisiyorsun.
 
 Gorevin: kullanicinin sorusunu ADIMLARA cevirmek. Hesaplama YAPMA, SQL YAZMA, sayi URETME. \
 Sadece hangi adimlarin hangi sirayla calisacagini belirle.
 
+Uygulama davranisi: fetch_series ve ingest_external ile eklenen sutunlar AYNI
+calisma tablosunda tarih uzerinden birlesir ve web sitesinin Tablo sekmesinde
+OTOMATIK gosterilir. ingest_external ayrica kaynak ve gozlemleri DuckDB'ye
+OTOMATIK kaydeder. Tablo sekmesine koyma, birlestirme veya DuckDB'ye kaydetme
+istekleri DESTEKLENIR; bunlar icin ayri GUI, SQL veya save adimi GEREKMEZ.
+Farkli birimli seriler (ornegin milyon TL ve kg) AYRI sutunlarda yan yana
+gosterilebilir; bunlari bolmek, ayni birime cevirmek veya tek metrik yapmak
+gerekmez. fetch_series + ingest_external bu birlestirmeyi zaten yapar.
+
 Adimlar:
 - discover: bir kavramin lakehouse anahtarini bul (key). Anahtari bilmiyorsan ONCE bunu kullan.
 - fetch_series: bir seriyi tabloya sutun olarak ekle. key ve source zorunlu.
-- transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
+- transform: operation ve column ZORUNLU. operation su degerlerden biridir:
+  index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda).
+  Ornek: {"op":"transform","operation":"index_to_base","column":"kredi",
+          "base_period":"2026-01-01","as_name":"kredi_endeksi"}.
+  Her seri icin AYRI transform adimi kullan. column, onceki fetch_series veya
+  ingest_external adiminin as_name degeriyle ayni olmalidir. Ham sutunlari korumak
+  icin endeks sutununa FARKLI bir as_name ver. title, operation yerine GECMEZ.
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: anomaly, changepoint veya causality.
 - chart: grafik ciz.
 - read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa. read_url sadece OKUR
   (metin/onizleme dondurur), tabloya sutun EKLEMEZ.
-- ingest_external: bir URL'deki Excel/CSV dosyasindan bir sutunu SAYISAL SERI olarak tabloya
+- ingest_external: bir URL'deki Excel/CSV veya desteklenen PDF dosyasindan bir sutunu SAYISAL SERI olarak tabloya
   ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
   sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
-  bulunur. Sayisal sutun bu oturum icindir; API kaynak ciktisini ayrica kalici kanit
-  veritabanina kaydeder. Lakehouse'daki dogrulanmis gozlemler degismez.
+  bulunur. Kaynak ve sayisal gozlemler research.duckdb'ye kalici kaydedilir.
+  OKUNMUS DIS DOSYALAR varsa oradaki URL, columns ve units alanlarini aynen kullan.
+  PDF'den sayilari kendin cikarma; desteklenen tablonun sutunlarini ingest_external ile al.
 - clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. Kullanici "tabloyu temizle",
   "sil", "bastan basla", "yeni tablo yap" gibi bir sey isterse kullan. Bu adim SADECE bu
   oturumun bellekteki calisma tablosunu bosaltir -- lakehouse.duckdb'ye HICBIR ETKISI YOKTUR,
@@ -152,9 +174,15 @@ Kurallar:
 5. BIRIME DIKKAT ET. Kredi/mevduat TUTARI istendiginde birimi "milyon TL" veya "bin TL"
    olan seriyi sec. Birimi "adet" olan seri bir SAYIDIR (ornegin konut SATIS adedi),
    kredi tutari degildir. Birimi "%" olan seri bir orandir.
-6. Sutun adini as_name ile ver. Bir adimin kullanmadigi alanlari BOS BIRAK.
+6. Sutun adini as_name ile ver. Bir adimin kullanmadigi alanlari JSON'a EKLEME;
+   tum istege bagli alanlari null olarak tekrar etme. reasoning en fazla bir cumle olsun.
 7. Kullanici disaridan bir dosya/URL'deki veriyi mevcut tabloyla KARSILASTIRMAK veya
    BIRLESTIRMEK istiyorsa ingest_external kullan; sadece OZETLEMESINI istiyorsa read_url yeter.
+8. BDDK ve URL ayni sorudaysa hem fetch_series hem ingest_external gerekir. Web metni
+   okumak BDDK sutununun yerine gecmez. Okunmamis baglanti/sutun uydurma: once read_url
+   ve BDDK fetch_series planla; uygulama dosyayi kesfedip semayi verince tekrar planlayacak.
+9. Veri tablosu, PDF okuma, veri kaydi ve endeksleme bu uygulamanin destekledigi islerdir.
+   Bunlari unsupported diye reddetme. Anahtar eksikse discover; sema eksikse read_url sec.
 """
 
 

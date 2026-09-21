@@ -242,7 +242,11 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
     contains two questions. Splitting on clause boundaries and searching each
     piece recovers both, which is what the planner needs to see.
     """
-    chunks = [chunk.strip() for chunk in CLAUSE_SPLIT.split(question or "") if chunk.strip()]
+    # A URL's dots/slashes are not concepts and must not consume the clause
+    # budget before the BDDK measure appearing later in a mixed-source prompt.
+    text = re.sub(r"https?://[^\s<>\"'\[\]()]+", " ", question or "")
+    explicit_keys = re.findall(r"\bkey\s*=\s*([\w./]+)", text)
+    chunks = explicit_keys + [chunk.strip() for chunk in CLAUSE_SPLIT.split(text) if chunk.strip()]
     chunks = [chunk for chunk in chunks
               if any(len(word) > 3 and word.lower() not in STOPWORDS
                      for word in re.split(r"[^\w\u00c0-\u024f]+", chunk))]
@@ -250,9 +254,9 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
         chunks = [question]
 
     merged, seen = [], set()
-    for chunk in chunks[:6]:
+    for chunk in chunks[:18]:
         for candidate in discover(chunk, limit=per_concept)["candidates"]:
-            identity = (candidate["source"], candidate["key"])
+            identity = (candidate["source"], candidate["dataset"], candidate["key"])
             if identity not in seen:
                 seen.add(identity)
                 merged.append(candidate)
@@ -273,7 +277,7 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
             kept.append(candidate)
     kept = sorted(kept[:limit], key=lambda c: -c["score"])
 
-    return {"query": question, "n_concepts": len(chunks), "concepts": chunks[:6],
+    return {"query": question, "n_concepts": len(chunks), "concepts": chunks[:18],
             "n_candidates": len(kept), "candidates": kept}
 
 

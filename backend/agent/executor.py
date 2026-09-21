@@ -59,12 +59,14 @@ def _column_name(step: Step, fallback: str) -> str:
 class Executor:
     """Executes plan steps against a Session, accumulating an artifact."""
 
-    def __init__(self, session: Session, url_reader=None, web_search=None, on_tool_result=None):
+    def __init__(self, session: Session, url_reader=None, web_search=None, on_tool_result=None,
+                 external_tables=None):
         self.session = session
         # Injected so a test -- and the eval harness -- never touches the network.
         self._read_url = url_reader
         self._search = web_search
         self._on_tool_result = on_tool_result
+        self._external_tables = external_tables or {}
 
     # -- entry point -------------------------------------------------------
 
@@ -231,12 +233,12 @@ class Executor:
         return f"read {step.url} ({result.get('kind')})"
 
     def _ingest_external(self, step: Step, plan: Plan) -> str:
-        """Add one column of an external Excel/CSV file to THIS SESSION'S
-        table only -- see tools.external_series' module docstring for why
-        this never touches data/lakehouse.duckdb."""
+        """Persist an imported series via the callback before adding its column."""
+        cached = self._external_tables.get((step.url, step.sheet))
+        extra = {"frame": cached} if cached is not None else {}
         series = ingest_external_series(
             step.url, step.value_column, period_column=step.period_column,
-            sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last")
+            sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last", **extra)
         if self._on_tool_result is not None:
             self._on_tool_result("ingest_external", step.arguments(), {
                 "status": "ok", "citation": series.citation(),
@@ -252,7 +254,7 @@ class Executor:
         self.session.cite(series.citation())
         return (f"{name}: {len(series.values)} points from {step.url} "
                 f"(value_column={series.value_column!r}, period_column={series.period_column!r}, "
-                f"unit={series.unit!r} unverified"
+                f"unit={series.unit!r}, verified={series.citation()['unit_verified']}"
                 + (f", {series.n_dropped_rows} row(s) dropped" if series.n_dropped_rows else "") + ")")
 
     def _search_step(self, step: Step, plan: Plan) -> str:

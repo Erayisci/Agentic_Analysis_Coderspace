@@ -1,4 +1,4 @@
-# Analytics outputs plus local research.sqlite3 (persistent; back it up).
+# Analytics outputs plus local research.duckdb/legacy SQLite (persistent; back them up).
 data/
 
 # Spreadsheet lock files (created while a workbook is open)

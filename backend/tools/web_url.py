@@ -105,12 +105,22 @@ def _extract_pdf(content: bytes) -> dict:
     reader = PdfReader(BytesIO(content))
     pages = [page.extract_text() or "" for page in reader.pages]
     text, truncated = _bounded("\n\n".join(pages))
-    return {
+    result = {
         "kind": "pdf",
         "n_pages": len(reader.pages),
         "text": text,
         "truncated": truncated,
     }
+    if "PRECIOUS METALS MARKET GOLD TRADING DATA" in text:
+        from .bist_precious_metals import parse_gold_pdf
+        try:
+            frame = parse_gold_pdf(content)
+        except ValueError:
+            pass  # Text remains readable; unsupported layouts are not numeric series.
+        else:
+            result["tabular"] = {"columns": list(frame.columns), "preview": frame.to_dict(orient="records"),
+                                 **frame.attrs["source_metadata"]}
+    return result
 
 
 def _extract_excel(content: bytes) -> dict:

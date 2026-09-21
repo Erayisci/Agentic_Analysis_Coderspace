@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ask, health, resetSession } from "./api";
+import { ask, getSession, health, resetSession } from "./api";
 import ChatMessage from "./components/ChatMessage";
 import DataTable from "./components/DataTable";
 import ChartPanel from "./components/ChartPanel";
@@ -39,6 +39,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("table");
   const [latest, setLatest] = useState(null); // last successful /ask response
   const scrollRef = useRef(null);
+  const hasInteracted = useRef(false);
 
   useEffect(() => {
     health()
@@ -50,12 +51,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    getSession(sessionId).then((data) => {
+      if (active && !hasInteracted.current) setLatest(data);
+    }).catch((err) => {
+      // A fresh/reset conversation has no working table on the server.
+      if (active && !hasInteracted.current && err.status !== 404) {
+        setApiError(`Çalışma tablosu yüklenemedi: ${err.message}`);
+      }
+    });
+    return () => { active = false; };
+  }, [sessionId]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [turns]);
 
   async function submitQuestion(text) {
     const trimmed = text.trim();
     if (!trimmed || loading) return;
+    hasInteracted.current = true;
     setLoading(true);
     setQuestion("");
     setTurns((prev) => [...prev, { question: trimmed, pending: true }]);
@@ -68,7 +83,8 @@ export default function App() {
               unsupported_numbers: data.unsupported_numbers, ingestion: data.ingestion }
           : t));
       setLatest(data);
-      if (data.research || data.ingestion?.tool_results) setActiveTab("research");
+      if (data.table?.columns?.length && data.table?.rows?.length) setActiveTab("table");
+      else if (data.research || data.ingestion?.tool_results) setActiveTab("research");
       else if (data.figure) setActiveTab("chart");
     } catch (err) {
       setTurns((prev) => prev.map((t, i) =>
@@ -79,11 +95,13 @@ export default function App() {
   }
 
   function handleIngested(data) {
+    hasInteracted.current = true;
     setLatest((prev) => ({ ...(prev || {}), ...data }));
     setActiveTab("table");
   }
 
   async function startNewChat() {
+    hasInteracted.current = true;
     try {
       await resetSession(sessionId);
     } catch {

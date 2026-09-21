@@ -28,6 +28,10 @@ KESIN KURALLAR:
 5. Granger sonucu ONGORULEBILIRLIKTIR; "neden oldu" DEME.
 6. caveats listesindeki uyarilari cevapta belirt.
 7. Kisa yaz: 2-4 paragraf. Once dogrudan cevap, sonra gerekce.
+8. tablo_sutunlari doluysa sayisal tablo uygulamanin Tablo sekmesinde zaten
+   gosterilir. Yanitta tabloyu Markdown veya duz metin olarak tekrar yazma;
+   sonucu, birimleri ve kaynaklari ozetle. tablo_sutunlari bossa tablonun
+   olusturulamadigini acikla; metin icinde yerine gecen bir tablo URETME.
 """
 
 

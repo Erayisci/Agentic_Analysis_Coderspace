@@ -1,14 +1,8 @@
-"""Turn one column of an external Excel/CSV file into a time series the agent
-can add to the current turn's table -- session-scoped only.
+"""Parse an Excel/CSV or supported PDF column into a monthly numeric series.
 
-This is deliberately NOT a write into `data/lakehouse.duckdb`. That database
-has exactly one writer (`backend.lakehouse.build`) and every other reader
-(every tool, every script) opens it `read_only=True`; a live agent turn
-writing an unseen, demo-day file into the shared analytical database on every
-question would break that invariant and risk corrupting or locking it for
-every other session. So an externally-ingested series lives only in the
-current `Session.artifact`, exactly like a `transform`-derived column already
-does, and disappears with the session.
+The executor adds the result to the working table. The API evidence callback
+also persists its source metadata and typed observations in research.duckdb
+before the column is used; the curated BDDK lakehouse stays independently built.
 
 Fetching goes through `tools.web_url`'s `_fetch`/`_detect_kind` rather than a
 second implementation, because the SSRF guard (reject private/loopback/
@@ -24,6 +18,7 @@ caller gives nothing better -- and are stated as such in the citation, so the
 composer can hedge instead of asserting them as fact.
 """
 import re
+import hashlib
 from io import BytesIO
 from typing import NamedTuple, Optional
 
@@ -108,6 +103,7 @@ class ExternalSeriesResult(NamedTuple):
     monthly_rule: str = "last"
     temporal_semantics: str = "unknown"
     n_dropped_rows: int = 0     # rows with no parseable date or number, dropped
+    source_metadata: Optional[dict] = None
 
     @property
     def source(self) -> str:
@@ -138,7 +134,9 @@ class ExternalSeriesResult(NamedTuple):
             "period_start": self.period_start, "period_end": self.period_end,
             "n_points": int(len(self.values)),
             "n_dropped_rows": int(self.n_dropped_rows),
-            "unit_verified": False,
+            **(self.source_metadata or {}),
+            "unit_verified": bool(self.source_metadata and
+                                  self.source_metadata.get("units", {}).get(self.value_column) == self.unit),
         }
 
 
@@ -148,12 +146,21 @@ def _read_table(url: str, sheet: Optional[str]) -> pd.DataFrame:
     response = web_url._fetch(url)
     kind = web_url._detect_kind(response.headers.get("Content-Type", ""), url)
     if kind == "excel":
-        return pd.read_excel(BytesIO(response.content), sheet_name=sheet or 0)
-    if kind == "csv":
+        frame = pd.read_excel(BytesIO(response.content), sheet_name=sheet or 0)
+    elif kind == "csv":
         if sheet is not None:
             raise ValueError(f"{url!r} is a CSV file; it has no sheets, so sheet={sheet!r} is invalid")
-        return pd.read_csv(BytesIO(response.content))
-    raise ValueError(f"{url!r} is {kind!r}, not a tabular (excel/csv) source")
+        frame = pd.read_csv(BytesIO(response.content))
+    elif kind == "pdf":
+        from .bist_precious_metals import parse_gold_pdf
+        if sheet is not None:
+            raise ValueError("A PDF has no Excel sheets")
+        frame = parse_gold_pdf(response.content)
+    else:
+        raise ValueError(f"{url!r} is {kind!r}, not a tabular (excel/csv/supported pdf) source")
+    frame.attrs.setdefault("source_metadata", {}).update(
+        format=kind, content_sha256=hashlib.sha256(response.content).hexdigest())
+    return frame
 
 
 def _resolve_column(columns, name: str, role: str) -> str:
@@ -207,8 +214,9 @@ def ingest_external_series(
     sheet: Optional[str] = None,
     unit: Optional[str] = None,
     monthly_rule: str = "last",
+    frame: Optional[pd.DataFrame] = None,
 ) -> ExternalSeriesResult:
-    """Fetch an external Excel/CSV file and return one column as a monthly series.
+    """Fetch Excel/CSV or a supported PDF and return one monthly numeric series.
 
     Args:
         url: the file to fetch. Goes through the same SSRF guard as read_url.
@@ -224,15 +232,21 @@ def ingest_external_series(
             "sum" (a flow) -- how multiple rows in the same month are
             collapsed onto one monthly value, via the same
             `tools.transforms.resample_to_monthly` the weekly bulletin uses.
+        frame: previously parsed complete table, reused within a turn to avoid
+            downloading the same source again for each selected column.
 
     Raises ValueError for: a non-tabular content type, a missing column, or
     no date-like column found with none specified.
     """
-    frame = _read_table(url, sheet)
+    frame = _read_table(url, sheet) if frame is None else frame
     if frame.empty:
         raise ValueError(f"{url!r} contains no rows")
 
     value_column = _resolve_column(frame.columns, value_column, "value_column")
+    metadata = frame.attrs.get("source_metadata", {})
+    verified_unit = metadata.get("units", {}).get(value_column)
+    if verified_unit and unit and unit != verified_unit:
+        raise ValueError(f"Source unit is {verified_unit!r}, not {unit!r}; explicit conversion is required")
     if period_column is not None:
         period_column = _resolve_column(frame.columns, period_column, "period_column")
     else:
@@ -255,6 +269,7 @@ def ingest_external_series(
 
     return ExternalSeriesResult(
         values=monthly, url=url, value_column=str(value_column), period_column=str(period_column),
-        unit=unit or str(value_column), sheet=sheet, monthly_rule=monthly_rule,
-        n_dropped_rows=n_dropped_rows,
+        unit=verified_unit or unit or str(value_column), sheet=sheet, monthly_rule=monthly_rule,
+        temporal_semantics=metadata.get("temporal_semantics", "unknown"),
+        n_dropped_rows=n_dropped_rows, source_metadata=metadata or None,
     )

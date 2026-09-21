@@ -29,6 +29,9 @@ def verify(session: Session) -> Dict[str, Any]:
                        "severity": severity if not passed else "info"})
 
     failed_steps = [a for a in session.audit if not a.ok]
+    if session.facts.get("planner_error"):
+        record("model_plan_completed", False,
+               "Planner failed; using fallback steps: " + session.facts["planner_error"], severity="warning")
     record("all_steps_ran", not failed_steps,
            "; ".join(f"{a.op}: {a.detail}" for a in failed_steps) or "every step completed",
            severity="warning")
@@ -113,7 +116,7 @@ def quotable_numbers(session: Session) -> Dict[str, Any]:
     figure that is not in here did not come from the data.
     """
     artifact = session.artifact
-    allowed: Dict[str, Any] = {"series": artifact.summary()}
+    allowed: Dict[str, Any] = {"series": artifact.summary(), "sources": session.citations}
     if session.facts.get("find_periods"):
         allowed["find_periods"] = session.facts["find_periods"]
     if session.facts.get("analysis"):
