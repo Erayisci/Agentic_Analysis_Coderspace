@@ -18,10 +18,11 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
 
+from ..core.labels import fold
 from ..llm import KloudeksClient, LLMError
 from ..tools.lakehouse import discover_concepts
 from .composer import compose
-from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key
+from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
 from .router import Route, route
 from .state import Session
@@ -63,7 +64,7 @@ def build_context(question: str, session: Session, route_result: Route,
     """
     blocks: List[str] = []
 
-    if session.has_artifact():
+    if session.has_artifact() and route_result.is_followup:
         # The table the user is looking at, which is the last turn's columns --
         # not every column the conversation has ever built. The rest are named
         # so a question that does mean one ("NPL sutununu geri getir") can
@@ -77,8 +78,21 @@ def build_context(question: str, session: Session, route_result: Route,
         if hidden:
             blocks.append("ONCEKI SORULARDAN KALAN SUTUNLAR (bu tabloda gosterilmiyor; sadece "
                           "soru acikca isterse kullan): " + ", ".join(hidden))
-        if route_result.is_followup:
-            blocks.append("Bu bir DEVAM sorusu: mevcut sutunlari KORU, sadece yeni sutun ekle.")
+        blocks.append("Bu bir DEVAM sorusu: mevcut sutunlari KORU, sadece yeni sutun ekle.")
+    elif session.has_artifact():
+        # A question the router did not read as a follow-up is planned on its
+        # own words, whatever the table holds. Shown the previous question's
+        # columns as the current table, the model reused them: "konut" from an
+        # Istanbul FinTurk question stood in for the national housing-loan
+        # line of the next, unrelated, question -- quarterly province data
+        # under a monthly national answer. So the table is presented as empty
+        # and the leftovers are named only so the model does not invent a
+        # column by that name; `apply_scope` enforces the same rule on the plan.
+        leftover = ", ".join(session.artifact.column_names())
+        blocks.append("MEVCUT TABLO: bos -- bu YENI bir soru. Onceki sorulardan kalan sutunlar "
+                      f"({leftover}) bu soru icin KULLANILMAZ: sorunun gerektirdigi HER seriyi "
+                      "asagidaki anahtarlardan fetch_series ile getir; column/against alanlarina "
+                      "sadece bu planda fetch ettigin sutun adlarini yaz.")
     else:
         blocks.append("MEVCUT TABLO: bos.")
 
@@ -239,10 +253,97 @@ def apply_dimensions(plan: Plan, discovery: Dict[str, Any]) -> Plan:
     return plan
 
 
+COLUMN_FIELDS = ("column", "against", "other_column")
+
+
+def _produced_columns(steps: List[Step]) -> List[str]:
+    """The column names the executor will assign to what `steps` produce."""
+    names: List[str] = []
+    for step in steps:
+        if step.op in ("fetch_series", "ingest_external"):
+            names.append(_column_name(step, re.sub(r"[^\w]+", "_", step.key or step.value_column or step.op)))
+        elif step.op == "transform" and step.as_name:
+            names.append(_column_name(step, step.op))
+    return names
+
+
+def _names_candidate(reference: str, candidate: Dict[str, Any]) -> bool:
+    """Does a column reference ("konut") name this discovery candidate
+    (`tuketici_kredileri_konut`, "Tüketici Kredileri - Konut")?"""
+    cleaned = re.sub(r"[^\w]+", "_", reference).strip("_").lower()
+    haystack = f"{candidate['key']} {fold(candidate.get('name') or '')}".lower()
+    return any(len(word) > 2 and word in haystack for word in cleaned.split("_"))
+
+
+def apply_scope(plan: Plan, route_result: Route, session: Session, discovery: Dict[str, Any]) -> Plan:
+    """A fresh question's plan references only columns it produces itself.
+
+    The session's table outlives the question that built it, and a question
+    the router did not read as a follow-up must not lean on it: measured
+    live, "İstanbul'daki konut kredilerini il bazinda goster" followed by the
+    demo's national housing-loan question produced a plan that fetched only
+    the rate and ran `find_periods` against the previous turn's `konut` --
+    22 quarterly points of one province under a 60-month national answer, 0
+    matching periods, and a FinTurk citation the question never asked for.
+    `build_context` no longer shows the model those columns; this makes it a
+    guarantee. A reference that resolves to a column this plan produces is
+    normalised to it. One that resolves only to a previous question's column
+    is a series the model should have fetched: the question's own discovery
+    offered it (each clause's first choice the plan does not fetch), so that
+    fetch is inserted under the referenced name and the reference stands.
+    When discovery offered nothing, the reference is left alone -- the model
+    then meant the old column by name, which is the one legitimate use.
+    """
+    if route_result.is_followup or not session.has_artifact():
+        return plan
+    stale = session.artifact.column_names()
+    by_identity = {(c["source"], c["key"], c.get("currency")): c for c in discovery.get("candidates") or []}
+    fetched = {(s.source, _normalise_key(s.key)) for s in plan.steps if s.op == "fetch_series" and s.key}
+    spare: List[Dict[str, Any]] = []
+    for ranked in discovery.get("by_concept") or []:
+        for identity in ranked[:1]:
+            candidate = by_identity.get(identity)
+            if candidate and (candidate["source"], candidate["key"]) not in fetched and candidate not in spare:
+                spare.append(candidate)
+
+    steps: List[Step] = []
+    notes: List[str] = []
+    for step in plan.steps:
+        produced = _produced_columns(steps)
+        for field in COLUMN_FIELDS:
+            reference = getattr(step, field, None)
+            if not reference:
+                continue
+            hit = match_column(reference, produced)
+            if hit:
+                setattr(step, field, hit)
+                continue
+            if match_column(reference, stale) is None:
+                continue                # names nothing at all; the executor reports it
+            pick = next((c for c in spare if _names_candidate(reference, c)), None) or (spare[0] if spare else None)
+            if pick is None:
+                continue
+            spare.remove(pick)
+            name = re.sub(r"[^\w]+", "_", reference).strip("_") or pick["key"]
+            steps.append(Step(op="fetch_series", key=pick["key"], source=pick["source"],
+                              dataset=pick.get("dataset") if pick["source"] in DATASET_SOURCES else None,
+                              currency=pick.get("currency"), province=pick.get("province"), as_name=name))
+            setattr(step, field, name)
+            notes.append(f"{reference!r} was a previous question's column; fetched {pick['key']} as {name}")
+        if step.op == "chart" and step.columns:
+            produced = _produced_columns(steps)
+            step.columns = [c for c in (match_column(c, produced) for c in step.columns) if c] or None
+        steps.append(step)
+    plan.steps = steps
+    if notes:
+        plan.reasoning = f"{plan.reasoning or ''} [scope: {'; '.join(notes)}]".strip()
+    return plan
+
+
 EXCHANGE_RATE_KEY = re.compile(r"^TP\.DK\.(USD|EUR)\.", re.I)
 
 
-def apply_valuation_guard(plan: Plan, session: Session) -> Plan:
+def apply_valuation_guard(plan: Plan, session: Session, is_followup: bool = True) -> Plan:
     """An FX stock in TL moves with the exchange rate by construction; make the
     comparison the question meant, in Python.
 
@@ -258,7 +359,9 @@ def apply_valuation_guard(plan: Plan, session: Session) -> Plan:
         if step.source == "macro" and EXCHANGE_RATE_KEY.match(_normalise_key(step.key)):
             rate_name = _column_name(step, re.sub(r"[^\w]+", "_", step.key))
             break
-    if rate_name is None and session.has_artifact():
+    # A rate an earlier turn fetched counts only when this turn extends that
+    # table; a fresh question stands on what it fetches itself.
+    if rate_name is None and is_followup and session.has_artifact():
         rate_name = next((name for name, line in session.artifact.lineage.items()
                           if line.key and EXCHANGE_RATE_KEY.match(line.key)), None)
     if rate_name is None:
@@ -267,7 +370,7 @@ def apply_valuation_guard(plan: Plan, session: Session) -> Plan:
     sliced = [s for s in fetches if s.source in ("bulletin", "weekly") and s.currency in ("FX", "TL")]
     if not sliced:
         return plan
-    existing = set(session.artifact.column_names()) if session.has_artifact() else set()
+    existing = set(session.artifact.column_names()) if is_followup and session.has_artifact() else set()
     planned = {_column_name(s, re.sub(r"[^\w]+", "_", s.key or s.op)) for s in plan.steps if s.op != "analyze"}
 
     entities: List[tuple] = []
@@ -306,12 +409,13 @@ PRICE_INDEX_HINT = re.compile(r"(KFE|GENENDEKS|TUFE|ENDEKS|fiyat)", re.I)
 DEFAULT_DEFLATOR = ("TP.GENENDEKS.T1", "tufe")
 
 
-def _planned_columns(plan: Plan, session: Session) -> List[Dict[str, Any]]:
+def _planned_columns(plan: Plan, session: Session, include_existing: bool = True) -> List[Dict[str, Any]]:
     """The columns the table will hold after the plan runs, in order, with
     what is known about each at plan time: existing lineage for the artifact's
-    columns, the step's own fields for the ones it is about to fetch."""
+    columns (only when the turn extends that table), the step's own fields
+    for the ones it is about to fetch."""
     columns: List[Dict[str, Any]] = []
-    if session.has_artifact():
+    if include_existing and session.has_artifact():
         for name, line in session.artifact.lineage.items():
             columns.append({"name": name, "source": line.source, "unit": line.unit,
                             "semantics": line.temporal_semantics, "key": line.key or ""})
@@ -346,7 +450,9 @@ def apply_analysis(plan: Plan, route_result: Route, session: Session) -> Plan:
     for method in route_result.wants_analysis:
         if method in have:
             continue
-        columns = _planned_columns(plan, session)
+        # A fresh question's analysis runs on what it fetched, not on the
+        # first column a previous question left in the table.
+        columns = _planned_columns(plan, session, include_existing=route_result.is_followup)
         if not columns:
             logger.info("apply_analysis: no columns to run %s on; skipped", method)
             continue
@@ -429,12 +535,15 @@ def make_plan(question: str, session: Session, route_result: Route,
     # for. Rule 1 in the prompt ("don't invent a key") makes this the *safe*
     # failure, but a safe non-answer is still not an answer: the deterministic
     # plan used for an unreachable model recovers a real table here too. A
-    # follow-up over an existing table is not a dead end and is left alone.
-    if (series_intent and not session.has_artifact()
+    # follow-up over an existing table is not a dead end and is left alone --
+    # but a table a *previous* question built does not rescue a fresh one.
+    extends_table = session.has_artifact() and (route_result.is_followup or plan.intent == "followup")
+    if (series_intent and not extends_table
             and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
         plan = deterministic_series_plan(question, route_result, discovery=found)
         plan.reasoning = f"{plan.reasoning} [model plan produced no data; replaced]"
     plan = apply_dimensions(plan, found)
+    plan = apply_scope(plan, route_result, session, found)
 
     # The router's regex read of the date range beats the model's: it is exact,
     # and a plan that silently drops the window returns 67 months for a
@@ -491,7 +600,7 @@ def run_turn(question: str, session: Optional[Session] = None,
     # `KloudeksClient` logs each call separately, so the two are separable.
     with _timed(timings, "plan"):
         plan = make_plan(question, session, route_result, client)
-        plan = apply_valuation_guard(plan, session)
+        plan = apply_valuation_guard(plan, session, is_followup=route_result.is_followup)
         plan = apply_analysis(plan, route_result, session)
         plan = apply_presentation(plan, route_result, question)
     logger.info("plan -> %s", [step.op + (f":{step.method}" if step.method else "") for step in plan.steps])
@@ -543,7 +652,7 @@ def run_turn(question: str, session: Optional[Session] = None,
         "figure": session.facts.get("figure") if presentation["chart"] else None,
         "analysis": session.facts.get("analysis"),
         "find_periods": session.facts.get("find_periods"),
-        "citations": session.citations,
+        "citations": session.turn_citations(),
         "verification": verification,
         "audit": [step.to_dict() for step in session.audit],
         "timings": timings,

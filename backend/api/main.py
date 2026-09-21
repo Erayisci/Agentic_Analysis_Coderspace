@@ -181,7 +181,7 @@ def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
             "rows": view.to_records(),
             "all_columns": session.artifact.column_names(),
         },
-        "citations": session.citations,
+        "citations": session.turn_citations(),
         "verification": verification,
         "audit": [a.to_dict() for a in session.audit],
     }
@@ -204,7 +204,7 @@ def get_session(session_id: str) -> Dict[str, Any]:
             "rows": view.to_records(),
             "all_columns": session.artifact.column_names(),
         },
-        "citations": session.citations,
+        "citations": session.turn_citations(),
         "n_turns": len(session.turns),
     }
 

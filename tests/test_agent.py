@@ -622,8 +622,11 @@ def test_a_turn_shows_the_columns_it_touched_not_everything_the_session_holds():
 
 
 def test_the_planner_is_shown_the_table_on_screen_not_the_whole_session(monkeypatch):
-    """A column an earlier question fetched is named as leftover, not offered
-    as part of the current table -- the planner copies what it is shown."""
+    """On a follow-up, a column an earlier question fetched is named as
+    leftover, not offered as part of the current table -- the planner copies
+    what it is shown. On a fresh question, no column is the current table:
+    shown the previous question's `konut`, the model reused it instead of
+    fetching the line the new question was about."""
     from backend.agent import pipeline
 
     monkeypatch.setattr(pipeline, "discover_concepts",
@@ -635,10 +638,140 @@ def test_the_planner_is_shown_the_table_on_screen_not_the_whole_session(monkeypa
         temporal_semantics="stock", key="konut", citation={"table": "t", "filters": {}}))
     session.visible_columns = ["konut"]
 
-    context = pipeline.build_context("soru", session, route("konut kredileri", client=None))
+    followup = route("bu tabloyu bozmadan faizi ekle", has_artifact=True, client=None)
+    assert followup.is_followup
+    context = pipeline.build_context("soru", session, followup)
     current = context.split("ONCEKI SORULARDAN KALAN")[0]
     assert "konut" in current and "npl" not in current
     assert "npl" in context.split("ONCEKI SORULARDAN KALAN")[1]
+
+    fresh = route("konut kredileri", has_artifact=True, client=None)
+    assert not fresh.is_followup
+    context = pipeline.build_context("soru", session, fresh)
+    assert "MEVCUT TABLO: bos" in context and "YENI bir soru" in context
+    assert "MEVCUT TABLO (" not in context
+
+
+def test_replacing_a_column_keeps_the_new_series_whole():
+    """A monthly series written over a quarterly column of the same name
+    keeps all its months -- `assign` aligned it onto the old index and
+    silently kept only the quarter-ends."""
+    quarterly = pd.Series([1.0, 2.0, 3.0], index=pd.to_datetime(["2021-03-01", "2021-06-01", "2021-09-01"]))
+    artifact = AnalysisArtifact(title="t")
+    line = ColumnLineage(column="konut", label="Konut", source="finturk", unit="bin TL",
+                         temporal_semantics="stock", key="konut_kredisi", citation={"table": "f"})
+    artifact.add_column("konut", quarterly, line)
+    monthly = pd.Series(range(12), index=pd.date_range("2021-01-01", periods=12, freq="MS"), dtype=float)
+    artifact.add_column("konut", monthly, ColumnLineage(
+        column="konut", label="Konut", source="bulletin", unit="milyon TL",
+        temporal_semantics="stock", key="tuketici_kredileri_konut", citation={"table": "b"}))
+    assert artifact.frame["konut"].notna().sum() == 12
+    assert artifact.lineage["konut"].source == "bulletin"
+
+
+def _stale_istanbul_session() -> Session:
+    """A session whose one column is the previous question's: Istanbul's
+    housing loans from FinTurk, quarterly, named `konut`."""
+    session = Session()
+    session.start_turn("İstanbul'daki konut kredilerini il bazinda goster")
+    Executor(session).run(Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk", dataset="bireysel_bankacilik",
+             province="İSTANBUL", as_name="konut")]))
+    session.focus()
+    assert session.artifact.lineage["konut"].source == "finturk"
+    return session
+
+
+DEMO_HOUSING_QUESTION = ("2021-2025 yillari arasindaki 60 aylik veriden Turkiye'de kullanilan toplam konut "
+                         "kredilerinin dagilimini aylik olarak gosteriniz. Buna ek olarak konut kredisi faiz "
+                         "oranlarini da gosteriniz. Faiz orani dustugu halde kredi miktarinin yukselmedigi "
+                         "donemler olmus mu?")
+
+
+def test_a_fresh_question_never_plans_over_a_previous_questions_column():
+    """Measured live: after an Istanbul FinTurk question, the demo's national
+    housing-loan question came back planned as `fetch TP.KTF12; find_periods
+    faiz against konut` -- the previous turn's province column standing in
+    for the national line, 22 quarterly points under a 60-month answer. The
+    plan of a question the router did not read as a follow-up references
+    only what it fetches itself; a reference to a stale column becomes the
+    fetch the question's own discovery offered for it."""
+    needs_lakehouse()
+    from backend.agent.pipeline import make_plan
+
+    session = _stale_istanbul_session()
+    session.start_turn(DEMO_HOUSING_QUESTION)
+    route_result = route(DEMO_HOUSING_QUESTION, has_artifact=True, client=None)
+    assert not route_result.is_followup
+    model_plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="find_periods", column="faiz", direction="down", against="konut", against_direction="down")])
+    plan = make_plan(DEMO_HOUSING_QUESTION, session, route_result, _StubPlanClient(model_plan))
+
+    fetched = {(s.source, s.key): s for s in plan.steps if s.op == "fetch_series"}
+    assert ("bulletin", "tuketici_kredileri_konut") in fetched
+    assert not any(s.source == "finturk" for s in plan.steps)
+    assert fetched[("bulletin", "tuketici_kredileri_konut")].as_name == "konut"
+    assert [s.op for s in plan.steps] == ["fetch_series", "fetch_series", "find_periods"]
+    assert "previous question's column" in plan.reasoning
+
+    Executor(session).run(plan)
+    assert all(a.ok for a in session.audit), [a.detail for a in session.audit if not a.ok]
+    session.focus(keep_previous=route_result.is_followup)
+    assert session.artifact.lineage["konut"].source == "bulletin"
+    assert session.artifact.frame["konut"].notna().sum() == 60
+    assert session.facts["find_periods"][0]["n_periods"] > 0
+    # The panel's sources are this turn's, not the conversation's.
+    assert {c["table"] for c in session.turn_citations()} == {"bulletin_observations", "macro_observations"}
+    assert any(c["table"] == "finturk_observations" for c in session.citations)     # the session still knows
+
+
+def test_a_fresh_question_leaves_a_reference_alone_when_discovery_offers_nothing_for_it(monkeypatch):
+    """The one legitimate reach into an old column: the question named it
+    and offered no series of its own for that slot."""
+    from backend.agent.pipeline import apply_scope
+
+    session = Session(artifact=synthetic("npl", unit="%", semantics="rate"))
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="analyze", method="causality", column="faiz", against="npl")])
+    fresh = route("faiz npl'yi onculuyor mu", has_artifact=True, client=None)
+    scoped = apply_scope(plan, fresh, session, {"candidates": [], "by_concept": []})
+    assert [s.op for s in scoped.steps] == ["fetch_series", "analyze"]
+    assert scoped.steps[1].against == "npl"
+
+    # A follow-up is never touched.
+    followup = route("bu tabloyu bozmadan", has_artifact=True, client=None)
+    plan = Plan(intent="followup", steps=[Step(op="find_periods", column="npl", direction="down")])
+    assert apply_scope(plan, followup, session, {"candidates": [], "by_concept": []}).steps == plan.steps
+
+
+def test_an_automatic_partner_column_is_one_this_turn_fetched():
+    """`against` left blank on a fresh question is filled from the turn's own
+    columns before a previous question's."""
+    session = Session(artifact=synthetic("stale", unit="%", semantics="rate"))
+    session.start_turn("q")
+    monthly = session.artifact.frame["stale"]
+    for name in ("a", "b"):
+        session.artifact.add_column(name, monthly * 2, ColumnLineage(
+            column=name, label=name, source="macro", unit="%", temporal_semantics="rate",
+            key=name, citation={"table": "t"}))
+        session.touch_column(name)
+    step = Step(op="analyze", method="causality", column="a")
+    against, auto = Executor(session)._second_column(step, "a")
+    assert (against, auto) == ("b", True)
+
+
+def test_a_new_questions_payload_cites_only_its_own_sources():
+    needs_lakehouse()
+    from backend.agent.pipeline import Agent
+    agent = Agent()
+    first = agent.ask("İstanbul'daki konut kredilerini il bazinda goster", session_id="cite")
+    assert {c["table"] for c in first["citations"]} == {"finturk_observations"}
+    second = agent.ask(DEMO_HOUSING_QUESTION, session_id="cite")
+    assert "finturk_observations" not in {c["table"] for c in second["citations"]}
+    assert {c["table"] for c in second["citations"]} <= {"bulletin_observations", "macro_observations"}
+    assert not any(line.source == "finturk" for line in agent.session("cite").view().lineage.values())
 
 
 def test_a_new_question_does_not_drag_the_previous_questions_columns_into_its_table():

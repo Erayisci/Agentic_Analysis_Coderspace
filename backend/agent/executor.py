@@ -20,7 +20,7 @@ the whole question -- the demo-day failure mode that matters most.
 """
 import re
 import time
-from typing import Optional
+from typing import List, Optional
 
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies_in_series
@@ -69,6 +69,27 @@ def _column_name(step: Step, fallback: str) -> str:
     """A safe identifier for a new column."""
     raw = step.as_name or step.column or fallback
     return re.sub(r"[^\w]+", "_", str(raw)).strip("_") or fallback
+
+
+def match_column(name: str, columns: List[str]) -> Optional[str]:
+    """The column in `columns` a model-supplied name means, or None.
+
+    Exact match, then case-insensitive, then the name slugified the way
+    `_column_name` slugifies it, then a containment match when it is unique.
+    The same rule at plan time (`pipeline.apply_scope`) and at run time
+    (`Executor._resolve_column`), so a reference the plan checks is the one
+    the executor resolves.
+    """
+    if name in columns:
+        return name
+    lowered = {c.lower(): c for c in columns}
+    if name.lower() in lowered:
+        return lowered[name.lower()]
+    cleaned = re.sub(r"[^\w]+", "_", name).strip("_").lower()
+    if cleaned in lowered:
+        return lowered[cleaned]
+    partial = [c for c in columns if cleaned and (cleaned in c.lower() or c.lower() in cleaned)]
+    return partial[0] if len(partial) == 1 else None
 
 
 class Executor:
@@ -260,7 +281,11 @@ class Executor:
             except ValueError:
                 pass
         artifact = self.session.artifact
-        others = [c for c in artifact.column_names() if c != column]
+        # This turn's own columns first: a fresh question's partner is a series
+        # it fetched, not one a previous question left in the table.
+        own = [c for c in self.session.turn_columns if c in artifact.column_names()]
+        others = [c for c in own if c != column] + \
+                 [c for c in artifact.column_names() if c != column and c not in own]
         if prefer == "index":
             others = [c for c in others if artifact.lineage[c].temporal_semantics == "index"] or others
         if not others:
@@ -407,6 +432,7 @@ class Executor:
         n_columns = len(self.session.artifact.column_names())
         self.session.artifact = AnalysisArtifact()
         self.session.citations = []
+        self.session.turn_cited = []
         self.session.turn_columns = []
         self.session.visible_columns = []
         return f"cleared {n_columns} column(s); table is now empty"
@@ -423,19 +449,10 @@ class Executor:
         if name is None:
             raise ValueError(required or "this step needs a column")
         columns = self.session.artifact.column_names()
+        found = match_column(name, columns)
+        if found is None:
+            raise ValueError(f"column {name!r} is not in the table; have {columns}")
         # A resolved column is one this turn read, so it belongs in the
         # turn's scope beside the columns the turn produced -- a deflated
         # series with its deflator out of the table explains nothing.
-        touch = self.session.touch_column
-        if name in columns:
-            return touch(name)
-        lowered = {c.lower(): c for c in columns}
-        if name.lower() in lowered:
-            return touch(lowered[name.lower()])
-        cleaned = re.sub(r"[^\w]+", "_", name).strip("_").lower()
-        if cleaned in lowered:
-            return touch(lowered[cleaned])
-        partial = [c for c in columns if cleaned and (cleaned in c.lower() or c.lower() in cleaned)]
-        if len(partial) == 1:
-            return touch(partial[0])
-        raise ValueError(f"column {name!r} is not in the table; have {columns}")
+        return self.session.touch_column(found)

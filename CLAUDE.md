@@ -686,6 +686,26 @@ carries `table.all_columns` beside the visible ones for the panel to say so. The
 deep, not cumulative: three questions in, the third does not inherit the first's columns. An
 unnamed `chart` step follows the same scope one step earlier, out of `session.turn_columns`.
 
+**A question the router did not read as a follow-up is planned on its own words, whatever the
+table holds.** Measured live: "İstanbul'daki konut kredilerini il bazında göster" followed by the
+demo's national housing-loan question produced `fetch TP.KTF12; find_periods faiz against konut` --
+the previous turn's İstanbul FinTürk column standing in for the national line, 22 quarterly points
+under a 60-month answer, 0 matching periods, and a FinTürk citation the question never asked for.
+Three things hold the rule, each in Python: `build_context` presents the table as *empty* on a
+fresh question (the leftovers are named only so the model does not invent a column by that name;
+`MEVCUT TABLO (...)` with its columns is shown only when `is_followup`); `pipeline.apply_scope`
+then guarantees the plan references only columns it produces -- a `column`/`against`/`other_column`
+that resolves only to a previous question's column becomes the fetch the question's own discovery
+offered for it (each clause's first choice the plan did not fetch, matched on the reference's
+words), inserted under the referenced name, and is left alone only when discovery offered nothing;
+`apply_analysis`, `apply_valuation_guard`, the executor's automatic `against` and the dead-end
+repair in `make_plan` all read the existing table only on a follow-up. `AnalysisArtifact.add_column`
+replaces a same-named column through the same outer join as an add -- `assign` aligned the new
+series onto the old column's index, so a monthly fetch written over the quarterly `konut` kept only
+its quarter-ends. And the payload's `citations` are `Session.turn_citations()` -- the visible
+columns' rows plus what this turn read -- not the conversation's `session.citations`, which stays
+for `clear_table` and the audit.
+
 **"Göster" is a display verb in "aylık olarak gösteriniz" and the verb "exhibit" in "değişim
 göstermiş".** `router.wants_a_table` strips the second family of collocations before looking for
 the word, because both phrasings turn up in one question and a table nobody asked for is exactly

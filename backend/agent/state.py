@@ -64,12 +64,17 @@ class AnalysisArtifact:
         """
         values = values.copy()
         values.name = name
+        # Replacing goes through the same join as adding. `assign` aligned the
+        # new series onto the index the OLD column had built, so a monthly
+        # series written over a quarterly column of the same name kept only
+        # its quarter-end months -- 60 points silently became 20.
+        if name in self.frame.columns:
+            self.frame = self.frame.drop(columns=[name])
         if self.frame.empty and not len(self.frame.columns):
             self.frame = values.to_frame()
             self.frame.index.name = "period"
         else:
-            self.frame = self.frame.join(values, how=how) if name not in self.frame.columns \
-                else self.frame.assign(**{name: values})
+            self.frame = self.frame.join(values, how=how)
         self.frame = self.frame.sort_index()
         self.lineage[name] = lineage
         return self
@@ -212,20 +217,46 @@ class Session:
     # about. The artifact is the whole conversation; these two are the turn.
     turn_columns: List[str] = field(default_factory=list)
     visible_columns: List[str] = field(default_factory=list)
+    # What this turn cited, as opposed to `citations`, the conversation's.
+    turn_cited: List[Dict[str, Any]] = field(default_factory=list)
 
     def cite(self, citation: Dict[str, Any]) -> None:
         """Record provenance once. Turn 3 re-reads turn 1's series; the answer
         should carry one citation for it, not three."""
-        if citation and citation not in self.citations:
+        if not citation:
+            return
+        if citation not in self.citations:
             self.citations.append(citation)
+        if citation not in self.turn_cited:
+            self.turn_cited.append(citation)
 
     def start_turn(self, question: str) -> None:
-        """A turn's audit, facts and touched columns are its own; the
-        artifact is not."""
+        """A turn's audit, facts, citations and touched columns are its own;
+        the artifact is not."""
         self.audit = []
         self.facts = {}
         self.turn_columns = []
+        self.turn_cited = []
         self.turns.append({"question": question, "n": len(self.turns) + 1})
+
+    def turn_citations(self) -> List[Dict[str, Any]]:
+        """The sources this turn's answer stands on -- what the panel shows.
+
+        The columns on screen (`view`), in table order, plus anything this
+        turn read that is not a column: a document, web hits, footnotes.
+        `citations` keeps the whole conversation's for `clear_table` and the
+        audit; showing that list under every answer put an earlier question's
+        FinTurk row under an answer that never touched it.
+        """
+        out: List[Dict[str, Any]] = []
+        for line in self.view().lineage.values():
+            if line.citation and line.citation not in out:
+                out.append(line.citation)
+        column_citations = [line.citation for line in self.artifact.lineage.values() if line.citation]
+        for citation in self.turn_cited:
+            if citation not in column_citations and citation not in out:
+                out.append(citation)
+        return out
 
     def touch_column(self, name: Optional[str]) -> Optional[str]:
         """Record that this turn wrote or read `name`.
