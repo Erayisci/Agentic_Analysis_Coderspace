@@ -30,6 +30,12 @@ export default function App() {
   const [modelConfigured, setModelConfigured] = useState(null);
   const [activeTab, setActiveTab] = useState("table");
   const [latest, setLatest] = useState(null); // last successful /ask response
+  // The chart outlives the turn that drew it: "tablo yap" or "enflasyondan
+  // arindir" after a chart keeps it on the Grafik tab. It is replaced when a
+  // turn draws a new one, and cleared when a NEW question (not a follow-up)
+  // takes the table somewhere else. `latest` alone is one turn deep, which
+  // emptied the tab on every follow-up that did not ask for a chart.
+  const [figure, setFigure] = useState(null);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -57,6 +63,8 @@ export default function App() {
               unsupported_numbers: data.unsupported_numbers, sources: data.sources }
           : t));
       setLatest(data);
+      if (data.figure) setFigure(data.figure);
+      else if (!data.route?.is_followup) setFigure(null);
       // The side panel follows what the question asked for: a chart only when
       // one was requested, the table only when it was, otherwise stay put.
       if (data.presentation?.chart && data.figure) setActiveTab("chart");
@@ -82,6 +90,7 @@ export default function App() {
     }
     setTurns([]);
     setLatest(null);
+    setFigure(null);
     setActiveTab("table");
   }
 
@@ -160,7 +169,7 @@ export default function App() {
                 ? <p className="empty-hint">Bu soru tablo istemedi. Tabloyu görmek için soruda "tablo" deyin.</p>
                 : <DataTable table={latest?.table} />
             )}
-            {activeTab === "chart" && <ChartPanel figure={latest?.figure} />}
+            {activeTab === "chart" && <ChartPanel figure={figure} />}
             {activeTab === "trust" && (
               <TrustPanel
                 citations={latest?.citations}

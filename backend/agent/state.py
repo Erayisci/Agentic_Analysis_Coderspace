@@ -219,6 +219,12 @@ class Session:
     visible_columns: List[str] = field(default_factory=list)
     # What this turn cited, as opposed to `citations`, the conversation's.
     turn_cited: List[Dict[str, Any]] = field(default_factory=list)
+    # This turn shows no table at all: a NEW question that produced no column
+    # (series not found, every fetch failed, a metadata question). The last
+    # real table is kept in `visible_columns` so a later "bunun grafigini
+    # ciz" still has something to mean; it just is not shown as the answer
+    # to a question it has nothing to do with.
+    shown_empty: bool = False
 
     def cite(self, citation: Dict[str, Any]) -> None:
         """Record provenance once. Turn 3 re-reads turn 1's series; the answer
@@ -237,6 +243,7 @@ class Session:
         self.facts = {}
         self.turn_columns = []
         self.turn_cited = []
+        self.shown_empty = False
         self.turns.append({"question": question, "n": len(self.turns) + 1})
 
     def turn_citations(self) -> List[Dict[str, Any]]:
@@ -294,14 +301,24 @@ class Session:
                 break
             scope |= parents
         if not scope:
-            # A turn that produced nothing (metadata, a failed plan) leaves
-            # the table it found in place rather than blanking the panel.
-            scope = {c for c in self.visible_columns if c in existing} or set(existing)
+            if keep_previous:
+                # A follow-up that produced nothing ("tablo yap") re-presents
+                # the table it refers to.
+                scope = {c for c in self.visible_columns if c in existing} or set(existing)
+            else:
+                # A NEW question that produced nothing shows nothing: "altin
+                # fiyatlarini goster" must not be answered with a summary of
+                # the previous question's housing loans. The last real table
+                # stays in `visible_columns` for the next follow-up.
+                self.shown_empty = True
+                return []
         self.visible_columns = [c for c in existing if c in scope]
         return self.visible_columns
 
     def view(self) -> AnalysisArtifact:
         """The artifact as this turn should present it -- see `focus`."""
+        if self.shown_empty:
+            return AnalysisArtifact()
         return self.artifact.subset(self.visible_columns) if self.visible_columns else self.artifact
 
     def has_artifact(self) -> bool:

@@ -52,8 +52,23 @@ def verify(session: Session) -> Dict[str, Any]:
            else ("analyses: " + ", ".join(sorted(ran)) if ran else "no analysis requested"),
            severity="warning")
 
+    # A chart that could not carry every column it was asked for (a third
+    # unit) is a caveat, not a silent omission: the column is in the table,
+    # and the answer must say it is not in the picture.
+    chart = session.facts.get("chart") or {}
+    record("chart_as_requested", not chart.get("note"),
+           chart.get("note") or (f"chart kind: {chart.get('kind')}" if chart else "no chart requested"),
+           severity="warning")
+    record("chart_shows_every_column", not chart.get("dropped"),
+           chart.get("dropped_note") or ("chart: " + ", ".join(chart.get("columns") or [])
+                                          if chart else "no chart requested"),
+           severity="warning")
+
     if artifact.is_empty():
-        if session.facts.get("intent") == "metadata" and session.facts.get("discovery"):
+        cleared = any(a.op == "clear_table" and a.ok for a in session.audit)
+        if cleared and session.artifact.is_empty():
+            record("table_has_data", True, "table cleared on request")
+        elif session.facts.get("intent") == "metadata" and session.facts.get("discovery"):
             # A metadata question is answered by discovery alone; an empty
             # table is the expected shape, not a failure.
             record("table_has_data", True, "metadata turn: discovery only, no table expected")
@@ -373,6 +388,11 @@ def quotable_numbers(session: Session) -> Dict[str, Any]:
         allowed["notlar"] = [VALUATION_NOTE]
     if session.facts.get("find_periods"):
         allowed["find_periods"] = session.facts["find_periods"]
+    chart = session.facts.get("chart") or {}
+    if chart.get("kind") == "pie":
+        # The shares are computed here, in Python, at one period; the model
+        # copies them and never divides.
+        allowed["pasta"] = {"donem": chart["period"], "paylar": chart["shares"]}
     if session.facts.get("analysis"):
         allowed["analysis"] = {key: _trim_analysis(result)
                                for key, result in session.facts["analysis"].items()}

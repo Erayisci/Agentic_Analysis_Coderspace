@@ -22,24 +22,102 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"'\)]+", re.I)
 # Turkish and English ways of saying "keep the table and add to it". The
 # reference scenario's turns 2 and 3 are both phrased this way, and reading
 # them as new questions is what produces a silently different table.
+# Turkish is agglutinative, so the table is "tabloyu", "tablonun", "tabloya",
+# "tablodaki" -- a `\b` right after "tablo" matched none of them, and "aynı
+# tabloya enflasyonu ekle" / "bu tablonun grafiğini çiz" were read as fresh
+# questions. The suffix is allowed (`\w*`); the phrase is what identifies a
+# follow-up, not its case ending.
 FOLLOWUP_PATTERN = re.compile(
-    r"\b(bozmadan|bozmaks[ıi]z[ıi]n|ayn[ıi]\s+tablo|bu\s+tabloy[ua]|tabloya\s+ekle|"
-    r"yeni\s+bir?\s+s[üu]tun|s[üu]tun\s+olarak\s+ekle|ayn[ıi]\s+grafi|üstüne\s+ekle|"
-    r"without\s+(disturbing|changing|breaking)|add\s+(a\s+)?(new\s+)?column|same\s+table)\b", re.I)
+    r"(bozmadan|bozmaks[ıi]z[ıi]n|ayn[ıi]\s+(tablo|grafi)\w*|bu\s+(tablo|grafi)\w*|"
+    r"mevcut\s+(tablo|grafi)\w*|tablo(ya|nun|daki|dan)\b|grafi[ğg]e\s+ekle|"
+    r"yeni\s+bir?\s+s[üu]tun|s[üu]tun\s+olarak\s+ekle|[üu]st[üu]ne\s+ekle|"
+    r"without\s+(disturbing|changing|breaking)|add\s+(a\s+)?(new\s+)?column|same\s+(table|chart))", re.I)
+
+# The words a bare presentation request is made of: "bunun grafiğini çizer
+# misin", "tablo yap", "bunu grafik olarak göster". None of them names a
+# series. When nothing else is left of the question and a table already
+# exists, the user means THAT table -- the question is a follow-up that only
+# changes how the table is shown, and must not be planned on its own words
+# (which discovery cannot match, or worse, matches to the wrong series: the
+# stem of "tabloyu" is a substring of the EVDS code TP.HPBITABLO1).
+PRESENTATION_WORDS = re.compile(
+    r"(grafi[kğg]\w*|çiz\w*|ciz\w*|görselle\w*|gorselle\w*|plot\w*|chart\w*|graph\w*|visuali[sz]e\w*|"
+    r"tablo\w*|s[üu]tun\w*|listele\w*|d[öo]k\w*|table|column|list|show|"
+    r"g[öo]ster\w*|yap\w*|ver\w*|getir\w*|olu[şs]tur\w*|haz[ıi]rla\w*|d[üu]zenle\w*|"
+    r"bunun|bunu|bunlar\w*|[şs]unu|onu|onlar\w*|hepsi\w*|t[üu]m[üu]n[üu]|t[üu]m|bu|[şs]u|o|ayn[ıi]|mevcut|halinde|olarak|[şs]eklinde|"
+    r"olsun|[şs]imdi|yeni|yine|hemen|sadece|bir\s+de|l[üu]tfen|misin\w*|m[ıi]s[ıi]n\w*|musun\w*|m[üu]s[üu]n\w*|"
+    r"bar|çubuk|cubuk|çizgi|cizgi|pasta\w*|pie|dilim\w*|line|make|draw|as|a|the|it|them|these|those|this|that|please|"
+    r"[üu]zerine|ekle\w*|tekrar|yeniden|için|icin|ve|da|de|ile)", re.I)
+
+
+TR_MONTHS = ["ocak", "subat", "mart", "nisan", "mayis", "haziran", "temmuz", "agustos",
+             "eylul", "ekim", "kasim", "aralik"]
+MONTH_NAME = re.compile(
+    r"\b(ocak|[şs]ubat|mart|nisan|may[ıi]s|haziran|temmuz|a[ğg]ustos|eyl[üu]l|ekim|kas[ıi]m|aral[ıi]k)\w*", re.I)
+SINGLE_MONTH = re.compile(
+    r"\b(20\d{2})[-/](0?[1-9]|1[0-2])\b"                                                   # 2024-06
+    r"|\b(20\d{2})\s+(ocak|[şs]ubat|mart|nisan|may[ıi]s|haziran|temmuz|a[ğg]ustos|eyl[üu]l|ekim|kas[ıi]m|aral[ıi]k)\w*"  # 2024 Haziran
+    r"|\b(ocak|[şs]ubat|mart|nisan|may[ıi]s|haziran|temmuz|a[ğg]ustos|eyl[üu]l|ekim|kas[ıi]m|aral[ıi]k)\w*\s+(20\d{2})\b",  # Haziran 2024
+    re.I)
+
+
+def extract_single_month(question: str):
+    """'2024-06' / '2024 Haziran' / 'Haziran 2024' -> '2024-06-01', or None
+    when the question names no month or more than one. Used for a snapshot
+    (a pie), where the month is a point, not a window: `extract_window`
+    deliberately reads a lone stamp as its whole year."""
+    from ..core.labels import fold
+    found = SINGLE_MONTH.findall(question or "")
+    if len(found) != 1:
+        return None
+    y1, m1, y2, name2, name3, y3 = found[0]
+    if y1:
+        return f"{y1}-{int(m1):02d}-01"
+    year = y2 or y3
+    name = fold(name2 or name3)
+    month = next((i + 1 for i, tr in enumerate(TR_MONTHS) if name.startswith(tr)), None)
+    return f"{year}-{month:02d}-01" if month else None
+
+
+def is_presentation_only(question: str) -> bool:
+    """Does the question ask only HOW to show something, naming no series?
+
+    "grafiğini çiz", "tablo yap", "bunu grafik olarak göster" -> True.
+    "konut kredilerini grafik olarak çiz" -> False ("konut kredilerini" is
+    left over, so it is a real question that also wants a chart).
+    """
+    if not question or not (CHART_PATTERN.search(question) or TABLE_PATTERN.search(question)
+                            or SHOW_VERB.search(question)):
+        return False
+    # A date is not a subject: "2024 Haziran icin pasta grafigi" is still
+    # only a presentation request (the month is a parameter of it).
+    stripped = MONTH_NAME.sub(" ", question)
+    # Whole words only: "bu" must not eat the "bu" inside "bulten".
+    for word in re.findall(r"[\w'’]+", question, re.UNICODE):
+        if PRESENTATION_WORDS.fullmatch(word.strip("'’")):
+            stripped = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", " ", stripped, count=1)
+    leftover = [w for w in re.findall(r"\w+", stripped) if len(w) > 2 and not w.isdigit()]
+    return not leftover
 
 SEARCH_PATTERN = re.compile(
     r"\b(haberler|son\s+geli[şs]me|internetten|web'?den|ara[şs]t[ıi]r|güncel\s+haber|"
     r"search\s+the\s+web|latest\s+news)\b", re.I)
 
+# "listele" is NOT here: "konut kredilerini listele" asks to see the figures
+# (TABLE_PATTERN), and routing it to `metadata` produced a discover-only plan
+# and no table. "Hangi verileri listeleyebilirsin" still lands here through
+# `hangi veri`.
 METADATA_PATTERN = re.compile(
-    r"\b(hangi\s+(veri|tablo|seri|alan)|neler\s+var|listele|kapsam|hangi\s+dönemler|"
+    r"\b(hangi\s+(veri|tablo|seri|alan)|neler\s+var|kapsam|hangi\s+dönemler|"
     r"what\s+(data|tables|series)|list\s+the)\b", re.I)
 
 # A chart or a table is produced only when the question asks for one. Without
 # this every series question ended in a chart step and a 67-row table the user
 # never asked to see; the answer is prose unless one of these words appears.
 CHART_PATTERN = re.compile(
-    r"(grafi[kğg]|çiz|ciz|görselle[şs]tir|gorselle[şs]tir|plot|chart|graph|visuali[sz]e)", re.I)
+    r"(grafi[kğg]|çiz|ciz|görselle[şs]tir|gorselle[şs]tir|plot|chart|graph|visuali[sz]e|"
+    # "pasta" only as a chart word -- "kredi pastasindan pay" is an idiom, not a request.
+    r"\bpasta(s[ıi]|y[ıi]|n[ıi])?\b|\bpie\b)", re.I)
 # "aylık olarak gösteriniz" asks to see the monthly figures, which is a table.
 TABLE_PATTERN = re.compile(
     r"(tablo|s[üu]tun|listele|d[öo]k(?:üm|um)|table|column|list\s+(the|all)|\bshow\b)", re.I)
@@ -86,6 +164,14 @@ ANALYSIS_PATTERNS = {
     "price": re.compile(r"(fiyat|enflasyon|t[üu]fe|kfe|endeks|price|inflation)", re.I),
 }
 
+# An explicit request to empty the working table. Deliberately narrow: a
+# bare "sil" is "npl sutununu sil", which must NOT wipe the table; only the
+# table as a whole ("tabloyu temizle", "bastan basla", "her seyi sil") counts.
+CLEAR_PATTERN = re.compile(
+    r"(tablo\w*\s+(temizle|sil|bo[şs]alt|s[ıi]f[ıi]rla)|\btemizle\b|ba[şs]tan\s+ba[şs]la\w*|"
+    r"(her\s*[şs]eyi|hepsini|t[üu]m[üu]n[üu])\s+(sil|temizle)|\bs[ıi]f[ıi]rla\w*|"
+    r"clear\s+(the\s+)?table|start\s+over|\breset\b)", re.I)
+
 FOOTNOTE_PATTERN = re.compile(
     r"(dipnot|metodoloji|tan[ıi]m[ıi]|nas[ıi]l\s+hesaplan|kapsam\s+d[ıi][şs][ıi]|footnote|methodolog)", re.I)
 
@@ -116,6 +202,8 @@ class Route(BaseModel):
     start: Optional[str] = None
     end: Optional[str] = None
     is_followup: bool = False
+    presentation_only: bool = False   # "grafiğini çiz" / "tablo yap": re-present the table, fetch nothing
+    wants_clear: bool = False         # "tabloyu temizle" / "bastan basla": empty the working table first
     wants_chart: bool = False
     wants_table: bool = False
     wants_analysis: List[str] = Field(default_factory=list)   # anomaly | changepoint | causality | decompose
@@ -212,12 +300,24 @@ def route(question: str, has_artifact: bool = False, client=None) -> Route:
     question = question or ""
     urls = URL_PATTERN.findall(question)
     start, end = extract_window(question)
-    followup = bool(FOLLOWUP_PATTERN.search(question)) and has_artifact
+    # "bunun grafiğini çiz" / "tablo yap" name no series: with a table in the
+    # session they can only mean that table, so they are follow-ups that only
+    # change the presentation. Without a table they fall through to the
+    # ordinary path and get the "nothing to show" answer.
+    presentation_only = has_artifact and is_presentation_only(question)
+    wants_clear = bool(CLEAR_PATTERN.search(question))
+    # A clear is about the table on screen, so alone it is a follow-up; with
+    # a new question attached ("tabloyu temizle ve mevduati goster") the rest
+    # is planned as a fresh question and the clear runs first.
+    clear_only = wants_clear and not [w for w in re.findall(r"\w+", CLEAR_PATTERN.sub(" ", question))
+                                      if len(w) > 2 and not PRESENTATION_WORDS.fullmatch(w)]
+    followup = has_artifact and (bool(FOLLOWUP_PATTERN.search(question)) or presentation_only or clear_only)
     wants_chart = bool(CHART_PATTERN.search(question))
     # A follow-up extends a table the user already asked for, so it keeps it.
     wants_table = wants_a_table(question) or followup
     analyses = wanted_analyses(question)
-    common = dict(start=start, end=end, is_followup=followup,
+    common = dict(start=start, end=end, is_followup=followup, presentation_only=presentation_only,
+                  wants_clear=wants_clear,
                   wants_chart=wants_chart, wants_table=wants_table,
                   wants_analysis=analyses, wants_footnotes=bool(FOOTNOTE_PATTERN.search(question)))
 

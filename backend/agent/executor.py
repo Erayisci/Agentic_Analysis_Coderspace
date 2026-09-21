@@ -20,13 +20,19 @@ the whole question -- the demo-day failure mode that matters most.
 """
 import re
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies_in_series
 from ..tools.causality import granger_both_directions
 from ..tools.change_detection import detect_change_points
-from ..tools.charts import build_chart, chart_summary, mark_breaks
+from ..tools.charts import PieError, build_chart, chart_summary, mark_breaks, rebase_for_chart, resolve_pie
+
+BAR_CHART_WORDS = re.compile(r"(çubuk|cubuk|s[üu]tun\s+grafi|bar\s*(chart|graph|grafi)|\bbar\b)", re.I)
+# The chart step already exists (the router decided a chart was asked for),
+# so here "pasta" alone is enough. Not "pastasindan": `\b` after the optional
+# possessive rejects the idiom's longer suffix.
+PIE_CHART_WORDS = re.compile(r"(\bpasta(s[ıi]|y[ıi]|n[ıi])?\b|\bpie\b)", re.I)
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series, footnotes
 from ..tools.series import load_series
@@ -92,6 +98,22 @@ def match_column(name: str, columns: List[str]) -> Optional[str]:
     return partial[0] if len(partial) == 1 else None
 
 
+def _chart_title(artifact, columns: List[str], with_period: bool = True) -> str:
+    """'Tuketici Kredileri - Konut ve Konut Kredisi (TL, Akim, %) | 2021-01 .. 2025-12':
+    the series drawn and the months covered. Three labels at most, the rest
+    counted, so a wide table does not become a title nobody can read."""
+    labels = [artifact.lineage[c].label for c in columns if c in artifact.lineage]
+    if len(labels) > 3:
+        head = ", ".join(labels[:3]) + f" (+{len(labels) - 3})"
+    elif len(labels) > 1:
+        head = ", ".join(labels[:-1]) + " ve " + labels[-1]
+    else:
+        head = labels[0] if labels else artifact.title
+    if with_period and artifact.periods():
+        return f"{head} | {artifact.periods()[0][:7]} .. {artifact.periods()[-1][:7]}"
+    return head
+
+
 class Executor:
     """Executes plan steps against a Session, accumulating an artifact."""
 
@@ -119,7 +141,11 @@ class Executor:
                 index=index, op=step.op, arguments=step.arguments(), ok=ok,
                 detail=str(detail)[:500], seconds=time.perf_counter() - started))
 
-        if plan.start or plan.end:
+        # The window is applied to the whole artifact, so it must belong to
+        # a turn that put something in it: a NEW question naming "2024" that
+        # then found no series used to cut the previous question's 60-row
+        # table down to that year's 12 rows on its way out.
+        if (plan.start or plan.end) and session.turn_columns:
             T.window(session.artifact, plan.start, plan.end)
         session.facts["table"] = {
             "n_rows": int(len(session.artifact.frame)),
@@ -392,32 +418,120 @@ class Executor:
             columns = [self._resolve_column(c) for c in step.columns]
         else:
             scope = set(self.session.turn_columns)
-            if self.session.facts.get("is_followup"):
-                scope |= set(self.session.visible_columns)          # "ayni grafige ekle"
+            # A follow-up charts what is on screen too ("ayni grafige ekle");
+            # a turn that touched no column at all ("bunun grafigini ciz")
+            # charts what is on screen and nothing else -- `None` here would
+            # mean EVERY column the conversation ever built, most of which
+            # the user is not looking at.
+            if self.session.facts.get("is_followup") or not scope:
+                scope |= set(self.session.visible_columns)
             columns = [c for c in artifact.column_names() if c in scope] or None
-        try:
-            figure = build_chart(artifact, columns, step.title)
-        except ValueError as exc:
-            # Too many units for one chart: fall back to the columns that share
-            # the two most common ones rather than returning no chart at all.
-            if "different units" not in str(exc):
-                raise
-            groups = sorted(T.columns_sharing_unit(artifact), key=len, reverse=True)[:2]
-            columns = [c for group in groups for c in group]
-            figure = build_chart(artifact, columns, step.title)
+        # "cubuk grafik" / "bar chart": the chart tool has always drawn bars
+        # on request; nothing passed the request through until now.
+        question = self.session.turns[-1]["question"] if self.session.turns else ""
+        kind = ("pie" if PIE_CHART_WORDS.search(question)
+                else "bar" if BAR_CHART_WORDS.search(question) else "line")
+        dropped: List[str] = []
+        note: Optional[str] = None
+        pie_meta: Optional[Dict[str, Any]] = None
+        title = step.title or _chart_title(artifact, columns or artifact.column_names(),
+                                           with_period=kind != "pie")
+        if kind == "pie":
+            # A pie is a snapshot: at the month the question named (the
+            # router read it into the window), else the last month where every
+            # column has a value. When the table cannot be a pie, say why and
+            # draw the line chart the same data supports, rather than fail.
+            # The month the question named rides on the step (a follow-up's
+            # plan carries no window, because a window would trim the table
+            # to that one row); otherwise the window's end, else the last.
+            period = step.base_period or plan.end
+            try:
+                when, labels, values = resolve_pie(artifact, columns, period)
+                figure = build_chart(artifact, columns, title, kind="pie", period=period)
+                total = sum(values)
+                pie_meta = {"period": when,
+                            "shares": {label: f"%{100 * v / total:.1f}".replace(".", ",")
+                                       for label, v in zip(labels, values)}}
+            except PieError as exc:
+                note = f"Pasta grafigi cizilemedi: {exc}. Bunun yerine cizgi grafik cizildi."
+                kind = "line"
+        if kind != "pie":
+            figure, columns, dropped, rebase_note = self._line_or_bar(artifact, columns, title, kind)
+            if rebase_note:
+                note = f"{note} {rebase_note}".strip() if note else rebase_note
+            if dropped and not step.title:
+                figure["layout"]["title"] = {"text": _chart_title(artifact, columns)}
         # If change detection already ran on a charted column, draw its breaks
-        # on the chart so the reader sees where the regimes change.
+        # on the chart so the reader sees where the regimes change. A pie has
+        # no time axis to mark.
         charted = columns or artifact.column_names()
         analysis = self.session.facts.get("analysis", {})
         breaks_by_column = {c: analysis[f"changepoint:{c}"]["breaks"]
                             for c in charted if f"changepoint:{c}" in analysis
-                            and analysis[f"changepoint:{c}"].get("breaks")}
+                            and analysis[f"changepoint:{c}"].get("breaks")} if kind != "pie" else {}
         if breaks_by_column:
             figure = mark_breaks(figure, breaks_by_column)
-        self.session.facts["chart"] = chart_summary(artifact, columns)
+        summary = chart_summary(artifact, columns)
+        summary["kind"] = kind
+        if pie_meta:
+            summary.update(pie_meta)
+        if note:
+            summary["note"] = note
+        if dropped:
+            summary["dropped"] = dropped
+            summary["dropped_note"] = ("Grafikte gosterilmeyen sutun(lar): " + ", ".join(dropped)
+                                       + " -- bir grafikte en fazla iki farkli birim gosterilebilir; "
+                                       "bu sutunlar tabloda duruyor.")
+        self.session.facts["chart"] = summary
         self.session.facts["figure"] = figure
         marks = sum(len(b) for b in breaks_by_column.values())
-        return f"chart with {len(figure['data'])} trace(s)" + (f", {marks} break marker(s)" if marks else "")
+        return (f"{kind} chart with {len(figure['data'])} trace(s)"
+                + (f" at {pie_meta['period']}" if pie_meta else "")
+                + (f", {marks} break marker(s)" if marks else "")
+                + (f"; {note}" if note else "")
+                + (f"; NOT charted ({len(dropped)} more unit(s)): {', '.join(dropped)}" if dropped else ""))
+
+    def _line_or_bar(self, artifact, columns, title, kind):
+        """See `_chart_title` for the title; this only draws."""
+        """(figure, columns drawn, columns dropped, note) for a line/bar chart.
+
+        Too many units for one chart: keep the two unit groups that hold the
+        columns THIS turn touched first, then the largest -- the column the
+        user just asked to add must not be the one that silently falls off
+        (it was: "KFE'yi ekle ve ciz" charted everything except KFE).
+        """
+        try:
+            return build_chart(artifact, columns, title, kind=kind), columns, [], None
+        except ValueError as exc:
+            if "different units" not in str(exc):
+                raise
+        wanted = columns or artifact.column_names()
+        # First choice: keep every column by re-basing the non-percentage
+        # ones to "first month = 100" -- the deck's own chart. Two axes then
+        # suffice whenever the percentages share one unit.
+        rebased_artifact, rebased, base = rebase_for_chart(artifact, wanted)
+        if rebased:
+            # Re-based series first, so they take the left axis and the
+            # percentages the right -- the deck's layout.
+            ordered = rebased + [c for c in wanted if c not in rebased]
+            try:
+                figure = build_chart(rebased_artifact, ordered, title, kind=kind)
+                note = (", ".join(artifact.lineage[c].label for c in rebased)
+                        + f" grafikte {base}=100 bazina getirildi (tabloda orijinal birimleriyle duruyor); "
+                        "farkli birimler tek eksende gosterilemez.")
+                return figure, ordered, [], note
+            except ValueError as exc:
+                if "different units" not in str(exc):
+                    raise
+        # Still three units (e.g. % beside puan): keep the two groups that
+        touched = set(self.session.turn_columns)
+        groups = [[c for c in group if c in wanted] for group in T.columns_sharing_unit(artifact)]
+        groups = [g for g in groups if g]
+        groups.sort(key=lambda g: (-sum(c in touched for c in g), -len(g)))
+        kept = [c for group in groups[:2] for c in group]
+        columns = [c for c in wanted if c in kept]
+        return (build_chart(artifact, columns, title, kind=kind), columns,
+                [c for c in wanted if c not in kept], None)
 
     def _clear_table(self, step: Step, plan: Plan) -> str:
         """Empty this session's working table -- and only this session's.
