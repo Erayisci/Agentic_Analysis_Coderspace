@@ -78,6 +78,48 @@ def test_search_route_uses_research_without_explicit_mode(client):
     assert data["ingestion"]["status"] == "saved"
 
 
+@pytest.mark.parametrize("mode", ["auto", "research"])
+def test_url_request_follows_discovered_attachment_and_saves_pdf_before_answer(client, mode):
+    landing_url = "https://example.com/market-data"
+    pdf_url = "https://example.com/gold.pdf"
+    landing = {**document("Gold transactions. Error! File not found!"), "final_url": landing_url}
+    pdf = {**document("January 2026: 33,584 kg. February 2026: 32,719 kg."),
+           "final_url": pdf_url, "format": "pdf"}
+    tools = {"read_web_url": Mock(side_effect=[landing, pdf]), "get_page_assets": Mock(return_value={
+        "status": "ok", "links": [{"url": pdf_url, "text": "Gold transactions", "type_hint": "pdf"}]})}
+    final = {"status": "ok", "decision": {
+        "action": "answer", "answer": "January: 33,584 kg; February: 32,719 kg. [S2]", "citations": ["S2"],
+        "coverage": [{"requirement_id": "R1", "status": "supported", "citations": ["S2"], "note": "PDF page 1."}]}}
+
+    def decide(payload):
+        history = payload["context"]["history"]
+        # The first model decision must see the supplied page, not an empty context.
+        if len(history) == 1:
+            assert history[0]["tool"] == "read_web_url"
+            assert payload["context"]["sources"][0]["url"] == landing_url
+            return call("get_page_assets", url=landing_url)
+        if len(history) == 2:
+            assert history[-1]["links"][0]["url"] == pdf_url
+            return call("read_web_url", url=pdf_url)
+        assert payload["context"]["sources"][-1]["url"] == pdf_url
+        return final
+
+    app.state.agent.research_runner = partial(
+        research, environ={**ENV, "WEB_LINKS_ENABLED": "true"}, tools=tools, decide=decide)
+    question = f"Open [{landing_url}]({landing_url}), find Gold transactions and read the linked PDF."
+    response = client.post("/ask", json={"question": question, "mode": mode})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["research"]["status"] == "ok"
+    assert data["summary"] == final["decision"]["answer"]
+    assert [item["op"] for item in data["audit"]] == ["read_web_url", "get_page_assets", "read_web_url"]
+    assert data["citations"][-1]["url"] == pdf_url
+    assert data["citations"][-1]["cited"] is True
+    saved = client.get(f"/session/default/research/{data['ingestion']['run_id']}").json()
+    assert len(saved["tool_results"]) == 3
+    assert saved["tool_results"][-1]["output"] == pdf
+
+
 def test_complete_result_is_saved_before_evidence_budget_rejects_it(client):
     text = "Türkçe full returned extraction. " * 500
     app.state.agent.research_runner = runner(

@@ -4,8 +4,10 @@ The website's **Web araştırması** mode runs the existing bounded research age
 the model chooses a search query, inspects search results, chooses URLs to read,
 and writes an answer with source IDs. **Araştırma** shows the actual tool calls,
 source excerpts, errors, and the complete saved tool outputs for each question.
-In automatic mode, questions routed to `search` use the same research loop when
-it is enabled; analytics questions keep using the existing analysis pipeline.
+In automatic mode, searches and web-only URL plans use the same research loop
+when it is enabled. Supplied URLs are read first so the model can discover and
+follow attachment links before answering. Plans that fetch, ingest or transform
+numerical series keep using the existing analysis pipeline.
 
 ## Start the services and website
 
@@ -129,3 +131,34 @@ failed model/tool calls, failed storage, ordinary URL reads, and concurrent writ
 These tests consume no model quota. Live result quality requires the running
 services and a real model; inspect official-source relevance and answer citations
 using the website steps above.
+
+### Linked PDF check: Borsa İstanbul
+
+In **Otomatik** or **Web araştırması** mode, submit:
+
+> Bu sayfayı URL aracıyla aç:
+> https://www.borsaistanbul.com/veriler/kiymetli-madenler-ve-kiymetli-taslar-piyasasi/piyasa-verileri
+> Sayfadaki “Altın İşlemleri” bağlantısını bul, bağlı PDF dosyasını indir ve oku.
+> 2026 yılı Ocak ve Şubat ayları için TL işlem hacmini (TL), TL işlem miktarını
+> (kg), TL işlem sayısını (adet) ve tüm para birimleri toplam işlem miktarını
+> (kg) tablo halinde göster. Hangi ayda toplam işlem miktarı daha yüksektir?
+> PDF bağlantısını, belge yılını ve sayfa numarasını belirt. Veriye erişemezsen
+> bunu açıkça söyle; değer tahmin etme.
+
+The live website check on 2026-09-21 followed `read_web_url` → `get_page_assets`
+→ `read_web_url` and saved all three results plus the answer. It read the
+[2026 gold trading PDF](https://www.borsaistanbul.com/dosyalar/kmtp/veriler/kmp_au.pdf),
+page 1, and returned these values (dots are thousands separators):
+
+| Month | TL volume (TL) | TL quantity (kg) | TL transactions | Total quantity (kg) |
+| --- | ---: | ---: | ---: | ---: |
+| January 2026 | 93.824.682.381 | 13.837 | 1.017 | 33.584 |
+| February 2026 | 90.534.914.196 | 12.649 | 839 | 32.719 |
+
+January has the higher total quantity. The publisher can update this PDF at
+the same URL, so check its year before comparing a later run with this example.
+The overall run may be marked partial when landing-page text or link discovery
+hits its extraction limits, even when the PDF read succeeds. Inspect each tool's
+status and the cited PDF evidence. A landing-page message such as “Hata! Dosya
+Bulunamadı!” does not establish that a linked PDF is unavailable; check whether
+the PDF was actually requested and what that request returned.

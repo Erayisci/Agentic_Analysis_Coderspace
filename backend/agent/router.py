@@ -17,7 +17,13 @@ from pydantic import BaseModel, Field
 from ..llm import LLMError
 from .planner import Intent
 
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'\)]+", re.I)
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'\[\]()]+", re.I)
+
+
+def extract_urls(question: str) -> List[str]:
+    """Plain URLs and Markdown link targets, without duplicate reads of a URL label."""
+    return list(dict.fromkeys(url.rstrip(".,;") for url in URL_PATTERN.findall(question or "")))
+
 
 # Turkish and English ways of saying "keep the table and add to it". The
 # reference scenario's turns 2 and 3 are both phrased this way, and reading
@@ -93,7 +99,7 @@ def extract_window(question: str):
 
 def route(question: str, has_artifact: bool = False, client=None) -> Route:
     """Classify a question. `client` is consulted only if the rules are silent."""
-    urls = URL_PATTERN.findall(question or "")
+    urls = extract_urls(question)
     start, end = extract_window(question or "")
     followup = bool(FOLLOWUP_PATTERN.search(question or "")) and has_artifact
 

@@ -154,6 +154,12 @@ def test_a_url_in_the_prompt_routes_to_the_url_tool_without_a_model():
     assert decided.urls == ["https://www.borsaistanbul.com/endeks/xtumy"]
 
 
+def test_markdown_url_labels_and_targets_are_cleaned_and_deduplicated():
+    url = "https://example.com/report?year=2026&kind=gold"
+    decided = route(f"Read [{url}]({url}), then <https://example.com/next>.")
+    assert decided.urls == [url, "https://example.com/next"]
+
+
 def test_followup_phrasing_only_counts_when_a_table_exists():
     question = "Bu tabloyu hic bozmadan yeni bir sutun ekle"
     assert route(question, has_artifact=True, client=None).intent == "followup"

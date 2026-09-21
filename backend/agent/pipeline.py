@@ -20,7 +20,7 @@ from .composer import compose
 from .evidence_store import EvidenceStorageError
 from .executor import Executor
 from .planner import Plan, Step, planner_messages, template_plan
-from .router import Route, route
+from .router import Route, extract_urls, route
 from .state import Session
 from .verifier import verify
 
@@ -142,13 +142,22 @@ def _run_turn(question: str, session: Optional[Session] = None,
     session = session or Session()
     session.start_turn(question)
 
-    route_result = (Route(intent="search", reason="website web research mode") if mode == "research"
+    route_result = (Route(intent="search", urls=extract_urls(question), reason="website web research mode")
+                    if mode == "research"
                     else route(question, has_artifact=session.has_artifact(), client=client))
     if route_result.intent == "search" and research_runner is not None:
         return _research_turn(question, session, route_result, research_runner, on_tool_result)
     if mode == "research":
         raise ValueError("Web research is disabled; enable WEB_TOOLS_ENABLED and WEB_AGENT_ENABLED.")
     plan = make_plan(question, session, route_result, client)
+
+    # A static read_url plan cannot see a landing page before choosing its
+    # attachments. Web-only URL plans need the same adaptive loop as search.
+    # Keep plans that operate on numerical series in the analytics executor.
+    analytics_ops = {"fetch_series", "transform", "analyze", "find_periods", "ingest_external", "clear_table"}
+    if (route_result.intent == "url_analysis" and research_runner is not None
+            and not any(step.op in analytics_ops for step in plan.steps)):
+        return _research_turn(question, session, route_result, research_runner, on_tool_result)
 
     Executor(session, url_reader=url_reader, web_search=web_search, on_tool_result=on_tool_result).run(plan)
     verification = verify(session)
@@ -178,7 +187,7 @@ def _run_turn(question: str, session: Optional[Session] = None,
 
 
 def _research_turn(question, session, route_result, runner, on_tool_result):
-    result = runner(question, on_tool_result=on_tool_result)
+    result = runner(question, urls=route_result.urls, on_tool_result=on_tool_result)
     sources = result.get("sources", [])
     citations = [{**s, "source": "web", "cited": s["id"] in result.get("citations", [])}
                  for s in sources]
