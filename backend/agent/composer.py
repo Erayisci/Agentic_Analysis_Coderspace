@@ -32,7 +32,9 @@ KESIN KURALLAR:
    causality: Granger = ONGORULEBILIRLIK ("X'in gecmisi Y'yi ongormeye yardim eder/etmez"); "neden oldu" DEME.
    decompose: nominal = fiyat x reel ayristirmasidir; "veri ... ile TUTARLI/TUTARSIZ" de, kanit deme.
    anomaly: "aykiri ay" de (hata/yanlis veri deme); degisimi scored_unit'e gore % veya puan; en fazla 3 ay say.
-   changepoint: "seviye/rejim degisimi" de; kirilma ayini ve oncesi/sonrasi ortalamayi ver.
+   changepoint: "seviye/rejim degisimi" de; kirilma ayini ve oncesi/sonrasi ortalamayi ver. Her kirilmanin
+   "confidence" degerini soyle (solid/moderate/tentative -> yuksek/orta/dusuk guven); "recent": true olan
+   kirilma icin "cok yeni, henuz dogrulanamiyor" de; "warnings" listesi doluysa her uyariyi AYNEN aktar.
 6. caveats listesindeki uyarilari cevapta belirt.
 7. KISA yaz: en fazla 3 kisa paragraf, toplam ~150 kelime. Once dogrudan cevap, sonra gerekce.
    Gereksiz giris/kapanis cumlesi yazma.

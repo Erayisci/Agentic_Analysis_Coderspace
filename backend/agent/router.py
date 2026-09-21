@@ -75,8 +75,12 @@ ANALYSIS_PATTERNS = {
     "changepoint": re.compile(
         r"(k[ıi]r[ıi]lma|rejim|yap[ıi]sal|trend\s+de[ğg]i[şs]|kopu[şs]|de[ğg]i[şs]im\s+noktas|"
         r"regime|structural|change\s*point|\bbreaks?\b)", re.I),
+    # "etkiliyor mu" / "etkilediğini" / "neden-sonuç" / "öncü gösterge" were
+    # measured live as phrasings the planner answered with a chart and no
+    # test; they belong here, where `apply_analysis` guarantees the step.
     "causality_strong": re.compile(
-        r"(nedensellik|granger|[öo]nc[üu]l?\b|[öo]nc[üu]l[üu]yor|etkile(?:di|r)\s*mi|etkisi\s+var\s*m[ıi]|"
+        r"(nedensellik|neden[- ]sonu[çc]|granger|[öo]nc[üu]l?\b|[öo]nc[üu]l[üu]yor|[öo]nc[üu]\s*g[öo]sterge|"
+        r"etkile(?:di|r)\s*mi|etkiliyor\s*mu|etkiledi[ğg]ini|etkisi\s+var\s*m[ıi]|"
         r"yol\s+a[çc]|lead[- ]lag|causal|\bcause)", re.I),
     "causality_weak": re.compile(r"(\bneden\b|sebe[bp]|olabilir\s*mi|\bwhy\b)", re.I),
     "price": re.compile(r"(fiyat|enflasyon|t[üu]fe|kfe|endeks|price|inflation)", re.I),
@@ -95,9 +99,13 @@ DATE_TOKEN = re.compile(
     r"\b(20\d{2})"
     r"(?:[-/](0?[1-9]|1[0-2])\b"
     r"|(?:\s*y[ıi]l[ıi]n?[ıi]?n?)?\s*(sonu\w*|ba[şs][ıi]\w*|ortas[ıi]\w*|ilk\s+yar[ıi]s[ıi]\w*|ikinci\s+yar[ıi]s[ıi]\w*)"
+    # A bare year with its case suffix: "2021'den itibaren" opens a window,
+    # "2024'e kadar" closes one. Without this the year read as a closed
+    # calendar year and "2021'den itibaren" returned twelve months.
+    r"|['’](d[ae]n|t[ae]n|y?[ae]|n[ae])(?![\w])"
     r")?", re.I)
 FROM_SUFFIX = re.compile(r"(dan|den|tan|ten)$", re.I)
-TO_SUFFIX = re.compile(r"(na|ne|ya|ye)$", re.I)
+TO_SUFFIX = re.compile(r"(na|ne|ya|ye|^[ae])$", re.I)
 
 
 class Route(BaseModel):
@@ -141,10 +149,12 @@ def extract_window(question: str):
     this read is the intended one.
     """
     tokens = []                                   # (year, start_month, end_month, qualifier)
-    for year, month, qualifier in DATE_TOKEN.findall(question or ""):
+    for year, month, qualifier, suffix in DATE_TOKEN.findall(question or ""):
         year = int(year)
         if month:
             tokens.append((year, int(month), int(month), ""))
+        elif suffix:
+            tokens.append((year, 1, 12, suffix.lower()))
         elif qualifier:
             word = qualifier.lower()
             if word.startswith("son"):

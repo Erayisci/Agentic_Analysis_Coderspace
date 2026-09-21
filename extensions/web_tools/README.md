@@ -402,7 +402,8 @@ than changing unrelated pipeline behavior.
 
 | Symptom | Action |
 | --- | --- |
-| `docker: command not found` | Install Engine as above, or enable Desktop's integration for this WSL distro. |
+| `docker: command not found` | Install Engine as above, or enable Desktop's integration for this WSL distro. **macOS with Docker Desktop installed** (`Docker.app` in `/Applications` but no `docker` on `PATH`): Desktop's first-run setup normally symlinks its CLI into `/usr/local/bin` itself; if that step was skipped, run `sudo ln -s /Applications/Docker.app/Contents/Resources/bin/docker /usr/local/bin/docker` once (your own Mac admin password, not shared) and reopen the terminal. |
+| Docker Desktop install fails with a Rosetta/`VZErrorDomain` virtualization error (Apple Silicon) | Choose "Continue without Rosetta" -- this project's containers (SearXNG, the crawler) are multi-arch images that run native ARM64, so Rosetta (x86 emulation) is not needed here. |
 | Cannot connect to Docker daemon | Start Docker (`sudo systemctl start docker` for Engine); check group membership, or start Desktop. |
 | Crawler is healthy / `browser-test` passes, but `check` says unavailable | Rerun `start` to rebuild and apply the current port gateway. Docker does not publish ports from an internal-only container; the host crawler port belongs to `egress`, forwarding to the isolated worker. Check effective ports with `config` and retry `check`. |
 | Address already in use | Inspect `ss -ltn`; choose unused extension ports in `.env`, update the host URLs, and rerun `start`. Keep other processes running. |

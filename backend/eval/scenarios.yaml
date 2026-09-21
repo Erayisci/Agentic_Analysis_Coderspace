@@ -152,9 +152,9 @@ scenarios:
     expect_analysis: {method: changepoint, contains_period: "2023-07"}
     expect_keys: [TP.KTF12]
     gold_python: >-
-      backend.tools.changepoint.detect_changepoints("TP.KTF12", source="macro"): PELT l2 on the
-      z-scored level, pen = 2 ln n -> 2023-07 (the post-election policy shift), for every
-      penalty scale between 1 and 3.
+      backend.tools.change_detection.detect_change_points_for("TP.KTF12", source="macro"): PELT l2
+      on the z-scored level (kind=level for a rate), pen = 2 ln n at medium sensitivity -> 2023-07
+      (the post-election policy shift), found at every sensitivity, so graded "solid".
 
   - id: causality_rate_leads_loans
     question: >-

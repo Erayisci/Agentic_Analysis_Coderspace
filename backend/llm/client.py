@@ -25,6 +25,7 @@ a plan can be valid JSON and still name a series that does not exist. On a
 pydantic validation failure the client re-asks once, quoting the error, then
 gives up -- an unbounded repair loop is how an agent burns a demo slot.
 """
+import base64
 import logging
 import time
 from typing import Any, Dict, List, Optional, Type, TypeVar
@@ -36,6 +37,7 @@ from ..core.config import (
     KLOUDEKS_BASE_URL,
     KLOUDEKS_CHAT_MODEL,
     KLOUDEKS_EMBEDDING_MODEL,
+    KLOUDEKS_OCR_MODEL,
     KLOUDEKS_TIMEOUT_SECONDS,
     kloudeks_api_key,
 )
@@ -261,6 +263,37 @@ class KloudeksClient:
             logger.warning("%s invalid after repair (%s); raw=%r", schema.__name__,
                            str(exc).splitlines()[0][:200], raw[:600])
             raise LLMError(f"{schema.__name__} invalid after one repair attempt: {exc}") from exc
+
+    def ocr(self, image: bytes, max_tokens: int = 8192) -> str:
+        """Extract text from one document image via the Unlimited-OCR model.
+
+        Payload shape (prompt text, `skip_special_tokens`, `vllm_xargs`) is
+        exactly what the MIA hackathon guide specifies for this model and
+        must not drift from it -- the guide's own troubleshooting table says
+        an empty OCR response is what dropping `<image>` or flipping
+        `skip_special_tokens` looks like. `window_size` is 128 for the single
+        image this method sends; the guide raises it to 1024 only when
+        several images share one request, which read_url's one-image-per-URL
+        call never does.
+        """
+        content = [
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64," + base64.b64encode(image).decode("ascii")}},
+            {"type": "text", "text": "<image>\ndocument parsing"},
+        ]
+        payload = {
+            "model": KLOUDEKS_OCR_MODEL,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "skip_special_tokens": False,
+            "vllm_xargs": {"ngram_size": 35, "window_size": 128},
+        }
+        body = self._post("/chat/completions", payload)
+        try:
+            return body["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError) as exc:
+            raise LLMError("Kloudeks OCR response had no message content") from exc
 
     def embed(self, texts: List[str], model: str = KLOUDEKS_EMBEDDING_MODEL) -> List[List[float]]:
         """Embedding vectors, in input order."""

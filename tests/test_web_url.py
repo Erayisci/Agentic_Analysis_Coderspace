@@ -112,11 +112,27 @@ def test_dispatches_plain_text(monkeypatch):
     assert result["text"] == "raw data"
 
 
-def test_image_raises_not_implemented(monkeypatch):
+def test_image_without_ocr_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(web_url, "_fetch", lambda url: _response("image/png", b"\x89PNG"))
 
-    with pytest.raises(NotImplementedError, match="vision-capable model"):
+    with pytest.raises(RuntimeError, match="no OCR callable configured"):
         web_url.read_url("https://example.com/chart.png")
+
+
+def test_image_with_ocr_returns_extracted_text(monkeypatch):
+    monkeypatch.setattr(web_url, "_fetch", lambda url: _response("image/png", b"\x89PNG-fake-bytes"))
+    seen = {}
+
+    def fake_ocr(image_bytes):
+        seen["bytes"] = image_bytes
+        return "Tablo: Ocak 100, Subat 120"
+
+    result = web_url.read_url("https://example.com/chart.png", ocr=fake_ocr)
+
+    assert seen["bytes"] == b"\x89PNG-fake-bytes"
+    assert result["kind"] == "image"
+    assert result["text"] == "Tablo: Ocak 100, Subat 120"
+    assert result["truncated"] is False
 
 
 def test_unrecognised_content_type_raises(monkeypatch):

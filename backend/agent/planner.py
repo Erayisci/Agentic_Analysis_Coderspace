@@ -26,16 +26,21 @@ Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
              "read_url", "search", "chart", "ingest_external", "clear_table", "footnotes"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio", "in_usd"]
 Method = Literal["anomaly", "changepoint", "causality", "decompose"]
-Source = Literal["bulletin", "weekly", "macro"]
+Kind = Literal["auto", "level", "trend", "volatility"]          # changepoint: what kind of change
+Sensitivity = Literal["low", "medium", "high"]                  # changepoint: how eager to cut
+Source = Literal["bulletin", "weekly", "macro", "finturk"]
 MonthlyRule = Literal["last", "avg", "sum"]
 
 # Which fields each op actually needs. Checked after parsing, because guided
-# decoding guarantees the shape and not the sense.
+# decoding guarantees the shape and not the sense. `analyze` needs a column
+# too; that one is filled at the Plan level (`Plan._fill_analyze_columns`)
+# from the step that put the column on the table, because a small model
+# reliably forgets it right after fetching the very series it means.
 REQUIRED: dict = {
     "discover": ("query",),
     "fetch_series": ("key",),
     "transform": ("operation", "column"),
-    "analyze": ("method", "column"),
+    "analyze": ("method",),
     "find_periods": ("column",),
     "read_url": ("url",),
     "search": ("query",),
@@ -61,12 +66,15 @@ class Step(BaseModel):
     op: Op = Field(description="which action to run")
 
     # fetch_series / discover
-    key: Optional[str] = Field(None, description="entity_key (bulletin, weekly) or series_code (macro)")
+    key: Optional[str] = Field(
+        None, description="entity_key (bulletin, weekly), series_code (macro), or metric (finturk)")
     source: Optional[Source] = Field(None, description="which corpus the key belongs to")
-    dataset: Optional[str] = Field(None, description="bulletin table slug, when the key is ambiguous")
+    dataset: Optional[str] = Field(None, description="bulletin/finturk table slug, when the key is ambiguous")
     currency: Optional[str] = Field(None, description="'total' (TL+FX), 'TL' or 'FX'")
     metric: Optional[str] = Field(None, description="only for tables whose metric is a bucket")
     as_name: Optional[str] = Field(None, description="column name to store the result under")
+    province: Optional[str] = Field(
+        None, description="finturk only: an il name. Omit for the Turkiye total (summed across provinces)")
 
     # transform
     operation: Optional[Operation] = Field(None, description="which transform to apply")
@@ -77,6 +85,10 @@ class Step(BaseModel):
 
     # analyze / find_periods
     method: Optional[Method] = None
+    kind: Optional[Kind] = Field(None, description="changepoint only: volatility when the question is about "
+                                                   "stability (dalgalanma/oynaklik); otherwise leave unset (auto)")
+    sensitivity: Optional[Sensitivity] = Field(None, description="changepoint only: high to surface smaller "
+                                                                 "shifts, low for only the major ones")
     direction: Optional[Literal["up", "down"]] = None
     against: Optional[str] = Field(None, description="second column: coincidence, predictor or price index")
     against_direction: Optional[Literal["up", "down"]] = None
@@ -161,6 +173,34 @@ class Plan(BaseModel):
         return data
 
     @model_validator(mode="after")
+    def _fill_analyze_columns(self) -> "Plan":
+        """An analyze step must name a column. Small models reliably forget
+        this right after fetching the very series they mean; when the plan
+        makes it unambiguous -- the most recent step that put a column on the
+        table -- fill it in rather than fail the whole plan. When nothing
+        precedes it, the step is dropped and `reasoning` says so, the same
+        way `_drop_invalid_steps` treats any other unusable step.
+        """
+        produced: list = []
+        kept, dropped = [], []
+        for step in self.steps:
+            if step.op in ("fetch_series", "transform", "ingest_external") and step.as_name:
+                produced.append(step.as_name)
+            elif step.op == "fetch_series" and step.key:
+                produced.append(step.key)       # executor names an as_name-less fetch by its key
+            elif step.op == "analyze" and not step.column:
+                if not produced:
+                    dropped.append(f"analyze ({step.method}: no column and no earlier step put one on the table)")
+                    continue
+                step.column = produced[-1]
+            kept.append(step)
+        if dropped:
+            self.steps = kept
+            note = "dropped invalid step(s): " + "; ".join(dropped)
+            self.reasoning = f"{self.reasoning or ''} [{note}]".strip()
+        return self
+
+    @model_validator(mode="after")
     def _not_empty(self) -> "Plan":
         if self.intent != "unsupported" and not self.steps:
             raise ValueError("a plan must have at least one step unless intent is 'unsupported'")
@@ -176,6 +216,11 @@ Sadece hangi adimlarin hangi sirayla calisacagini belirle.
 Adimlar:
 - discover: bir kavramin lakehouse anahtarini bul (key). Anahtari bilmiyorsan ONCE bunu kullan.
 - fetch_series: bir seriyi tabloya sutun olarak ekle. key ve source zorunlu.
+  source="finturk" ICE BDDK'nin IL BAZLI (FinTurk) verisidir -- CEYREKLIK'tir (Mart/Haziran/
+  Eylul/Aralik), ay bazli degildir. dataset o 7 tablodan biri (discover sonucundan al),
+  key=metric. province BOS birakilirsa TURKIYE GENELI (tum illerin toplami) doner; bir il
+  adi (orn. "İSTANBUL") verilirse sadece o ile filtrelenir. Kullanici bir il/sehir adi
+  soylediyse province'i MUTLAKA doldur; soylemediyse finturk yerine aylik bulletin serisini sec.
 - transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
   change (periods=1 aylik, 12 yillik), ratio (other_column=payda), in_usd (TL tutari dolar bazina
   cevir, other_column=USD/TRY kuru).
@@ -183,6 +228,9 @@ Adimlar:
 - analyze: method + column (+against). Hangi method:
   anomaly     "anomali/aykiri/olagandisi hareket"       -> tek seri; column=ana seri.
   changepoint "kirilma/rejim degisikligi/yapisal degisim" -> tek seri; column=ana seri.
+              Soru dalgalanma / oynaklik / istikrar hakkindaysa kind=volatility; aksi halde kind BOS
+              birak (otomatik). Kucuk kirilmalar da istenirse sensitivity=high, sadece buyuk
+              kirilmalar istenirse sensitivity=low; varsayilan medium.
   causality   "onculuyor mu/nedensellik/etkiledi mi/Granger" -> column=hedef, against=aday oncu. IKI seri sart.
   decompose   "artmamasinin sebebi fiyat/enflasyon olabilir mi" -> column=nominal TUTAR, against=fiyat endeksi (KFE/TUFE).
 - chart: grafik ciz.

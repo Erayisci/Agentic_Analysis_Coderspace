@@ -12,15 +12,19 @@ addresses before connecting. This tool fetches an arbitrary URL that ends up
 here from natural-language input, so it must not become a way to make the
 deployed agent reach internal services (SSRF).
 
-The image path needs a vision-capable model behind the Kloudeks client
-(Launch.MD S5.1: "The image path requires a VLM"); that client does not exist
-in this repo yet, so `read_url` raises NotImplementedError for image content
-instead of silently returning nothing for it.
+The image path (Launch.MD S5.1: "The image path requires a VLM") is answered
+by an injected `ocr` callable -- a plain `bytes -> str` function, not a
+`KloudeksClient` import here, matching the same injection pattern the
+executor already uses for `url_reader`/`web_search` so this stays a
+transport-agnostic function the test suite can call without a network. The
+caller (`backend.api.main`) binds it to `KloudeksClient.ocr`. With no `ocr`
+supplied, `read_url` raises RuntimeError for image content instead of
+silently returning nothing for it.
 """
 import ipaddress
 import socket
 from io import BytesIO
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 import pandas as pd
@@ -163,15 +167,23 @@ def _extract_text(content: bytes, encoding: Optional[str]) -> dict:
     }
 
 
-def read_url(url: str) -> dict:
+def _extract_image(content: bytes, ocr: Callable[[bytes], str]) -> dict:
+    text, truncated = _bounded(ocr(content))
+    return {
+        "kind": "image",
+        "text": text,
+        "truncated": truncated,
+    }
+
+
+def read_url(url: str, ocr: Optional[Callable[[bytes], str]] = None) -> dict:
     """Fetch a URL and return its content as a JSON-serialisable dict.
 
-    Supports PDF (pypdf), Excel and CSV (pandas/openpyxl) and text/HTML content, each
-    truncated to MAX_TEXT_CHARS so a large document cannot blow out the
-    calling LLM's context window. Raises NotImplementedError for images --
-    see the module docstring -- and ValueError for anything else (bad scheme,
-    unresolvable host, non-public address, unrecognised content type, too
-    many redirects).
+    Supports PDF (pypdf), Excel and CSV (pandas/openpyxl), text/HTML and,
+    given an `ocr` callable, image content (see the module docstring). Raises
+    RuntimeError for an image URL when no `ocr` is supplied, and ValueError
+    for anything else (bad scheme, unresolvable host, non-public address,
+    unrecognised content type, too many redirects).
     """
     response = _fetch(url)
     kind = _detect_kind(response.headers.get("Content-Type", ""), url)
@@ -187,10 +199,12 @@ def read_url(url: str) -> dict:
     elif kind == "text":
         result = _extract_text(response.content, response.encoding)
     elif kind == "image":
-        raise NotImplementedError(
-            "image URLs need a vision-capable model via the Kloudeks client, "
-            "which does not exist in this repo yet (see Launch.MD Phase 3)"
-        )
+        if ocr is None:
+            raise RuntimeError(
+                "no OCR callable configured for this reader -- image URLs need "
+                "a vision-capable model (see the module docstring)"
+            )
+        result = _extract_image(response.content, ocr)
     else:
         raise ValueError(f"unhandled content kind: {kind!r}")
 

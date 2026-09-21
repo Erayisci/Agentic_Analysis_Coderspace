@@ -21,7 +21,7 @@ from typing import Any, Dict, Generator, List, Optional
 from ..llm import KloudeksClient, LLMError
 from ..tools.lakehouse import discover_concepts
 from .composer import compose
-from .executor import Executor, _column_name, _normalise_key
+from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key
 from .planner import Plan, Step, planner_messages, template_plan
 from .router import Route, route
 from .state import Session
@@ -90,10 +90,11 @@ def build_context(question: str, session: Session, route_result: Route,
         # question named ("YP mevduat") is shown as the currency to copy.
         lines = "\n".join(
             f"  - key={c['key']} | source={c['source']}"
-            + (f" | dataset={c['dataset']}" if c["source"] == "bulletin" else "")
+            + (f" | dataset={c['dataset']}" if c["source"] in DATASET_SOURCES else "")
             + f" | {c['name']} | {c['unit']} | {c['temporal_semantics']}"
             + (f" | currency={c['currency']} (soruda istenen dilim)" if c.get("currency")
                else (f" | cur={','.join(c['currencies'])}" if c.get("currencies") else ""))
+            + (f" | province={c['province']} (soruda istenen il; aynen kopyala)" if c.get("province") else "")
             + (f" | {str(c['first_period'])[:7]}..{str(c['last_period'])[:7]} ({c['n_periods']} donem)"
                if c.get("n_periods") else "")
             for c in found["candidates"])
@@ -150,8 +151,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
         return template_plan("metadata", question)
 
     steps = [Step(op="fetch_series", key=c["key"], source=c["source"],
-                  dataset=c["dataset"] if c["source"] == "bulletin" else None,
-                  currency=c.get("currency"),
+                  dataset=c["dataset"] if c["source"] in DATASET_SOURCES else None,
+                  currency=c.get("currency"), province=c.get("province"),
                   as_name=_slice_name(c["key"], c["currency"]) if c.get("currency") else None)
              for c in chosen]
     return Plan(intent="series_analysis", start=route_result.start, end=route_result.end,
@@ -175,6 +176,18 @@ def apply_dimensions(plan: Plan, discovery: Dict[str, Any]) -> Plan:
     the deposit line as `total` twice from two tables, divided one by the
     other, and reported a 99.97% "share".
     """
+    # The province is the FinTurk fact table's slice, and the question names
+    # at most one: every FinTurk fetch the plan wrote without it gets it.
+    # (Not a search term -- "İstanbul" is in no row's name -- so the model's
+    # plan cannot be expected to carry it; discovery peeled it off the concept.)
+    provinces = {c["province"] for c in discovery.get("candidates") or []
+                 if c.get("source") == "finturk" and c.get("province")}
+    if len(provinces) == 1:
+        province = next(iter(provinces))
+        for step in plan.steps:
+            if step.op == "fetch_series" and step.source == "finturk" and not step.province:
+                step.province = province
+
     tagged: Dict[tuple, List[str]] = {}
     for candidate in discovery.get("candidates") or []:
         if candidate.get("currency"):
@@ -218,7 +231,7 @@ def apply_dimensions(plan: Plan, discovery: Dict[str, Any]) -> Plan:
         for currency in slices:
             steps.insert(insert_at, Step(
                 op="fetch_series", key=identity[1], source=identity[0],
-                dataset=candidate.get("dataset") if identity[0] == "bulletin" else None,
+                dataset=candidate.get("dataset") if identity[0] in DATASET_SOURCES else None,
                 currency=currency, as_name=_slice_name(identity[1], currency)))
             insert_at += 1
         plan.reasoning = f"{plan.reasoning or ''} [dimension: {identity[1]} fetched as {','.join(slices)}]".strip()
@@ -366,6 +379,9 @@ def apply_analysis(plan: Plan, route_result: Route, session: Session) -> Plan:
     return plan
 
 
+DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external")
+
+
 def apply_presentation(plan: Plan, route_result: Route, question: str) -> Plan:
     """A chart step exists in the plan iff the question asked for a chart.
 
@@ -376,8 +392,7 @@ def apply_presentation(plan: Plan, route_result: Route, question: str) -> Plan:
     the plan fetched.
     """
     plan.steps = [step for step in plan.steps if step.op != "chart"]
-    if route_result.wants_chart and any(
-            step.op in ("fetch_series", "transform", "ingest_external") for step in plan.steps):
+    if route_result.wants_chart and any(step.op in DATA_PRODUCING_OPS for step in plan.steps):
         plan.steps.append(Step(op="chart", title=question[:80]))
     return plan
 
@@ -407,6 +422,18 @@ def make_plan(question: str, session: Session, route_result: Route,
             return apply_dimensions(deterministic_series_plan(question, route_result, discovery=found), found)
         return template_plan(route_result.intent, question, route_result.urls,
                              route_result.start, route_result.end)
+
+    # A plan that only discovers is a *valid* plan but a dead end -- measured
+    # live, a model handed a fresh question sometimes emits just `discover`
+    # and stops rather than committing to the fetch it just found candidates
+    # for. Rule 1 in the prompt ("don't invent a key") makes this the *safe*
+    # failure, but a safe non-answer is still not an answer: the deterministic
+    # plan used for an unreachable model recovers a real table here too. A
+    # follow-up over an existing table is not a dead end and is left alone.
+    if (series_intent and not session.has_artifact()
+            and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
+        plan = deterministic_series_plan(question, route_result, discovery=found)
+        plan.reasoning = f"{plan.reasoning} [model plan produced no data; replaced]"
     plan = apply_dimensions(plan, found)
 
     # The router's regex read of the date range beats the model's: it is exact,

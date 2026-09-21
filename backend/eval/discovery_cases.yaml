@@ -200,7 +200,27 @@ cases:
 # Concepts the corpus does not hold. A correct system reports the gap; today it
 # returns the nearest lexical neighbour and the composer presents it as data.
 # Scored separately -- these are not counted in recall.
+  # BDDK FinTurk: the same concepts as the bulletin, quarterly and by province.
+  # A FinTurk row is the answer only when the question names a province or
+  # the grain; the plain phrasings of the families above must keep reaching
+  # the monthly line, which the multiplier in `tools.lakehouse._score` does.
+  - family: finturk_konut_kredisi_il
+    expect: konut_kredisi
+    phrasings:
+      - illere gore konut kredisi
+      - il bazinda konut kredisi
+      - İstanbul'da konut kredisi
+      - Ankara konut kredileri
+      - sehir bazli konut kredisi hacmi
+      - FinTurk konut kredisi
+
+  - family: finturk_nakdi_krediler_il
+    expect: toplam_nakdi_krediler
+    accept: [nakdi_krediler]            # the same table's cash-loan line without the memo items
+    phrasings:
+      - il bazinda toplam nakdi krediler
+      - illere gore nakdi kredi tutari
+      - il bazinda kredi dagilimi        # misses: "dagilim" names no row, the per-capita line wins
+
 absent:
-  - il bazinda kredi dagilimi          # BDDK FinTurk, not acquired
-  - illere gore konut kredisi          # same
   - banka bazinda karlilik             # taraf=10001 is fixed; no bank breakdown is pulled

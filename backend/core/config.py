@@ -5,6 +5,8 @@ Repository layout the paths below refer to:
                                     table (never modified)
     bddk_aylik_bulten/_raw_json/    archived endpoint responses -- the source of
                                     truth for the bulletin parser
+    bddk_finturk/_raw_json/ archived FinTurk (il-bazli, quarterly) responses -- the
+                            source of truth for the province-grained corpus
     riskmerkezi_sectoral/  raw TBB Risk Merkezi monthly Excel files (never modified)
     evds/_raw_json/        archived TCMB EVDS responses -- the source of truth for
                            the macro series (catalogue + data, never modified)
@@ -34,6 +36,16 @@ RAW_BDDK_WEEKLY_CATALOG = RAW_BDDK_WEEKLY_DIR / "_catalog"
 # reaches further back (2014) but the brief asks for 2021 onwards and the
 # cross-validation against the monthly tables has nothing to compare before it.
 WEEKLY_FETCH_START = "1.01.2021"
+
+# FinTurk (Cografi Dagilim / il-bazli) is a separate BDDK product: 7 tables,
+# quarterly (not monthly), broken down by province rather than by sector or
+# balance-sheet line. It reaches back to 2007-12; the brief's window (2021-01
+# onwards) is what the rest of the lakehouse is pinned to, so that is the
+# default fetch range here too.
+RAW_BDDK_FINTURK_ROOT = ROOT / "bddk_finturk"
+RAW_BDDK_FINTURK_JSON_DIR = RAW_BDDK_FINTURK_ROOT / "_raw_json"
+FINTURK_FETCH_START = "2021-3"
+FINTURK_FETCH_END = "2026-6"
 
 RAW_EVDS_ROOT = ROOT / "evds"
 RAW_EVDS_JSON_DIR = RAW_EVDS_ROOT / "_raw_json"

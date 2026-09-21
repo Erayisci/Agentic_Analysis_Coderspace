@@ -219,46 +219,52 @@ def _describe(unit="milyon TL", semantics="stock"):
     return {"name": "Synthetic", "unit": unit, "temporal_semantics": semantics, "value_column": "value"}
 
 
+def _detect(series, describe, **kwargs):
+    """The executor's call shape: kind from the lineage, a name for the description."""
+    from backend.tools.change_detection import detect_change_points
+    return detect_change_points(series, temporal_semantics=describe["temporal_semantics"],
+                                unit=describe["unit"], name=describe["name"], **kwargs)
+
+
 def test_changepoint_finds_an_injected_level_shift_and_reports_its_size():
-    from backend.tools.changepoint import detect_changepoints_in_series
-    result = detect_changepoints_in_series(_level_shift(), _describe(), {})
+    result = _detect(_level_shift(), _describe(), kind="level")
     assert result["n_breakpoints"] == 1
-    b = result["breakpoints"][0]
+    b = result["breaks"][0]
     assert b["period"] == "2023-07" and b["direction"] == "up" and b["shift_unit"] == "%"
     assert abs(b["shift"] - 30.0) < 2.0               # +30% in the series' own terms
+    assert b["confidence"] == "solid"                 # found at every sensitivity
     assert "1 kirilma" in result["description"] and "2023-07" in result["description"]
 
 
 def test_changepoint_reports_a_rate_shift_in_points():
-    from backend.tools.changepoint import detect_changepoints_in_series
-    result = detect_changepoints_in_series(_level_shift(before=18.0, after=40.0, sigma=0.5),
-                                           _describe(unit="%", semantics="rate"), {})
-    b = result["breakpoints"][0]
+    result = _detect(_level_shift(before=18.0, after=40.0, sigma=0.5), _describe(unit="%", semantics="rate"))
+    assert result["kind"] == "level"                  # auto: a rate is analysed in level
+    b = result["breaks"][0]
     assert b["shift_unit"] == "puan" and abs(b["shift"] - 22.0) < 1.0
 
 
 @pytest.mark.parametrize("n", [60, 240])
 def test_changepoint_penalty_scales_with_length_so_noise_has_no_breaks(n):
-    from backend.tools.changepoint import detect_changepoints_in_series
     rng = np.random.default_rng(2)
     series = pd.Series(100 + rng.normal(0, 1, n), index=pd.date_range("2021-01-01", periods=n, freq="MS"))
-    result = detect_changepoints_in_series(series, _describe(), {})
+    result = _detect(series, _describe(), kind="level")
     assert result["n_breakpoints"] == 0 and "tek rejim" in result["description"]
 
 
-def test_changepoint_segments_carry_slopes():
-    from backend.tools.changepoint import detect_changepoints_in_series
-    result = detect_changepoints_in_series(_level_shift(), _describe(), {})
+def test_changepoint_segments_and_breaks_are_serialisable():
+    result = _detect(_level_shift(), _describe(), kind="level")
     assert len(result["segments"]) == 2
-    assert all("slope_per_month" in s and "mean" in s for s in result["segments"])
+    assert all({"start", "end", "periods", "value"} <= set(s) for s in result["segments"])
+    assert result["breakpoints"] == [b["period"] for b in result["breaks"]]
     json.dumps(result)
 
 
 def test_changepoint_on_the_housing_rate_finds_the_2023_regime_shift():
-    from backend.tools.changepoint import detect_changepoints
-    result = detect_changepoints("TP.KTF12", source="macro", currency=None)
-    assert "2023-07" in {b["period"] for b in result["breakpoints"]}
-    assert result["shift_unit"] == "puan"
+    from backend.tools.change_detection import detect_change_points_for
+    result = detect_change_points_for("TP.KTF12", source="macro", currency=None)
+    assert "2023-07" in result["breakpoints"]
+    assert result["shift_unit"] == "puan" and "citation" in result
+    assert "2023-07" in result["description"]
 
 
 # --- causality ----------------------------------------------------------------

@@ -25,8 +25,8 @@ from typing import Optional
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies_in_series
 from ..tools.causality import granger_both_directions
-from ..tools.changepoint import detect_changepoints_in_series
-from ..tools.charts import build_chart, chart_summary
+from ..tools.change_detection import detect_change_points
+from ..tools.charts import build_chart, chart_summary, mark_breaks
 from ..tools.external_series import ingest_external_series
 from ..tools.lakehouse import discover, fetch_series, footnotes
 from ..tools.series import load_series
@@ -35,7 +35,13 @@ from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
 MAX_URL_CHARS = 6000
 
-LAKEHOUSE_SOURCES = ("bulletin", "weekly", "macro")
+LAKEHOUSE_SOURCES = ("bulletin", "weekly", "macro", "finturk")
+# Sources whose fact table keys a series by (dataset, key) rather than by the
+# key alone, so `dataset` has to travel with the key on every fetch.
+DATASET_SOURCES = ("bulletin", "finturk")
+# Sources with no currency dimension: an EVDS series is one number a month,
+# and FinTurk publishes a province split instead of a TL/FX one.
+NO_CURRENCY_SOURCES = ("macro", "finturk")
 
 
 def _monthly_rule(semantics: Optional[str]) -> str:
@@ -54,7 +60,7 @@ def _normalise_key(key: str) -> str:
     if "/" not in key:
         return key
     head, _, tail = key.rpartition("/")
-    if head.split("/")[0] in ("bulletin", "weekly", "macro"):
+    if head.split("/")[0] in LAKEHOUSE_SOURCES:
         return tail
     return key
 
@@ -144,11 +150,13 @@ class Executor:
     def _fetch(self, step: Step, plan: Plan) -> str:
         key = _normalise_key(step.key)
         source = step.source or ("macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin")
-        currency = step.currency if step.currency is not None else ("total" if source != "macro" else None)
+        currency = step.currency if step.currency is not None else (
+            "total" if source not in NO_CURRENCY_SOURCES else None)
         resolved_by = ""
         try:
             series = fetch_series(key, source=source, dataset=step.dataset, currency=currency,
-                                  metric=step.metric, start=plan.start, end=plan.end)
+                                  metric=step.metric, start=plan.start, end=plan.end,
+                                  province=step.province)
         except (ValueError, KeyError) as exc:
             # A key the model invented is the most common plan defect -- it wrote
             # TP.TUFE where the corpus publishes TP.GENENDEKS.T1. Discovery already
@@ -159,9 +167,11 @@ class Executor:
                 raise ValueError(f"{exc}; discovery found no alternative for {key!r}") from exc
             best = candidates[0]
             series = fetch_series(best["key"], source=best["source"],
-                                  dataset=best["dataset"] if best["source"] == "bulletin" else None,
-                                  currency=best.get("currency") or ("total" if best["source"] != "macro" else None),
-                                  start=plan.start, end=plan.end)
+                                  dataset=best["dataset"] if best["source"] in DATASET_SOURCES else None,
+                                  currency=best.get("currency") or (
+                                      "total" if best["source"] not in NO_CURRENCY_SOURCES else None),
+                                  start=plan.start, end=plan.end,
+                                  province=step.province if best["source"] == "finturk" else None)
             resolved_by = f" (key {key!r} not found; resolved to {best['key']!r} by discovery)"
 
         # The weekly bulletin is observed on Fridays. Joining it into a
@@ -223,8 +233,13 @@ class Executor:
         lineage = self.session.artifact.lineage[column]
         filters = lineage.citation.get("filters") or {}
         if lineage.source in LAKEHOUSE_SOURCES and lineage.key:
+            # A FinTurk column's citation names its province, or none for the
+            # national sum; the re-read keeps the same slice. (Quarterly, so
+            # a `window=12` there is twelve quarters -- stated by the tool's
+            # own frequency inference, not silently treated as months.)
             loaded = load_series(lineage.key, source=lineage.source, dataset=filters.get("dataset"),
-                                 currency=filters.get("currency"), metric=filters.get("metric"))
+                                 currency=filters.get("currency"), metric=filters.get("metric"),
+                                 province=filters.get("province"))
             values = loaded.values
             if lineage.source == "weekly":
                 values = T.resample_to_monthly(values, _monthly_rule(loaded.temporal_semantics))
@@ -261,9 +276,19 @@ class Executor:
             result = detect_anomalies_in_series(series, describe, citation, window=step.window or 12)
             result["inputs"] = [column]
         elif step.method == "changepoint":
+            # Same history policy as the anomaly tool: the column's full
+            # lakehouse history, so a break just before the window's start is
+            # not mistaken for the level the window opens at. The plan may
+            # name `kind` (volatility for a stability question) and
+            # `sensitivity`; unset, the tool picks level for rates/ratios and
+            # trend for balances from the column's own semantics.
             series, describe, citation = self._full_history(column)
-            result = detect_changepoints_in_series(series, describe, citation)
-            result["inputs"] = [column]
+            series = series.rename(column)
+            result = detect_change_points(
+                series, kind=step.kind or "auto", sensitivity=step.sensitivity or "medium",
+                temporal_semantics=describe.get("temporal_semantics"), unit=describe.get("unit"),
+                name=describe.get("name") or column)
+            result = {**describe, "citation": citation, **result, "inputs": [column]}
         elif step.method == "causality":
             against, auto = self._second_column(step, column)
             describe = {c: {"name": artifact.lineage[c].label, "unit": artifact.lineage[c].unit,
@@ -355,9 +380,19 @@ class Executor:
             groups = sorted(T.columns_sharing_unit(artifact), key=len, reverse=True)[:2]
             columns = [c for group in groups for c in group]
             figure = build_chart(artifact, columns, step.title)
+        # If change detection already ran on a charted column, draw its breaks
+        # on the chart so the reader sees where the regimes change.
+        charted = columns or artifact.column_names()
+        analysis = self.session.facts.get("analysis", {})
+        breaks_by_column = {c: analysis[f"changepoint:{c}"]["breaks"]
+                            for c in charted if f"changepoint:{c}" in analysis
+                            and analysis[f"changepoint:{c}"].get("breaks")}
+        if breaks_by_column:
+            figure = mark_breaks(figure, breaks_by_column)
         self.session.facts["chart"] = chart_summary(artifact, columns)
         self.session.facts["figure"] = figure
-        return f"chart with {len(figure['data'])} trace(s)"
+        marks = sum(len(b) for b in breaks_by_column.values())
+        return f"chart with {len(figure['data'])} trace(s)" + (f", {marks} break marker(s)" if marks else "")
 
     def _clear_table(self, step: Step, plan: Plan) -> str:
         """Empty this session's working table -- and only this session's.

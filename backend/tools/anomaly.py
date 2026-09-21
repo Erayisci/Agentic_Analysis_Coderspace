@@ -8,21 +8,16 @@ evidence on its own; requiring agreement is the mitigation Launch.MD calls for
 ("Anomaly output is contextualised against historical windows ... before
 being reported as an anomaly").
 
-What is scored depends on what the series is. A stock (every balance in
-`bulletin_observations`) trends upward every month, so its level would flag
-the whole tail; its month-over-month percent change is what can break from
-history. A rate is already a percentage, and the percent change of a
-percentage ("faiz %10 arttı" for 18.4 -> 20.2) is a number nobody quotes --
-its point difference is (`on="diff"`). A flow can pass through zero, where a
-percent change explodes; those months are left unscored and counted rather
-than reported as thousand-percent anomalies. `on="auto"` picks by the
-series' declared `temporal_semantics`.
+The maths lives in `tools.outliers` so that change detection applies the very
+same rule before it looks for breaks. What that rule scores depends on what the
+series is (`on="auto"`: the point difference of a rate, the percent change of
+everything else, with a zero guard for flows), and its baseline is strictly
+trailing -- see that module for why both were measured rather than assumed.
 
-The baseline is strictly trailing: the point being scored is compared with
-the `window` months *before* it, never with itself. Measured on the housing
-loan series, an inclusive window contaminated its own mean and variance
-enough to hide both real breaks (2023-03, 2024-10); a trailing window also
-keeps a past flag stable when new months arrive.
+Each flag is then classified by `tools.outliers.classify_flags` as a one-off
+`spike`, a `regime_start` (the series stays outside the fence afterwards -- a
+change point, not an anomaly) or `undetermined` (nothing after it), and the
+result also lists any gaps in the dates so a hole is never read as a jump.
 
 The series is loaded through `tools.series.load_series`, so the corpus-specific
 traps are already handled before scoring: a year-to-date series arrives
@@ -33,107 +28,69 @@ flagged numbers are.
 """
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
+from .frequency import find_gaps, infer_frequency
+from .outliers import (SCORED_ON, classify_flags, default_lookahead, score_outliers, scoring_for,  # noqa: F401
+                       validate_params)
 from .series import load_series
 
-SCORING = ("auto", "change", "diff", "level")
+SCORING = SCORED_ON
 
-# Relative to the series' median magnitude: a previous value this small makes
-# a percent change meaningless (a flow crossing zero), so the month is not
-# scored rather than scored as +3000%.
-FLOW_ZERO_GUARD = 0.05
-
-
-def scoring_for(semantics: Optional[str]) -> str:
-    """Which quantity to score for a series with these temporal semantics."""
-    if semantics in ("rate", "ratio"):
-        return "diff"
-    return "change"
-
-
-def _scored_series(series: pd.Series, on: str, semantics: Optional[str]) -> tuple:
-    """(scored values, the name of what was scored, its unit, n left unscored)."""
-    if on == "auto":
-        on = scoring_for(semantics)
-    if on == "level":
-        return series.dropna(), "level", "seviye", 0
-    if on == "diff":
-        return series.diff().dropna(), "diff", "puan", 0
-    pct = series.pct_change(fill_method=None) * 100
-    unscored = 0
-    if semantics == "flow":
-        guard = FLOW_ZERO_GUARD * float(series.abs().median() or 0)
-        tiny = series.shift(1).abs() < guard
-        unscored = int((tiny & pct.notna()).sum())
-        pct = pct.mask(tiny)
-    return pct.dropna(), "change", "%", unscored
+PERIOD_WORD = {"day": "gun", "week": "hafta", "month": "ay", "quarter": "ceyrek", "year": "yil"}
 
 
 def _score(series: pd.Series, on: str, window: int, z_threshold: float, iqr_multiplier: float,
-           semantics: Optional[str] = None, name: str = "seri") -> dict:
+           semantics: Optional[str] = None, name: str = "seri", lookahead: Optional[int] = None) -> dict:
     """The method itself, over a plain series -- shared by both entry points
     below so "loaded from the lakehouse" and "already have it in hand" (an
     external or derived column) can never silently score differently."""
-    if on not in SCORING:
-        raise ValueError(f"on must be one of {SCORING}, got {on!r}")
-    if window < 3:
-        raise ValueError("window must be >= 3")
-
-    scored, scored_on, scored_unit, n_unscored = _scored_series(series, on, semantics)
-
-    if len(scored) <= window:
-        raise ValueError(
-            f"series has {len(scored)} scoreable point(s), need more than "
-            f"window={window} to compute a rolling baseline"
-        )
-
-    # shift(1): the baseline is the `window` points before this one.
-    history = scored.shift(1).rolling(window, min_periods=window)
-    roll_mean = history.mean()
-    roll_std = history.std(ddof=0)
-    z_score = (scored - roll_mean) / roll_std.replace(0, np.nan)
-
-    roll_q1 = history.quantile(0.25)
-    roll_q3 = history.quantile(0.75)
-    roll_iqr = roll_q3 - roll_q1
-    lower_fence = roll_q1 - iqr_multiplier * roll_iqr
-    upper_fence = roll_q3 + iqr_multiplier * roll_iqr
-
-    z_flag = z_score.abs() >= z_threshold
-    iqr_flag = (scored < lower_fence) | (scored > upper_fence)
-    is_anomaly = (z_flag & iqr_flag).fillna(False)
+    validate_params(on, window)
+    scores = score_outliers(series, on=on, window=window, z_threshold=z_threshold,
+                            iqr_multiplier=iqr_multiplier, semantics=semantics)
+    scored, roll_mean, z_score = scores.scored, scores.roll_mean, scores.z_score
+    if lookahead is None:
+        lookahead = default_lookahead(window)
+    kinds = classify_flags(scores, lookahead)
+    freq_name, _, fmt = infer_frequency(series.index) if len(series) >= 3 else ("month", 12, "%Y-%m")
+    gaps = find_gaps(series.index, fmt) if len(series) >= 3 else []
 
     anomalies = []
-    for period in scored.index[is_anomaly]:
+    for period in scores.periods:
         anomalies.append({
-            "period": period.strftime("%Y-%m"),
+            "period": period.strftime(fmt),
             "scored_value": round(float(scored.loc[period]), 6),
             "raw_value": float(series.loc[period]),
             "z_score": round(float(z_score.loc[period]), 3),
             "direction": "above" if scored.loc[period] > roll_mean.loc[period] else "below",
+            "kind": kinds[period],
         })
 
-    what = {"change": "aylik % degisimi", "diff": "aylik puan farki", "level": "seviyesi"}[scored_on]
+    per = PERIOD_WORD.get(freq_name, "donem")
+    what = {"change": f"{per}lik % degisimi", "diff": f"{per}lik puan farki", "level": "seviyesi"}[scores.scored_on]
     months = ", ".join(a["period"] for a in anomalies[:6])
-    description = (f"{name}: {what}, onceki {window} ayin ortalamasindan |z|>={z_threshold:g} VE "
-                   f"IQR x{iqr_multiplier:g} disina cikan aykiri aylar ({series.index.min():%Y-%m}.."
-                   f"{series.index.max():%Y-%m}) -- {len(anomalies)} ay bulundu"
+    description = (f"{name}: {what}, onceki {window} {per}in ortalamasindan |z|>={z_threshold:g} VE "
+                   f"IQR x{iqr_multiplier:g} disina cikan aykiri {per}lar "
+                   f"({series.index.min().strftime(fmt)}..{series.index.max().strftime(fmt)}) "
+                   f"-- {len(anomalies)} {per} bulundu"
                    + (f": {months}" if months else ""))
 
     return {
-        "scored_on": scored_on,
-        "scored_unit": scored_unit,
+        "scored_on": scores.scored_on,
+        "scored_unit": scores.scored_unit,
         "window": window,
         "z_threshold": z_threshold,
         "iqr_multiplier": iqr_multiplier,
-        "period_start": series.index.min().strftime("%Y-%m"),
-        "period_end": series.index.max().strftime("%Y-%m"),
+        "lookahead": lookahead,
+        "frequency": freq_name,
+        "period_start": series.index.min().strftime(fmt),
+        "period_end": series.index.max().strftime(fmt),
         "n_points": int(len(series)),
         "n_scored": int(len(scored)),
-        "n_unscored": n_unscored,
+        "n_unscored": scores.n_unscored,
         "n_anomalies": len(anomalies),
+        "kinds": {k: sum(a["kind"] == k for a in anomalies) for k in ("spike", "regime_start", "undetermined")},
+        "gaps": gaps,
         "anomalies": anomalies,
         "description": description,
     }
@@ -149,6 +106,7 @@ def detect_anomalies(
     window: int = 12,
     z_threshold: float = 3.0,
     iqr_multiplier: float = 1.5,
+    lookahead: Optional[int] = None,
 ) -> dict:
     """Flag periods where a series' rolling z-score AND IQR fence both breach.
 
@@ -168,17 +126,19 @@ def detect_anomalies(
             would compare a point against too few precedents to mean anything.
         z_threshold: |z| at or above this flags the z-score check.
         iqr_multiplier: fence width, in IQRs beyond Q1/Q3, for the IQR check.
+        lookahead: observations after a flag that decide spike vs regime
+            start; defaults to about a quarter of the window.
 
     Returns a JSON-serialisable dict: identifies the series and parameters
     used, then `anomalies` -- one entry per period flagged by both checks,
-    each carrying the scored value, the raw level it came from, the z-score
-    and which side of the fence it breached -- and a Turkish `description`
-    that says what the list means.
+    each carrying the scored value, the raw level it came from, the z-score,
+    which side of the fence it breached and its `kind` -- and a Turkish
+    `description` that says what the list means.
     """
     loaded = load_series(key, source=source, dataset=dataset, currency=currency, metric=metric)
     return {**loaded.describe(), "citation": loaded.citation(),
             **_score(loaded.values, on, window, z_threshold, iqr_multiplier,
-                     semantics=loaded.temporal_semantics, name=loaded.name)}
+                     semantics=loaded.temporal_semantics, name=loaded.name, lookahead=lookahead)}
 
 
 def detect_anomalies_in_series(
@@ -189,6 +149,7 @@ def detect_anomalies_in_series(
     window: int = 12,
     z_threshold: float = 3.0,
     iqr_multiplier: float = 1.5,
+    lookahead: Optional[int] = None,
 ) -> dict:
     """Same method as `detect_anomalies`, for a series that is already in
     hand rather than loadable from the lakehouse -- an `ingest_external`
@@ -203,4 +164,5 @@ def detect_anomalies_in_series(
     return {**describe, "citation": citation,
             **_score(series, on, window, z_threshold, iqr_multiplier,
                      semantics=describe.get("temporal_semantics"),
-                     name=describe.get("name") or describe.get("value_column") or "seri")}
+                     name=describe.get("name") or describe.get("value_column") or "seri",
+                     lookahead=lookahead)}

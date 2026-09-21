@@ -34,6 +34,7 @@ ALLOWED_TABLES = {
     "weekly_items", "weekly_observations", "macro_series", "macro_observations",
     "macro_observations_native", "data_quality_report", "reconciliation_monitor",
     "bulletin_lifecycle_report", "weekly_lifecycle_report",
+    "finturk_observations", "finturk_metrics",
 }
 
 FORBIDDEN_SQL = re.compile(
@@ -148,6 +149,14 @@ def extract_currency(text: str):
 _SUFFIX = r"(?:['\u2019]\w*)?"
 _BULTEN = r"\s+b[\u00fcu]lten\w*" + _SUFFIX
 SOURCE_TERMS = (
+    # FinTurk is the only release with a province grain, so "il bazinda" /
+    # "illere gore" / "sehir bazli" name it as surely as "haftalik" names the
+    # weekly bulletin. Listed first because it is the most specific BDDK
+    # release a question can name.
+    ("bddk", re.compile(r"(?<!\w)(?:fint[\u00fcu]rk|il(?:ler)?(?:e)?\s+(?:baz[\u0131i]nda|bazl[\u0131i]|"
+                        r"g[\u00f6o]re|d[\u00fcu]zeyinde|baz[\u0131i]nda)|[\u015fs]ehir(?:ler)?(?:e)?\s+"
+                        r"(?:baz[\u0131i]nda|bazl[\u0131i]|g[\u00f6o]re)|il\s+il|co[\u011fg]rafi\s+da[\u011fg])"
+                        r"\w*", re.I), {"finturk"}),
     ("bddk", re.compile(r"(?<!\w)haftal[\u0131i]k(?:" + _BULTEN + r")?(?!\w)", re.I), {"weekly"}),
     ("bddk", re.compile(r"(?<!\w)ayl[\u0131i]k" + _BULTEN, re.I), {"bulletin"}),
     # "BDDK bulteni" with neither "aylik" nor "haftalik" said is the monthly
@@ -159,7 +168,76 @@ SOURCE_TERMS = (
     ("bddk", re.compile(r"(?<!\w)bddk" + _SUFFIX, re.I), {"bulletin", "weekly"}),
 )
 
-ALL_SOURCES = {"bulletin", "macro", "weekly"}
+ALL_SOURCES = {"bulletin", "macro", "weekly", "finturk"}
+
+# Words that say a question is about the province grain -- the only reason
+# to prefer a quarterly, province-summed FinTurk row over the monthly
+# bulletin's line for the same concept. The 81 province names are read from
+# the corpus itself (once per process) rather than typed here.
+PROVINCE_HINT = re.compile(
+    r"(?<!\w)(il|ili|iller|illere|ilinde|ilde|ilin|ilindeki|illerde|sehir|sehri|sehirler|sehirde|"
+    r"bolge|bolgesi|bolgesel|bolgede|finturk|province|city|regional)(?!\w)", re.I)
+_PROVINCES: Optional[Dict[str, str]] = None
+
+
+def _province_names() -> Dict[str, str]:
+    """Folded province name -> the spelling `finturk_observations` uses, loaded
+    on first use; empty when the lakehouse holds no FinTurk table."""
+    global _PROVINCES
+    if _PROVINCES is None:
+        try:
+            con = _connect()
+            try:
+                rows = con.execute("SELECT DISTINCT province FROM finturk_observations").fetchall()
+            finally:
+                con.close()
+            _PROVINCES = {fold(str(r[0])): str(r[0]) for r in rows if r[0]}
+        except Exception:                                    # noqa: BLE001 -- no table, no names
+            _PROVINCES = {}
+    return _PROVINCES
+
+
+# A province name with the case suffix Turkish glues to it: "İstanbul'daki",
+# "Ankara'da", "İzmirdeki". Longest names first so "Afyonkarahisar" is not
+# matched as "Afyon" plus a suffix.
+def _province_pattern(folded_name: str) -> str:
+    return rf"(?<![a-z]){re.escape(folded_name)}(?:['’]?[a-z]{{1,6}})?(?![a-z])"
+
+
+def extract_province(text: str):
+    """(province as the table spells it, text without the province word) --
+    (None, text) when no province is named or several are.
+
+    The same rule as `extract_currency`: a province is a DIMENSION of the
+    FinTurk fact table, not a word any row's name contains, so it is peeled
+    off the concept before search and comes back as `province` on every
+    FinTurk candidate for the plan to pass straight into the fetch.
+    """
+    text = text or ""
+    folded = fold(text)
+    found = []
+    for name in sorted(_province_names(), key=len, reverse=True):
+        match = re.search(_province_pattern(name), folded)
+        if match and not any(match.start() < e and s < match.end() for s, e in (m.span() for _, m in found)):
+            found.append((name, match))
+    if len(found) != 1:
+        return None, text
+    name, match = found[0]
+    # `fold` is length-preserving (one ASCII letter per Turkish one), so the
+    # span found on the folded text cuts the original at the same offsets.
+    if len(folded) == len(text):
+        text = text[:match.start()] + " " + text[match.end():]
+    else:
+        text = re.sub(_province_pattern(name), " ", folded)
+    return _province_names()[name], re.sub(r"\s+", " ", text).strip()
+
+
+def names_a_province(text: str) -> bool:
+    """Does the question say "il"/"şehir"/"bölge" or name one of the 81?"""
+    folded = fold(text or "")
+    if PROVINCE_HINT.search(folded):
+        return True
+    return any(re.search(rf"(?<![a-z]){re.escape(p)}(?![a-z])", folded) for p in _province_names())
 
 
 def extract_sources(text: str):
@@ -265,6 +343,10 @@ STOPWORDS = {
     "yukselmedigi", "yükselmediği", "dustugu", "düştüğü", "halde", "sadece",
     "yeni", "sutun", "sütun", "hangi", "yapabilir", "verilerini", "kullanarak",
     "gore", "göre", "gostermektedir", "bulten", "bülten", "bulteni", "bülteni",
+    # "karşılaştır" is a question verb, and its five-letter stem "karsi" is a
+    # substring of "karsiligi": the provision-coverage ratio outranked the
+    # NPL ratio for a question that merely asked to compare two series.
+    "karsilastir", "karsilastirin", "karsilastirma", "karsilastirmasi", "kiyasla", "kiyaslayin",
     # "Agirlikli ortalama" names a METHOD, not a subject: `validation.macro`
     # already records that 92 EVDS rate series publish it as their BIRIMI, which
     # is why the unit is resolved per series instead of read from the group. It
@@ -331,8 +413,11 @@ def _terms(query: str):
     return sorted(weighted.items(), key=lambda pair: -pair[1])[:18]
 
 
-def _score(candidate, terms) -> float:
+def _score(candidate, terms, province_named: bool = False) -> float:
     """Rank a candidate against the weighted terms.
+
+    `province_named`: the question names a province or the il grain (or the
+    caller asked for the FinTurk corpus), so a FinTurk row is what it wants.
 
     Beyond term matching, two structural preferences encode what a question
     usually means: a top-level row beats a sub-item of it (asking about housing
@@ -416,6 +501,19 @@ def _score(candidate, terms) -> float:
 
     score -= 1.5 * key.count("/")                       # a child row, not the line itself
     score -= min(len(key), 90) / 45.0                   # prefer the canonical short key
+
+    # FinTurk publishes many of the bulletin's concepts again, quarterly and
+    # by province. Its rows answer a question that names a province or the
+    # grain ("il bazında", "İstanbul'da") and nothing else does; for any other
+    # question the monthly national line is the better answer. Measured on
+    # "konut kredisi": the FinTurk twin, whose name IS the phrase, scored 25.5
+    # against the bulletin line's 12.8, so a flat penalty left it first; the
+    # multiplier puts it at 10.2, in the pool but below the line it duplicates.
+    # The other way round, "Ankara konut kredileri" scored the FinTurk row 9.0
+    # against the bulletin line's 11.3 (the city is not a term any row holds),
+    # so the bonus has to be worth more than the phrase's own weight.
+    if candidate.get("source") == "finturk":
+        score = score + 4.0 if province_named else score * 0.4
 
     if candidate.get("source") == "macro":
         tier = candidate.get("tier")
@@ -548,10 +646,14 @@ def discover(query: str, source=None, limit: int = 8):
     # words of pure dilution around the one that matters.
     named_sources, query_body = extract_sources(query)
     currency, concept = extract_currency(query_body)
+    concept = concept if currency and concept else query_body
+    # A province is the third dimension peeled off before search: "İstanbul"
+    # names no row, and left in the concept it only dilutes the words that do.
+    province, concept = extract_province(concept)
     plain_terms = _terms(query_body)
-    terms = _terms(concept) if currency and concept else plain_terms
+    terms = _terms(concept) if concept and concept != query_body else plain_terms
     if not terms:
-        return {"query": query, "terms_used": [], "currency": currency,
+        return {"query": query, "terms_used": [], "currency": currency, "province": province,
                 "sources": sorted(named_sources) if named_sources else None,
                 "n_candidates": 0, "candidates": []}
 
@@ -596,6 +698,15 @@ def discover(query: str, source=None, limit: int = 8):
                 "NULL AS first_period, NULL AS last_period "
                 f"FROM weekly_items WHERE retired_on IS NULL AND ({where})",
                 [f"%{term}%" for term in words]).df().to_dict("records")
+
+        if "finturk" in wanted:
+            where = " OR ".join(["metric ILIKE ? OR search_fold ILIKE ?"] * len(words))
+            params = [p for term in words for p in (f"%{term}%", f"%{term}%")]
+            pooled += con.execute(
+                "SELECT 'finturk' AS source, dataset, metric AS key, metric_name AS name, unit, "
+                "temporal_semantics, NULL AS currencies, NULL AS metrics, NULL AS tier, n_periods, "
+                "search_fold, first_period::VARCHAR AS first_period, last_period::VARCHAR AS last_period "
+                f"FROM finturk_metrics WHERE {where}", params).df().to_dict("records")
     finally:
         con.close()
 
@@ -607,7 +718,11 @@ def discover(query: str, source=None, limit: int = 8):
                 candidate[field_name] = None
         if isinstance(candidate.get("currencies"), str):
             candidate["currencies"] = candidate["currencies"].split(",")
-        candidate["score"] = _score(candidate, terms)
+    # Read off the question as asked, before the source words were stripped:
+    # "il bazında" is both a source filter and the reason a FinTurk row ranks.
+    province_named = wanted == {"finturk"} or names_a_province(query)
+    for candidate in pooled:
+        candidate["score"] = _score(candidate, terms, province_named)
 
     scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
 
@@ -629,12 +744,20 @@ def discover(query: str, source=None, limit: int = 8):
             # slice of it. Rank the question as written.
             currency, sliced = None, []
             for candidate in pooled:
-                candidate["score"] = _score(candidate, plain_terms)
+                candidate["score"] = _score(candidate, plain_terms, province_named)
             scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
         if sliced:
             for candidate in sliced:
                 candidate["currency"] = currency
             scored = [c for c in scored if c.get("currency") == currency or not c.get("currencies")]
+
+    # The province, like the currency, rides on the candidate that can use
+    # it: every FinTurk row publishes every province, so the slice is a
+    # filter for the fetch, never a reason to drop a candidate.
+    if province:
+        for candidate in scored:
+            if candidate["source"] == "finturk":
+                candidate["province"] = province
 
     # One concept, ranked by score alone.
     #
@@ -655,6 +778,7 @@ def discover(query: str, source=None, limit: int = 8):
     ranked = scored[:limit]
 
     return {"query": query, "terms_used": [t for t, _ in terms], "currency": currency,
+            "province": province,
             "sources": sorted(named_sources) if named_sources else None,
             "n_candidates": len(ranked), "candidates": ranked}
 

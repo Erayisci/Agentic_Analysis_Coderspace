@@ -136,6 +136,17 @@ def for_weekly_item(name: str, parent_name: Optional[str], dataset: Optional[str
                    UNIT_WORDS["milyon TL"], "bilgi amaçlı" if is_informational else None)
 
 
+def for_finturk_metric(metric_name: str, dataset: Optional[str], table_title: Optional[str],
+                       unit: Optional[str]) -> str:
+    """A FinTurk (il-bazli) metric. The grain words are the load-bearing part:
+    a question that says "il", "şehir" or "bölge" is asking for this corpus
+    and nothing else publishes a province split, while a question that does
+    not is almost never asking for a quarterly, province-summed figure the
+    monthly bulletin publishes better."""
+    return compose(metric_name, _humanise(dataset), table_title,
+                   "il bazlı iller şehir bölge çeyreklik", UNIT_WORDS.get(unit or ""))
+
+
 def searchable(text: str) -> str:
     """The folded form the lexical search actually greps.
 

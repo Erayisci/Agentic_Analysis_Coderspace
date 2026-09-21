@@ -3,11 +3,12 @@
 This is the seam every analytical tool goes through, so the domain rules that
 would otherwise have to be re-learned by each of them live here once:
 
-- **Source routing.** The lakehouse holds three fact tables with three grains
-  and three key vocabularies (`bulletin_observations` keyed on
+- **Source routing.** The lakehouse holds four fact tables with four grains
+  and four key vocabularies (`bulletin_observations` keyed on
   dataset+entity_key, `weekly_observations` on BDDK's item id,
-  `macro_observations` on an EVDS series_code). A tool should name a series,
-  not know which table it came from.
+  `macro_observations` on an EVDS series_code, `finturk_observations` on a
+  dataset+metric pair further sliced by province). A tool should name a
+  series, not know which table it came from.
 - **Cumulative series.** `kar_zarar` is year-to-date and resets every January.
   Differencing `value` across that reset produces a large negative number that
   means nothing, so a cumulative series is served from `value_flow` -- the
@@ -27,10 +28,18 @@ import duckdb
 import pandas as pd
 
 from ..core.config import DUCKDB_PATH
+from ..core.labels import slugify
 from ..domain.weekly_tables import BY_SLUG as WEEKLY_TABLES
 
-SOURCES = ("bulletin", "weekly", "macro")
+SOURCES = ("bulletin", "weekly", "macro", "finturk")
 CUMULATIVE = "cumulative_ytd"
+
+# FinTurk's taraf (bank-group) dimension is not exposed as a caller filter,
+# the same way the monthly bulletin pins taraf=10001 without letting a caller
+# pick a bank group: 10001 is the whole sector, and adding a taraf parameter
+# here would grow the Step DSL for a filter nothing has asked for yet.
+FINTURK_TARAF = 10001
+FINTURK_EXCLUDED_PROVINCE = "YURT DIŞI"
 
 # When a bulletin entity publishes several measures and the caller named none,
 # this is the order of preference. "balance" and "toplam" are the headline
@@ -42,7 +51,7 @@ class SeriesResult(NamedTuple):
     """One series plus everything needed to describe it truthfully."""
 
     values: pd.Series           # float, indexed by period (ascending, unique)
-    source: str                 # bulletin | weekly | macro
+    source: str                 # bulletin | weekly | macro | finturk
     key: str                    # entity_key or series_code
     name: str                   # human-readable label, as published
     unit: str
@@ -51,6 +60,7 @@ class SeriesResult(NamedTuple):
     dataset: Optional[str] = None
     currency: Optional[str] = None
     metric: Optional[str] = None
+    province: Optional[str] = None      # finturk only -- None means summed across provinces
 
     @property
     def period_start(self) -> str:
@@ -63,12 +73,23 @@ class SeriesResult(NamedTuple):
     def citation(self) -> dict:
         """Provenance for one series, for the trust layer to quote verbatim."""
         table = {"bulletin": "bulletin_observations", "weekly": "weekly_observations",
-                 "macro": "macro_observations"}[self.source]
-        filters = {"dataset": self.dataset, "entity_key" if self.source != "macro" else "series_code": self.key,
-                   "currency": self.currency, "metric": self.metric}
+                 "macro": "macro_observations", "finturk": "finturk_observations"}[self.source]
+        if self.source == "macro":
+            key_field, filters = "series_code", {"currency": self.currency, "metric": self.metric}
+        elif self.source == "finturk":
+            # Every filter here is a real WHERE clause, so the citation's SQL
+            # reproduces the column as written; the national sum is stated
+            # as `aggregate`, not smuggled in as a fake province value.
+            key_field, filters = "metric", {"taraf_code": FINTURK_TARAF, "province": self.province}
+        else:
+            key_field, filters = "entity_key", {"currency": self.currency, "metric": self.metric}
+        filters = {"dataset": self.dataset, key_field: self.key, **filters}
+        aggregate = (f"SUM(value) over every province except '{FINTURK_EXCLUDED_PROVINCE}'"
+                     if self.source == "finturk" and not self.province else None)
         return {
             "table": table,
             "filters": {k: v for k, v in filters.items() if v is not None},
+            **({"aggregate": aggregate, "exclude": {"province": FINTURK_EXCLUDED_PROVINCE}} if aggregate else {}),
             "value_column": self.value_column,
             "unit": self.unit,
             "temporal_semantics": self.temporal_semantics,
@@ -82,6 +103,7 @@ class SeriesResult(NamedTuple):
         return {"source": self.source, "key": self.key, "name": self.name, "unit": self.unit,
                 "temporal_semantics": self.temporal_semantics, "value_column": self.value_column,
                 "dataset": self.dataset, "currency": self.currency, "metric": self.metric,
+                "province": self.province,
                 "period_start": self.period_start, "period_end": self.period_end,
                 "n_points": int(len(self.values))}
 
@@ -217,6 +239,68 @@ def _macro(con, key, start, end, column):
                        monthly_rule=meta.monthly_rule, native_frequency=meta.native_frequency)
 
 
+def _finturk(con, key, dataset, province, start, end):
+    if not dataset:
+        matches = con.execute(
+            "SELECT DISTINCT dataset FROM finturk_metrics WHERE metric = ?", [key]
+        ).df().dataset.tolist()
+        if not matches:
+            raise ValueError(f"no FinTurk metric with metric={key!r}; search finturk_metrics first")
+        if len(matches) > 1:
+            raise ValueError(f"metric={key!r} exists in {matches}; pass dataset= to disambiguate")
+        dataset = matches[0]
+
+    meta = con.execute(
+        "SELECT metric_name, unit, temporal_semantics FROM finturk_metrics "
+        "WHERE dataset = ? AND metric = ?", [dataset, key]
+    ).df()
+    if meta.empty:
+        raise ValueError(f"no FinTurk metric dataset={dataset!r} metric={key!r}")
+    meta = meta.iloc[0]
+
+    if province:
+        # Naive `.strip().upper()` is the exact trap `core.labels.slugify`'s
+        # docstring warns about elsewhere in this codebase: Python's `.upper()`
+        # turns 'istanbul' into 'ISTANBUL', not the DB's 'İSTANBUL' -- so a
+        # model or user typing the ASCII-only "Istanbul" would silently get
+        # zero rows. Resolve through the slug instead, the same way
+        # `bulletin_entities.entity_key` is matched case-safely.
+        provinces = con.execute("SELECT DISTINCT province FROM finturk_observations").df().province.tolist()
+        by_slug = {slugify(p): p for p in provinces}
+        resolved = by_slug.get(slugify(province))
+        if resolved is None:
+            raise ValueError(f"unknown FinTurk province {province!r}; known provinces: {sorted(provinces)}")
+        province = resolved
+        sql = ("SELECT period, value FROM finturk_observations "
+               "WHERE dataset = ? AND metric = ? AND taraf_code = ? AND province = ?")
+        params = [dataset, key, FINTURK_TARAF, province]
+        sql, params = _window(sql, params, start, end)
+        name = f"{meta.metric_name} ({province})"
+    else:
+        # No province named: the national figure, summed across every province.
+        # There is no published Türkiye-wide row in this product (see
+        # domain.finturk_tables) -- this is the only way to one, and "YURT
+        # DIŞI" (customers booked abroad) is excluded from it on purpose.
+        # A RATIO cannot be summed: 81 provincial NPL ratios added up read
+        # "%266", which is what this returned once. The national ratio is
+        # the monthly bulletin's `rasyolar` table, not this product.
+        if meta.temporal_semantics == "ratio" or str(meta.unit).strip() == "%":
+            raise ValueError(
+                f"FinTurk metric {key!r} ({meta.metric_name}) is a ratio and cannot be summed across "
+                "provinces; name a province, or use the monthly bulletin's rasyolar table for Türkiye")
+        sql = ("SELECT period, sum(value) AS value FROM finturk_observations "
+               "WHERE dataset = ? AND metric = ? AND taraf_code = ? AND province != ?")
+        params = [dataset, key, FINTURK_TARAF, FINTURK_EXCLUDED_PROVINCE]
+        sql, params = _window(sql, params, start, end)
+        sql += " GROUP BY period"
+        name = f"{meta.metric_name} (Türkiye)"
+
+    frame = con.execute(sql + " ORDER BY period", params).df()
+    return frame, dict(name=name, unit=meta.unit, semantics=meta.temporal_semantics,
+                       value_column="value", dataset=dataset, currency=None, metric=key,
+                       province=province)
+
+
 def load_series(
     key: str,
     source: str = "bulletin",
@@ -228,15 +312,18 @@ def load_series(
     cumulative_as: str = "flow",
     include_retired: bool = False,
     column: str = "value",
+    province: Optional[str] = None,
 ) -> SeriesResult:
     """One series from the lakehouse as a `SeriesResult`.
 
     Args:
-        key: `entity_key` for bulletin/weekly, `series_code` for macro.
+        key: `entity_key` for bulletin/weekly, `series_code` for macro,
+            `metric` for finturk.
         source: which corpus -- "bulletin" (monthly BDDK), "weekly" (BDDK weekly
-            bulletin, observed on Fridays), or "macro" (TCMB EVDS, monthly grain).
-        dataset: required only when an `entity_key` is ambiguous across the 17
-            monthly tables; inferred from `bulletin_entities` otherwise.
+            bulletin, observed on Fridays), "macro" (TCMB EVDS, monthly grain),
+            or "finturk" (BDDK il-bazli, quarterly).
+        dataset: required only when a key is ambiguous across tables of the same
+            source; inferred from the source's own index table otherwise.
         currency: "total" (TL+FX) by default. Pass None for tables that publish
             no currency split; an entity that does publish one is never returned
             unfiltered, because summing TL, FX and total triple-counts.
@@ -245,6 +332,8 @@ def load_series(
         include_retired: read a superseded weekly definition on purpose.
         column: macro only -- "value" follows the series' own monthly_rule;
             "value_last" / "value_avg" override it (month-end FX vs average rate).
+        province: finturk only. None sums every province (there is no published
+            national total row in this product); naming one il filters to it.
 
     Raises ValueError when nothing matches, when the key is ambiguous, or when a
     filter contradicts what the series publishes -- a typo must fail loudly
@@ -261,6 +350,8 @@ def load_series(
             frame, meta = _bulletin(con, key, dataset, currency, metric, start, end, cumulative_as)
         elif source == "weekly":
             frame, meta = _weekly(con, key, currency, metric, start, end, include_retired)
+        elif source == "finturk":
+            frame, meta = _finturk(con, key, dataset, province, start, end)
         else:
             frame, meta = _macro(con, key, start, end, column)
     finally:
@@ -280,4 +371,5 @@ def load_series(
         values=values, source=source, key=key, name=meta["name"], unit=meta["unit"],
         temporal_semantics=meta["semantics"], value_column=meta["value_column"],
         dataset=meta["dataset"], currency=meta["currency"], metric=meta["metric"],
+        province=meta.get("province"),
     )

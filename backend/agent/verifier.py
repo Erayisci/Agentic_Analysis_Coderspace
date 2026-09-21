@@ -92,9 +92,18 @@ def verify(session: Session) -> Dict[str, Any]:
     empty = [c for c in artifact.frame.columns if artifact.frame[c].dropna().empty]
     record("no_empty_columns", not empty, f"all-null columns: {empty}" if empty else "no empty columns")
 
-    incomplete = {c: round(float(artifact.frame[c].isna().mean()), 3)
-                  for c in artifact.frame.columns
-                  if artifact.frame[c].isna().mean() > MAX_MISSING_SHARE}
+    # A quarterly series on the monthly grid is empty eight months in twelve
+    # by construction, not by omission: its coverage is judged on the
+    # quarter-end months it can publish. Only FinTurk is quarterly today;
+    # EVDS quarterly series are already aligned by the build.
+    def _missing_share(column: str) -> float:
+        values = artifact.frame[column]
+        if artifact.lineage[column].source == "finturk":
+            values = values[values.index.month.isin((3, 6, 9, 12))]
+        return float(values.isna().mean()) if len(values) else 0.0
+
+    incomplete = {c: round(_missing_share(c), 3)
+                  for c in artifact.frame.columns if _missing_share(c) > MAX_MISSING_SHARE}
     record("coverage_is_complete", not incomplete,
            f"columns with gaps: {incomplete}" if incomplete else "no material gaps",
            severity="warning")
@@ -140,7 +149,7 @@ def _summarise(checks: List[Dict[str, Any]], session: Session) -> Dict[str, Any]
     return report
 
 
-FACT_TABLES = ("bulletin_observations", "weekly_observations", "macro_observations")
+FACT_TABLES = ("bulletin_observations", "weekly_observations", "macro_observations", "finturk_observations")
 
 # Tags the narrative cites: K = kaynak (a lakehouse series or an external
 # file), H = hesaplama (a transform, find_periods or analyze result over K's),
@@ -155,12 +164,20 @@ def _sql_for(citation: Dict[str, Any]) -> Optional[str]:
     table = citation.get("table")
     if table not in FACT_TABLES:
         return None
-    where = " AND ".join(f"{k} = '{v}'" for k, v in (citation.get("filters") or {}).items())
+    where = " AND ".join(f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}"
+                         for k, v in (citation.get("filters") or {}).items())
+    for k, v in (citation.get("exclude") or {}).items():
+        where += f" AND {k} <> '{v}'"
     if citation.get("period_start") and citation.get("period_end"):
         where += f" AND period BETWEEN '{citation['period_start']}' AND '{citation['period_end']}'"
     value = citation.get("value_column") or "value"
     # macro_observations carries no unit column; the unit lives in macro_series.
     unit = ", unit" if table != "macro_observations" else ""
+    if citation.get("aggregate"):
+        # A FinTurk national figure is a sum over provinces -- there is no
+        # published Türkiye row -- so the reproduction groups by period.
+        return (f"SELECT period, SUM({value}) AS value{', any_value(unit) AS unit' if unit else ''} "
+                f"FROM {table} WHERE {where} GROUP BY period ORDER BY period")
     return f"SELECT period, {value} AS value{unit} FROM {table} WHERE {where} ORDER BY period"
 
 
@@ -281,11 +298,12 @@ def _analysis_detail(method: str, result: Dict[str, Any], inputs: List[str]) -> 
                 f"{result.get('n_anomalies', '?')} ay: {months or '-'}")
     if method == "changepoint":
         breaks = "; ".join(
-            f"{b['period']} ({b.get('before_mean')} -> {b.get('after_mean')}, "
-            f"{b.get('shift'):+} {b.get('shift_unit', '')})" if isinstance(b, dict) else str(b)
-            for b in (result.get("breakpoints") or [])[:4])
-        return (f"analyze · changepoint · {result.get('method', 'PELT')} · {span} · {girdi} · "
-                f"{result.get('n_breakpoints', '?')} kirilma: {breaks or '-'}")
+            f"{b['period']} ({b.get('before')} -> {b.get('after')}, {b.get('shift', 0):+} {b.get('shift_unit', '')}, "
+            f"{b.get('confidence', '?')}{', cok yeni' if b.get('recent') else ''})"
+            for b in (result.get("breaks") or [])[:4])
+        return (f"analyze · changepoint · {result.get('kind', '?')} · {result.get('method', 'PELT')} · "
+                f"{span} · {girdi} · {result.get('n_breakpoints', '?')} kirilma: {breaks or '-'}"
+                + (f" · uyari: {' | '.join(result['warnings'])}" if result.get("warnings") else ""))
     if method == "causality":
         dirs = " · ".join(f"{name} p={d.get('p_value')}" for name, d in (result.get("directions") or {}).items())
         return (f"analyze · causality · Granger, {'fark' if result.get('differenced') else 'seviye'} serileri · "

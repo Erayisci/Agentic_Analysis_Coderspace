@@ -409,7 +409,14 @@ def readiness():
     except importlib.metadata.PackageNotFoundError:
         return False
     base = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache/ms-playwright")))
+    # Playwright's headless-shell distributable is laid out differently per
+    # host architecture: x86_64 ships chrome-headless-shell-linux*/chrome-headless-shell,
+    # while arm64 (Apple Silicon Docker builds) ships chrome-linux/headless_shell
+    # instead -- measured on this project's own arm64 image, which the
+    # x86_64-only pattern silently never matched, leaving the crawler
+    # permanently "unavailable" regardless of how long it is given to start.
     browsers = list(base.glob("chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell"))
+    browsers += list(base.glob("chromium_headless_shell-*/chrome-linux/headless_shell"))
     for path in browsers:
         if not os.access(path, os.X_OK):
             continue

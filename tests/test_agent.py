@@ -190,6 +190,7 @@ def test_the_plan_schema_is_flat_enough_for_guided_decoding():
     ("macro/TP.KTF12", "TP.KTF12"),
     ("TP.KTF12", "TP.KTF12"),
     ("mevduat_katilim_fonu/b_vadeli_mevduat", "mevduat_katilim_fonu/b_vadeli_mevduat"),
+    ("finturk/bireysel_bankacilik/konut_kredisi", "konut_kredisi"),
 ])
 def test_key_normalisation_strips_only_a_source_prefix(raw, expected):
     """A parent/child bulletin key legitimately contains a slash; a model
@@ -684,9 +685,12 @@ def test_an_invalid_step_is_dropped_rather_than_failing_the_plan():
         {"op": "analyze", "method": "causality"},
         {"op": "find_periods", "column": "faiz", "direction": "down"},
     ]})
-    assert [s.op for s in plan.steps] == ["fetch_series", "find_periods"]
+    # The analyze step with no column is not dropped: the fetch before it
+    # put "faiz" on the table, and `_fill_analyze_columns` takes that.
+    assert [s.op for s in plan.steps] == ["fetch_series", "analyze", "find_periods"]
+    assert plan.steps[1].column == "faiz"
     assert "dropped invalid step(s)" in plan.reasoning
-    assert "transform" in plan.reasoning and "analyze" in plan.reasoning
+    assert "transform" in plan.reasoning and "analyze" not in plan.reasoning
 
     with pytest.raises(ValueError, match="at least one step"):
         Plan.model_validate({"intent": "series_analysis", "steps": [{"op": "analyze"}]})
@@ -1266,3 +1270,300 @@ def test_an_exchange_rate_changes_in_percent_not_points_and_is_not_a_monetary_un
 ])
 def test_qualified_years_resolve_to_months(question, expected):
     assert extract_window(question) == expected
+
+
+# --- FinTurk (il-bazli) through the executor ----------------------------------
+
+def test_fetch_series_loads_a_finturk_metric_for_one_province():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk",
+             dataset="bireysel_bankacilik", province="İSTANBUL", as_name="konut_istanbul"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    lineage = session.artifact.lineage["konut_istanbul"]
+    assert lineage.source == "finturk" and lineage.unit == "bin TL"
+    assert lineage.citation["filters"]["province"] == "İSTANBUL"
+    assert len(session.artifact.frame) == 22          # 2021-Q1..2026-Q2
+
+
+def test_fetch_series_resolves_a_finturk_province_case_and_dotless_i_safely():
+    """Python's plain `.upper()` turns 'istanbul' into 'ISTANBUL', not the DB's
+    'İSTANBUL' -- a model or user typing the ASCII-only spelling would
+    otherwise get a silent 'no rows' failure for one of the most-asked
+    provinces. See tools.series._finturk, which resolves through
+    core.labels.slugify instead of a naive case-fold."""
+    needs_lakehouse()
+    for spelling in ("Istanbul", "istanbul", "İstanbul", "ISTANBUL"):
+        plan = Plan(intent="series_analysis", steps=[
+            Step(op="fetch_series", key="konut_kredisi", source="finturk",
+                 dataset="bireysel_bankacilik", province=spelling, as_name="konut"),
+        ])
+        session = Executor(Session()).run(plan)
+        assert session.audit[-1].ok, f"{spelling!r}: {session.audit[-1].detail}"
+        assert session.artifact.lineage["konut"].citation["filters"]["province"] == "İSTANBUL"
+
+
+def test_fetch_series_sums_provinces_for_a_finturk_metric_without_one_and_its_sql_reproduces_it():
+    """There is no published Türkiye row in FinTurk, so the national figure is
+    a sum over provinces -- and the citation's SQL must say so and reproduce
+    the column, or the [K] tag is decorative."""
+    needs_lakehouse()
+    from backend.agent.verifier import source_map
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk",
+             dataset="bireysel_bankacilik", as_name="konut_turkiye"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    lineage = session.artifact.lineage["konut_turkiye"]
+    assert "Türkiye" in lineage.label and "province" not in lineage.citation["filters"]
+    assert lineage.citation["aggregate"]
+    session.focus()
+    sql = next(s["sql"] for s in source_map(session).values() if s.get("column") == "konut_turkiye")
+    assert "GROUP BY period" in sql and "YURT DIŞI" in sql
+    with duckdb.connect(str(DUCKDB_PATH), read_only=True) as con:
+        reproduced = con.execute(sql).df().set_index("period")["value"]
+    reproduced.index = pd.to_datetime(reproduced.index)
+    pd.testing.assert_series_equal(reproduced.sort_index(), session.artifact.frame["konut_turkiye"],
+                                   check_names=False, check_freq=False, check_dtype=False)
+
+
+def test_discover_prefers_the_bulletin_line_unless_a_province_is_named():
+    """FinTurk republishes many bulletin concepts quarterly by province. A plain
+    "konut kredisi" is the monthly national line; "İstanbul'da konut kredisi"
+    is the FinTurk row, and nothing else can answer it."""
+    needs_lakehouse()
+    plain = discover("konut kredisi", limit=5)["candidates"]
+    assert plain[0]["source"] != "finturk"
+    by_province = discover("İstanbul'da konut kredisi", limit=5)["candidates"]
+    assert by_province[0]["source"] == "finturk", [c["key"] for c in by_province]
+    by_grain = discover("il bazında konut kredisi", limit=5)
+    assert by_grain["sources"] == ["finturk"]
+    assert all(c["source"] == "finturk" for c in by_grain["candidates"])
+
+
+# --- causality routing: the branch's failure modes, guarded here --------------
+
+def _synthetic_rate_and_loan(seed: int, n: int = 100):
+    """rate[t-2] contributes to loan[t], so rate should Granger-predict loan."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2018-01-01", periods=n, freq="MS")
+    rate = rng.normal(size=n)
+    loan = rng.normal(scale=0.3, size=n)
+    for t in range(2, n):
+        loan[t] += 0.8 * rate[t - 2]
+
+    artifact = AnalysisArtifact()
+    artifact.add_column("rate", pd.Series(rate, index=index),
+                        ColumnLineage(column="rate", label="Rate", source="macro",
+                                      unit="%", temporal_semantics="rate", key="rate"))
+    artifact.add_column("loan", pd.Series(loan, index=index),
+                        ColumnLineage(column="loan", label="Loan", source="bulletin",
+                                      unit="milyon TL", temporal_semantics="stock", key="loan"))
+    return artifact
+
+
+def test_executor_runs_causality_on_artifact_columns_and_names_the_direction():
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="analyze", method="causality", column="loan", against="rate"),
+    ])
+    session = Executor(Session(artifact=_synthetic_rate_and_loan(123))).run(plan)
+    assert session.audit[0].ok, session.audit[0].detail
+    result = session.facts["analysis"]["causality:loan~rate"]
+    assert result["cause"] == "rate" and result["effect"] == "loan"
+    assert result["directions"]["rate->loan"]["predictive"]
+    assert result["verdict"] in ("predictor->target", "both")
+    assert result["lead_lag"]["strongest"]["lag"] == 2
+
+
+def test_deterministic_summary_states_a_causality_result():
+    from backend.agent.composer import deterministic_summary
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="analyze", method="causality", column="loan", against="rate"),
+    ])
+    session = Executor(Session(artifact=_synthetic_rate_and_loan(321))).run(plan)
+    session.focus()
+    summary = deterministic_summary(session, "Faiz kredileri etkiliyor mu?")
+    assert "Granger testi" in summary and "nedensellik kaniti degildir" in summary
+
+
+@pytest.mark.parametrize("question", [
+    "Konut kredisi faizi konut kredisi hacmini etkiliyor mu?",
+    "Faiz ile kredi arasinda neden-sonuc iliskisi var mi?",
+    "Faizin krediyi etkilediğini söyleyebilir miyiz?",
+    "Politika faizi konut kredileri icin oncu gosterge mi?",
+])
+def test_the_router_reads_the_causality_phrasings_the_model_used_to_miss(question):
+    """Measured live: these phrasings fetched both series and only charted
+    them. The words are the signal; `apply_analysis` then guarantees the step."""
+    assert route(question, client=None).wants_analysis == ["causality"]
+
+
+class _StubPlanClient:
+    """A fake KloudeksClient that returns one fixed plan, for testing the
+    repairs make_plan applies to whatever the model handed back."""
+
+    def __init__(self, plan: Plan):
+        self._plan = plan
+
+    def structured(self, messages, schema, max_tokens=1400, **kwargs):
+        return self._plan
+
+
+def test_make_plan_falls_back_when_the_model_only_discovers_and_stops():
+    """Measured live: a model handed a fresh question sometimes emits a
+    single `discover` step and stops, rather than committing to the fetch it
+    already found candidates for -- a plan that is *valid* (discover needs
+    only `query`) but produces an empty table, which is a worse failure than
+    no fallback at all. make_plan treats it the same as an unreachable model,
+    and the analysis guarantee then applies on top of the recovered plan."""
+    needs_lakehouse()
+    from backend.agent.pipeline import apply_analysis, make_plan
+    question = "Konut kredisi faizi konut kredisi hacmini etkiliyor mu?"
+    dead_end = Plan(intent="series_analysis", steps=[Step(op="discover", query="konut kredisi hacmi")])
+    route_result = route(question, has_artifact=False, client=None)
+    plan = make_plan(question, Session(), route_result, _StubPlanClient(dead_end))
+    assert any(step.op == "fetch_series" for step in plan.steps)
+    assert "replaced" in plan.reasoning
+    # The recovered plan gets the same analysis guarantee as any other. For
+    # this phrasing discovery ranks only rate series for the one clause (the
+    # loan book is not in its top eight -- "hacmi" is a word no row carries),
+    # so the pair cannot be formed and the caveat path reports it instead of
+    # a test between two interest rates.
+    plan = apply_analysis(plan, route_result, Session())
+    fetched = [s for s in plan.steps if s.op == "fetch_series"]
+    has_pair = len(fetched) >= 2
+    assert any(s.op == "analyze" and s.method == "causality" for s in plan.steps) == has_pair
+    if not has_pair:
+        session = Session()
+        session.facts["wants_analysis"] = ["causality"]
+        session.artifact = synthetic("faiz")
+        assert any("istenen analiz calismadi: causality" in c for c in verify(session)["caveats"])
+
+
+def test_make_plan_keeps_a_discover_only_plan_for_a_followup_with_an_existing_table():
+    """The dead-end repair is for a *fresh* question with nothing to show for
+    it -- a follow-up that already has a table is not a dead end just because
+    this particular step only re-discovers a key."""
+    needs_lakehouse()
+    from backend.agent.pipeline import make_plan
+    dead_end = Plan(intent="followup", steps=[Step(op="discover", query="ek bir seri")])
+    session = Session(artifact=synthetic("konut"))
+    route_result = route("ek bir seri bul", has_artifact=True, client=None)
+    plan = make_plan("ek bir seri bul", session, route_result, _StubPlanClient(dead_end))
+    assert plan.steps == dead_end.steps
+
+
+def test_an_analyze_step_without_a_column_takes_the_last_fetched_one():
+    """Small models reliably forget `column` right after fetching the very
+    series they mean; the plan fills it from the most recent producing step."""
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin", as_name="konut"),
+        Step(op="analyze", method="anomaly"),
+    ])
+    assert plan.steps[-1].column == "konut"
+    keyed = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="TP.KTF12", source="macro"),
+        Step(op="analyze", method="changepoint"),
+    ])
+    assert keyed.steps[-1].column == "TP.KTF12"
+
+
+def test_an_analyze_step_with_no_column_and_nothing_before_it_is_dropped_not_fatal():
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="analyze", method="anomaly"),
+        Step(op="discover", query="konut"),
+    ])
+    assert [s.op for s in plan.steps] == ["discover"]
+    assert "dropped invalid step" in plan.reasoning
+
+
+def test_a_changepoint_result_marks_its_breaks_on_the_chart():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="analyze", method="changepoint", column="faiz"),
+        Step(op="chart"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert all(a.ok for a in session.audit), [a.detail for a in session.audit if not a.ok]
+    result = session.facts["analysis"]["changepoint:faiz"]
+    assert result["kind"] == "level" and "2023-07" in result["breakpoints"]
+    assert result["breaks"][0]["shift_unit"] == "puan" and "2023-07" in result["description"]
+    assert result["period_start"] == "2021-01"        # full history, not the plan window
+    shapes = session.facts["figure"]["layout"]["shapes"]
+    assert any(s["x0"].startswith("2023-07") for s in shapes)
+    assert "break marker" in session.audit[-1].detail
+
+
+# --- a province is a dimension, like a currency -------------------------------
+
+@pytest.mark.parametrize("question, expected", [
+    ("2021'den itibaren", ("2021-01-01", None)),
+    ("2024'e kadar", (None, "2024-12-01")),
+    ("2021'den 2024'e kadar", ("2021-01-01", "2024-12-01")),
+    ("2021 sonundan itibaren", ("2021-12-01", None)),
+    ("2023 yilinda", ("2023-01-01", "2023-12-01")),
+])
+def test_extract_window_reads_the_case_suffix_on_a_bare_year(question, expected):
+    """"2021'den itibaren" once read as the calendar year 2021 and returned
+    twelve months for an open-ended question."""
+    assert extract_window(question) == expected
+
+
+def test_discover_peels_the_province_off_the_concept_and_tags_the_finturk_row():
+    needs_lakehouse()
+    from backend.tools.lakehouse import extract_province
+    assert extract_province("İstanbul'daki takipteki alacaklar oranı") == ("İSTANBUL", "takipteki alacaklar oranı")
+    assert extract_province("İzmirdeki mevduat") == ("İZMİR", "mevduat")
+    assert extract_province("İstanbul ve Ankara mevduat")[0] is None      # two provinces: not a slice
+    found = discover("İstanbul'daki takipteki alacaklar oranı", limit=3)
+    assert found["province"] == "İSTANBUL" and "istanbul" not in " ".join(found["terms_used"])
+    top = found["candidates"][0]
+    assert top["source"] == "finturk" and top["province"] == "İSTANBUL"
+    assert all(c.get("province") is None for c in found["candidates"] if c["source"] != "finturk")
+
+
+def test_a_finturk_ratio_is_never_summed_across_provinces():
+    """81 provincial NPL ratios added up read "%266" once. The national ratio
+    lives in the monthly bulletin's rasyolar table, not in this product."""
+    needs_lakehouse()
+    with pytest.raises(ValueError, match="ratio and cannot be summed"):
+        load_series("takipteki_alacaklar_toplam_nakdi_kredi_orani", source="finturk", dataset="oranlar",
+                    currency=None)
+    named = load_series("takipteki_alacaklar_toplam_nakdi_kredi_orani", source="finturk", dataset="oranlar",
+                        currency=None, province="İstanbul")
+    assert named.unit == "%" and named.province == "İSTANBUL" and float(named.values.max()) < 100
+
+
+def test_apply_dimensions_puts_the_named_province_on_a_finturk_fetch():
+    from backend.agent.pipeline import apply_dimensions
+    discovery = {"candidates": [
+        {"source": "finturk", "key": "konut_kredisi", "dataset": "bireysel_bankacilik", "province": "ANKARA"},
+        {"source": "bulletin", "key": "tuketici_kredileri_konut", "dataset": "tuketici_kredileri"},
+    ], "by_concept": []}
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk", dataset="bireysel_bankacilik", as_name="konut_il"),
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin", as_name="konut_tr"),
+    ])
+    plan = apply_dimensions(plan, discovery)
+    assert plan.steps[0].province == "ANKARA" and plan.steps[1].province is None
+
+
+def test_a_province_question_runs_deterministically_against_the_bulletin_ratio():
+    """The FinTurk NPL ratio for one il beside the monthly bulletin's national
+    one: both in %, so no unit trap, and the il filter must reach the fetch."""
+    needs_lakehouse()
+    from backend.agent.pipeline import run_turn
+    question = ("İstanbul'daki takipteki alacaklar oranı ile BDDK aylık bültenindeki Türkiye geneli "
+                "takipteki alacaklar oranını 2021'den itibaren karşılaştır.")
+    result = run_turn(question, client=None, compose_answer=False)
+    fetched = {a["arguments"].get("key"): a["arguments"] for a in result["audit"] if a["op"] == "fetch_series"}
+    assert fetched["takipteki_alacaklar_toplam_nakdi_kredi_orani"]["province"] == "İSTANBUL"
+    assert "takipteki_alacaklar_brut_toplam_nakdi_krediler" in fetched
+    assert set(result["table"]["units"].values()) == {"%"}
+    assert result["route"]["start"] == "2021-01-01" and result["route"]["end"] is None
+    assert not any("mixed monetary units" in c for c in result["verification"]["caveats"])

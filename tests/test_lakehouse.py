@@ -281,10 +281,10 @@ def schema_card_queries():
 
 def test_schema_card_documents_the_query_patterns():
     queries = schema_card_queries()
-    assert len(queries) == 7, f"expected 7 worked examples, card has {len(queries)}"
+    assert len(queries) == 8, f"expected 8 worked examples, card has {len(queries)}"
 
 
-@pytest.mark.parametrize("n", range(7))
+@pytest.mark.parametrize("n", range(8))
 def test_every_schema_card_query_runs_and_returns_rows(connection, n):
     sql = schema_card_queries()[n]
     frame = connection.execute(sql).df()

@@ -82,3 +82,35 @@ def chart_summary(artifact: AnalysisArtifact, columns: Optional[List[str]] = Non
             "units": {c: artifact.lineage[c].unit for c in columns},
             "periods": f"{artifact.periods()[0]} .. {artifact.periods()[-1]}" if artifact.periods() else None,
             "n_periods": len(artifact.frame)}
+
+
+BREAK_COLOURS = {"solid": "#1f7a3a", "moderate": "#c98a00", "tentative": "#9a9a9a"}
+
+
+def mark_breaks(figure: Dict[str, Any], breaks_by_column: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Draw change-detection breaks on a figure built by `build_chart`: one
+    vertical dashed line per break (colour = confidence: green solid, amber
+    moderate, grey tentative) with a small label. Periods come as YYYY-MM
+    (monthly) or YYYY-MM-DD (weekly/daily); the chart's x values are always
+    YYYY-MM-DD, so a monthly period is anchored to the first of the month.
+    Returns the same dict, mutated, so it can be used in an expression.
+    """
+    layout = figure.setdefault("layout", {})
+    shapes = layout.setdefault("shapes", [])
+    annotations = layout.setdefault("annotations", [])
+    slot = 0
+    for column, breaks in breaks_by_column.items():
+        for brk in breaks:
+            period = brk["period"]
+            x = period if len(period) == 10 else f"{period}-01"
+            colour = BREAK_COLOURS.get(brk.get("confidence", "tentative"), "#9a9a9a")
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=x, x1=x, y0=0, y1=1,
+                               line=dict(color=colour, width=1.5, dash="dash")))
+            label = f'{column}: {period} · {brk.get("confidence", "")}'
+            if brk.get("recent"):
+                label += " · çok yeni"
+            annotations.append(dict(x=x, y=1.0 - 0.06 * (slot % 4), xref="x", yref="paper", text=label,
+                                    showarrow=False, xanchor="left", font=dict(size=10, color=colour),
+                                    bgcolor="rgba(255,255,255,0.7)"))
+            slot += 1
+    return figure

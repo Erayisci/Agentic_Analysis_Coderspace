@@ -22,6 +22,9 @@ The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 .venv/bin/python -m backend.ingestion.bddk_weekly --list            # the 9 weekly tables
 .venv/bin/python -m backend.ingestion.bddk_weekly --catalog --fetch # refresh the weekly archive
 .venv/bin/pytest tests/test_weekly.py -q    # weekly parser/validation; 3 lakehouse tests skip without a build
+.venv/bin/python -m backend.ingestion.bddk_finturk --list            # the 7 il-bazli (FinTürk) tables
+.venv/bin/python -m backend.ingestion.bddk_finturk --fetch           # refresh the FinTürk archive (2021-Q1..2026-Q2)
+.venv/bin/pytest tests/test_finturk.py -q   # FinTürk parser/label invariants; 4 lakehouse tests skip without a build
 .venv/bin/python -m backend.ingestion.bddk_bulletin --year 2021     # all 17 tables for a year
 .venv/bin/python -m backend.ingestion.bddk_bulletin --year 2026 --months 1-7 --tables 4,5
 .venv/bin/python -m backend.ingestion.riskmerkezi                   # refresh TBB Risk Merkezi files
@@ -51,12 +54,13 @@ agent's web-search backend. The in-process `backend/tools/web_url.py` stays the 
 and `KLOUDEKS_API_KEY` serves both the team client and the extension's own client (a second Kloudeks
 client under `backend/model_clients/` — unifying the two is open work).
 
-The four test files differ in what they need, and the difference is in the fixtures:
+The corpus test files differ in what they need, and the difference is in the fixtures:
 
 | File | Needs a build? |
 |---|---|
 | `tests/test_bulletin.py` | No — parses `bddk_aylik_bulten/_raw_json/` directly, runs on a bare clone |
 | `tests/test_weekly.py` | Mostly no — parses `bddk_haftalik_bulten/_raw/`; its 3 `connection` tests **skip** without `data/lakehouse.duckdb` |
+| `tests/test_finturk.py` | Mostly no — parses `bddk_finturk/_raw_json/`; its 4 `connection` tests **skip** without the database |
 | `tests/test_evds.py` | Mostly no — parses `evds/_raw_json/`; its 6 `connection` tests **skip** without the database |
 | `tests/test_lakehouse.py` | **Yes, hard** — its `connection` fixture calls `pytest.fail`, not `skip` |
 
@@ -74,6 +78,10 @@ for why the request matters.
 The endpoint response carries two fields the Excel rendering drops, and the parser cannot work without
 either: `colModels` (column names, so measures are found by name rather than position) and `BasitFont`
 (the only signal that separates the six different `a) Gerçek Kişiler` rows in the deposit tables).
+
+**`bddk_finturk/_raw_json/` is the source of truth for the FinTürk tables, and it is committed**
+(154 files, 7 tables × 22 quarters). Every cell already arrives as a JSON number, so unlike the
+bulletin archive there is no string-to-number coercion for the parser to depend on getting right.
 
 **`bddk_aylik_bulten/<NN>_<slug>/*.xlsx` is gitignored** — those workbooks are a rendering the downloader
 writes from the same HTTP response as the JSON, so committing both would mean two copies of one dataset
@@ -227,8 +235,68 @@ The brief's required corpus is **2021-01 through 2026-06**, and it is wider than
 | BDDK Aylık Bülten — all 17 tables | **built** (2021-01..2026-07), 135,513 observations |
 | TCMB EVDS — 44 data groups, 1,515 series | **built** (2021-01..2026-07), 158,179 native / 89,680 monthly rows |
 | BDDK Haftalık Bülten — all 9 tables | **built** (2021-01-08..2026-09-04), 163,740 observations |
-| BDDK FinTürk (İllere Göre) | not acquired |
+| BDDK FinTürk (İllere Göre) | **built** (2021-Q1..2026-Q2, 22 quarters), 905,620 observations |
 | TBB Risk Merkezi sectoral | built (2022-01..2026-06) — **supplementary, not required by the brief** |
+
+### BDDK FinTürk (il-bazlı / geographic distribution)
+
+A third BDDK release, separate from both bulletins: **quarterly** (Mar/Jun/Sep/Dec, not monthly
+or weekly) and broken down by **province** (81 iller + `YURT DIŞI`), not by balance-sheet line.
+Fetched from `POST https://www.bddk.org.tr/BultenFinturk/tr/Home/VeriGetir`, which returns the
+same JSON envelope shape as the monthly bulletin (`Json.colModels`, `colNames`,
+`data.rows[].cell`) but needs no session/CSRF handshake, unlike the weekly bulletin's
+`__RequestVerificationToken` dance. Measured live: `tarafList`/`sehirList` accept every value in
+one POST (repeated form keys, ASP.NET's ordinary `List<T>` binding), so the whole corpus is
+`7 tables × 22 quarters` = 154 requests, not that times 7 taraf groups times 82 provinces.
+
+7 tables (`krediler`, `mevduat`, `bireysel_bankacilik`, `sektorel_krediler`, `oranlar`,
+`subeler_ve_nufus`, `altin`), landing in `finturk_observations`:
+`period, source, dataset, province, taraf_code, taraf_name, metric, metric_name, value, unit`.
+
+**No column states an arithmetic formula** (unlike both bulletins' row labels), so there is no
+`formula`/`parent_key` here and nothing resembling `WEEKLY_FORMULA_OVERRIDES` — see
+`domain.finturk_tables` for why that is a fact about the source, not a gap in the parser.
+`taraf_code` 10001 (SEKTÖR) is the whole sector; 10002..10007 break it down by ownership
+(Mevduat, Kalkınma ve Yatırım, Katılım, Yabancı, Kamu, Yerli Özel) — summing all seven
+double-counts, since 10001 already IS their sum. **There is no published national-total row**;
+a Türkiye-wide figure is `SUM(value) GROUP BY period` over every province.
+
+The endpoint's PascalCase field ids (`colModels[i]['name']`, e.g. `AltinDepoGercek`) do not
+derive predictably from the Turkish label BDDK shows for the same column (`colNames[i]`,
+"Altın Mevduatı-Gerçek Kişi") — measured across all seven tables, so `domain.finturk_tables`
+does not hardcode either column list. The parser reads both straight out of each archived
+response and keys `metric` on `core.labels.slugify(colNames[i])`.
+
+`finturk_metrics` (76 rows, one per `(dataset, metric)`) is the discovery index, mirroring
+`bulletin_metrics`, and it carries the same `search_text` / `search_fold` the other three indexes
+do (`core.search_text.for_finturk_metric`, whose context words are the grain: "il bazlı iller şehir
+bölge çeyreklik"). `fetch_series`/`tools.series.load_series` carry the `province` dimension the
+fact table needs: naming an il (`Step.province`) filters to it, and leaving it out sums every
+province except `YURT DIŞI` — `taraf_code` is pinned to 10001 the same way the monthly bulletin
+pins its own `taraf`, and is not a caller-facing filter. A province is resolved through
+`core.labels.slugify`, because `'istanbul'.upper()` is `ISTANBUL` and the table says `İSTANBUL`.
+The citation of a summed column states `aggregate` and `exclude` instead of a fake province
+value, so the `[K]` legend's SQL reproduces it with a `GROUP BY period`.
+
+**FinTürk republishes many bulletin concepts, and discovery treats that as a grain question.**
+"Konut kredisi" found the FinTürk twin of the housing-loan line tied with the monthly one on the
+shared words; `tools.lakehouse._score` scales a FinTürk row's score by 0.4 unless the question
+names a province (the 81 names are read from the table once per process) or the grain ("il
+bazında", "şehir", "bölge"), and adds 4 when it does -- measured: a flat −6 left the twin first,
+and a +2 left "Ankara konut kredileri" on the bulletin line, because a city is a word no row holds.
+The benchmark's `finturk_konut_kredisi_il` and `finturk_nakdi_krediler_il` families pin this.
+
+**A province is a dimension, like a currency.** `extract_province` peels "İstanbul'daki" /
+"Ankara" / "İzmirdeki" (the 81 names with their case suffix) off the concept before search and
+returns it as `province` on every FinTürk candidate; `apply_dimensions` then puts it on every
+FinTürk fetch the plan wrote without one, so the model never has to carry a word no row's name
+contains. **A FinTürk ratio is never summed across provinces**: `load_series` refuses it with a
+message pointing at the bulletin's `rasyolar` table -- measured before the guard, 81 provincial NPL
+ratios added up to "%266". The verifier's coverage check judges a FinTürk column on the quarter-end
+months it can publish, or a quarterly series on the monthly grid reads as 67% missing. "İl bazında" / "illere göre" / "FinTürk" are
+also source words in `extract_sources`, narrowing the search to this corpus the way "haftalık"
+narrows it to the weekly bulletin. The planner prompt says the same in words: fill `province`
+when a city is named, and prefer the monthly bulletin series when none is.
 
 ### TCMB EVDS
 
@@ -536,18 +604,33 @@ real question, not a lead-lag one), skips the LLM classifier when it finds one, 
 `apply_presentation` gives charts. The executor fills a missing `against` deterministically and
 marks the result `against_auto`; `verify()` reports `requested_analyses_ran` as a caveat when a
 requested method produced nothing. Analysis facts are keyed `method:column~against` so two runs
-against different partners do not overwrite each other.
+against different partners do not overwrite each other. Two more repairs were measured against the
+live model on "faiz krediyi etkiliyor mu": it fetched both series and only charted them (the words
+now route to `causality`, and `apply_analysis` adds the step), and it wrote `analyze` with no
+`column` right after fetching the series it meant -- `Plan._fill_analyze_columns` takes the last
+producing step's name, and drops the step with a note when nothing precedes it. A model plan that
+only *discovers* on a fresh series question is a valid dead end, and `make_plan` replaces it with
+the deterministic series plan the way it would for an unreachable model.
 
 **The four analysis tools are pure functions in `backend/tools/`, and each result describes
 itself.** `anomaly` (rolling z AND IQR, baseline strictly *trailing* -- an inclusive window let a
 spike hide inside its own std and found nothing on the housing series where the trailing one finds
 2023-03 and 2024-10; scored by semantics: a rate's point difference, a stock's % change, a flow with
-a near-zero guard), `changepoint.py` (PELT l2 on the z-scored level, `pen = 2·ln n` so the count of
-breaks does not depend on the window length; each break carries before/after means and the shift
-in points or %), `causality.py` (Granger both directions, one lag by BIC instead of min-p over six,
-correlation on the *differences* -- on the demo pair −0.30 where the level correlation is +0.79
-and wrong in sign -- plus the sign of the lagged VAR coefficients and a cointegration p when both
-are I(1)), and `transforms.decompose_growth` (nominal +145%, KFE +1139% ⇒ real −80%, with a Turkish
+a near-zero guard; the maths is `tools/outliers.py`, shared with change detection so both agree on
+what an outlier is, and each flag is classified `spike` / `regime_start` / `undetermined` by what
+follows it), `change_detection.py` (PELT l2 on the standardised signal, `pen = k·ln n` so the count
+of breaks does not depend on the window length; `kind` = level for a rate or ratio, trend (growth
+per period) for a balance, volatility on request; every break is graded `solid` / `moderate` /
+`tentative` by how many of the three sensitivities agree on it, carries before/after values and the
+shift in points or %, and the last break is flagged `recent` when its regime is still too short to
+trust; the shared outlier rule runs first and caps a lone spike at the fence so it cannot hide a real
+break, while a `regime_start` is kept; a year-to-date series is refused; Turkish `warnings` name
+gaps, a gradual drift that a line explains as well as steps, and seasonality; `charts.mark_breaks`
+draws the breaks on a chart of the same column), `causality.py` (Granger both directions, one lag by
+BIC instead of min-p over six, correlation on the *differences* -- on the demo pair −0.30 where the
+level correlation is +0.79 and wrong in sign -- plus the sign of the lagged VAR coefficients, a
+cointegration p when both are I(1), the lead-lag correlation profile and a `limitations` list;
+`analyze_causality(cause, effect)` is the same computation for two Series), and `transforms.decompose_growth` (nominal +145%, KFE +1139% ⇒ real −80%, with a Turkish
 reading; a fact, not a column, so the protected demo table gains nothing). Anomaly and changepoint
 re-read the column's full lakehouse history with the currency/metric it was fetched with and put a
 weekly series on the monthly grain first; causality and decompose use the table's window. Every
@@ -638,20 +721,22 @@ points). Measured on the deposit question: TL share 35.5% → 65.1% and FX depos
 billion USD over 2021-12..2024-12 -- the answer the question was after.
 
 **Dates are parsed in Python.** `router.extract_window` reads "2021 sonundan 2024 sonuna kadar" as
-2021-12..2024-12, "başı"/"ortası"/"ilk yarısı" likewise, and a lone "2021 sonundan itibaren" as an
-open window from December; the model never guesses a month, and a plan that read "2021 sonu" as
+2021-12..2024-12, "başı"/"ortası"/"ilk yarısı" likewise, a lone "2021 sonundan itibaren" as an
+open window from December and a bare year's case suffix the same way ("2021'den itibaren" opens
+in January, "2024'e kadar" closes in December -- before this, "2021'den itibaren" was the calendar
+year 2021); the model never guesses a month, and a plan that read "2021 sonu" as
 January returned eleven months nobody asked for.
 
-**Discovery quality is a number, and the number is in `backend/eval/discovery_cases.yaml`.** 85
-phrasings of 20 concepts the corpus genuinely publishes — a synonym the regulator does not use, an
+**Discovery quality is a number, and the number is in `backend/eval/discovery_cases.yaml`.** 94
+phrasings of 22 concepts the corpus genuinely publishes — a synonym the regulator does not use, an
 abbreviation, English, a Turkish morphological variant, the concept named with its source —
 each with the key that answers it. `python -m backend.eval.run_discovery_eval --failures` prints
 `recall@1/@3/@8` plus, for every miss, whether the key was *found and ranked badly* or *never a
 candidate at all*: those are different defects with different fixes, and debugging them as one is
 how the ranking stayed a pile of anecdotes. `tests/test_discovery.py` pins the aggregate.
 
-    before this work   54.1 / 62.4 / 72.9   89.4% in pool
-    now                89.4 / 91.8 / 96.5    100% in pool
+    before this work   54.1 / 62.4 / 72.9   89.4% in pool   (85 phrasings)
+    now                89.4 / 91.5 / 96.8    100% in pool   (94, with the two FinTürk families)
 
 Three families still miss on individual phrasings and are left failing on purpose, because the fix
 would be an alias for that exact wording: adding one would raise the number without improving the
@@ -733,19 +818,22 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 ## Project stage
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
-tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 505 tests (15 of the web-tools extension's skip without its containers).
+tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the BDDK
+FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corpus (44 groups,
+2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables, 622 tests (15 of the
+web-tools extension's skip without its containers).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
-pipeline stages, and the brief's four data tools -- Lakehouse (discovery, typed fetches, `footnotes`),
+pipeline stages, and all six of the brief's tools -- Lakehouse (discovery, typed fetches, `footnotes`),
 Anomaly, Change Detection and Causality, each a pure function under `backend/tools/` with a
-self-describing result -- plus charts, `find_periods`, `decompose` (nominal = price × real) and the
-FastAPI service (`backend/api/main.py`) with a React frontend under `frontend/`. Web search is the
-optional `extensions/web_tools` SearXNG backend (off unless `WEB_TOOLS_ENABLED=true`); the **image path
-of the Web URL tool** still raises `NotImplementedError` (the extension holds an Unlimited-OCR client
-that is not wired to the agent). A ninth op, `ingest_external`, adds a column from an external
-Excel/CSV URL to the current session's table only (see "The agent layer" above) -- a team-added
-capability, not one of the brief's six named tools. Not yet written: Docker and deployment.
+self-describing result, Web URL (text/PDF/Excel/CSV/HTML and, through an injected `ocr` callable bound
+to `KloudeksClient.ocr` / the `Unlimited-OCR` model in `backend/api/main.py`, images; with no Kloudeks
+key the image path raises a `RuntimeError` naming the missing callable) -- plus charts,
+`find_periods`, `decompose` (nominal = price × real) and the FastAPI service (`backend/api/main.py`)
+with a React frontend under `frontend/`. Web search is the optional `extensions/web_tools` SearXNG
+backend (off unless `WEB_TOOLS_ENABLED=true`). A ninth op, `ingest_external`, adds a column from an
+external Excel/CSV URL to the current session's table only (see "The agent layer" above) -- a
+team-added capability, not one of the brief's six named tools. Not yet written: Docker and deployment.
 `backend/eval/scenarios.yaml` holds twelve scenarios, four of them analysis questions with golds
 measured on the real lakehouse (anomaly 2023-03, changepoint 2023-07, the differenced correlation
 −0.30, the −80% real decomposition); the deterministic floor runs every one of them because
@@ -756,6 +844,4 @@ producible from the lakehouse in SQL alone, and
 `tests/test_agent.py::test_the_reference_scenario_runs_from_a_hand_written_plan` proves the execution
 layer produces it with no model involved. If the second passes and a live turn still fails, the defect
 is in the prompt or the plan, not in the data or the tools — which is the point of having both.
-
-BDDK FinTürk (İllere Göre) remains unacquired.
 

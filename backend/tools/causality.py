@@ -29,11 +29,19 @@ Runs on the table's aligned window, not the full history: the relationship
 the question asks about is the one over the period it named. (The anomaly
 and changepoint tools fetch full history because they need a baseline; this
 one needs the pair as the user sees it.)
+
+Two entry points, one computation. `granger_both_directions` takes the
+artifact's frame and two column names, which is how the executor holds the
+pair; `analyze_causality` takes two Series with a candidate-cause /
+candidate-effect reading, validates them (duplicate periods, a constant
+series) and calls the same function. Both return the same dict, which also
+carries the lead-lag correlation profile and a `limitations` list so the
+result states its own caveats rather than leaving them to the composer.
 """
 import contextlib
 import io
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -41,6 +49,32 @@ import pandas as pd
 MIN_OBSERVATIONS = 24
 ADF_ALPHA = 0.05
 GRANGER_ALPHA = 0.05
+
+LIMITATIONS = [
+    "Granger causality measures predictive precedence, not structural causation.",
+    "Omitted variables may explain an observed relationship.",
+    "Results depend on the available sample and the selected lag.",
+    "Lead-lag correlation is descriptive and is not itself a causality test.",
+]
+
+
+def _lead_lag_correlations(cause: pd.Series, effect: pd.Series, max_lag: int) -> Dict[str, Any]:
+    """Correlation of effect(t) with cause(t - lag) for lag in -max_lag..max_lag.
+
+    A positive lag means the candidate cause leads the effect. Computed on the
+    same (differenced or level) values the Granger test used, so the profile
+    and the test describe one pair of series.
+    """
+    correlations: List[Dict[str, Any]] = []
+    for lag in range(-max_lag, max_lag + 1):
+        aligned = pd.concat([cause.shift(lag).rename("cause"), effect.rename("effect")], axis=1).dropna()
+        value = aligned["cause"].corr(aligned["effect"]) if len(aligned) >= 3 else None
+        correlations.append({"lag": lag, "correlation": None if value is None or pd.isna(value)
+                             else round(float(value), 4)})
+    valid = [c for c in correlations if c["correlation"] is not None]
+    strongest = max(valid, key=lambda c: abs(c["correlation"])) if valid else None
+    return {"sign_convention": "positive lag means cause leads effect",
+            "correlations": correlations, "strongest": strongest}
 
 
 def _adf_p(values: np.ndarray) -> float:
@@ -113,9 +147,14 @@ def granger_both_directions(frame: pd.DataFrame, target: str, predictor: str,
     backward = directions[f"{target}->{predictor}"]["predictive"]
     verdict = {(True, True): "both", (True, False): "predictor->target",
                (False, True): "target->predictor", (False, False): "none"}[(forward, backward)]
+    classification = {"both": "bidirectional_predictive_evidence",
+                      "predictor->target": "directional_predictive_evidence",
+                      "target->predictor": "reverse_predictive_evidence",
+                      "none": "no_predictive_evidence"}[verdict]
 
     corr_diff = float(np.corrcoef(values[target], values[predictor])[0, 1])
     corr_level = float(np.corrcoef(aligned[target], aligned[predictor])[0, 1])
+    lead_lag = _lead_lag_correlations(values[predictor], values[target], max_lag)
 
     names = {c: (describe or {}).get(c, {}).get("name") or c for c in (target, predictor)}
     span = f"{aligned.index.min():%Y-%m}..{aligned.index.max():%Y-%m}"
@@ -135,6 +174,7 @@ def granger_both_directions(frame: pd.DataFrame, target: str, predictor: str,
 
     return {
         "target": target, "predictor": predictor,
+        "cause": predictor, "effect": target,
         "n_observations": n,
         "period_start": aligned.index.min().strftime("%Y-%m"),
         "period_end": aligned.index.max().strftime("%Y-%m"),
@@ -145,8 +185,41 @@ def granger_both_directions(frame: pd.DataFrame, target: str, predictor: str,
         "lag": lag, "lag_rule": "BIC", "max_lag": max_lag,
         "directions": directions,
         "verdict": verdict,
+        "classification": classification,
         "correlation_diff": round(corr_diff, 4),
         "correlation_level": round(corr_level, 4),
+        "lead_lag": lead_lag,
         "description": description,
+        "limitations": list(LIMITATIONS),
         "inputs": [target, predictor],
     }
+
+
+def _validate_series(series: pd.Series, name: str) -> pd.Series:
+    if not isinstance(series, pd.Series):
+        raise TypeError(f"{name!r} must be a pandas Series")
+    if series.index.duplicated().any():
+        raise ValueError(f"{name!r} contains duplicate periods")
+    clean = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).sort_index().dropna()
+    if clean.empty:
+        raise ValueError(f"{name!r} has no numeric observations")
+    if clean.nunique() < 2:
+        raise ValueError(f"{name!r} is constant; causality cannot be tested")
+    return clean.astype(float)
+
+
+def analyze_causality(cause: pd.Series, effect: pd.Series, *, cause_name: str = "cause",
+                      effect_name: str = "effect", max_lag: int = 6,
+                      describe: Optional[Dict[str, Any]] = None) -> dict:
+    """Granger both ways between a candidate cause and a candidate effect.
+
+    The same computation as `granger_both_directions`, for callers holding two
+    Series rather than a frame: `cause` is the predictor, `effect` the target,
+    and only the periods both publish are used. Raises ValueError for duplicate
+    periods, a constant series or fewer than `MIN_OBSERVATIONS` aligned points.
+    """
+    cause = _validate_series(cause, cause_name)
+    effect = _validate_series(effect, effect_name)
+    frame = pd.concat([cause.rename(cause_name), effect.rename(effect_name)], axis=1, join="inner").dropna()
+    return granger_both_directions(frame, target=effect_name, predictor=cause_name,
+                                   max_lag=max_lag, describe=describe)
