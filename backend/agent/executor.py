@@ -20,17 +20,27 @@ the whole question -- the demo-day failure mode that matters most.
 """
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from ..tools import transforms as T
-from ..tools.anomaly import detect_anomalies, detect_anomalies_in_series
+from ..tools.anomaly import detect_anomalies_in_series
+from ..tools.causality import granger_both_directions
+from ..tools.changepoint import detect_changepoints_in_series
 from ..tools.charts import build_chart, chart_summary
 from ..tools.external_series import ingest_external_series
-from ..tools.lakehouse import discover, fetch_series
+from ..tools.lakehouse import discover, fetch_series, footnotes
+from ..tools.series import load_series
 from .planner import Plan, Step
 from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
 MAX_URL_CHARS = 6000
+
+LAKEHOUSE_SOURCES = ("bulletin", "weekly", "macro")
+
+
+def _monthly_rule(semantics: Optional[str]) -> str:
+    """How a weekly series collapses onto months: what its semantics imply."""
+    return {"stock": "last", "rate": "avg", "flow": "sum"}.get(semantics or "", "last")
 
 
 def _normalise_key(key: str) -> str:
@@ -101,8 +111,26 @@ class Executor:
             "analyze": self._analyze, "find_periods": self._find_periods,
             "read_url": self._read_url_step, "search": self._search_step, "chart": self._chart,
             "ingest_external": self._ingest_external, "clear_table": self._clear_table,
+            "footnotes": self._footnotes,
         }[step.op]
         return handler(step, plan)
+
+    def _footnotes(self, step: Step, plan: Plan) -> str:
+        """BDDK's methodology notes for the named table, or for every
+        bulletin table the current columns come from."""
+        datasets = [step.dataset] if step.dataset else sorted({
+            (line.citation.get("filters") or {}).get("dataset")
+            for line in self.session.artifact.lineage.values()
+            if line.source == "bulletin" and (line.citation.get("filters") or {}).get("dataset")})
+        if not datasets:
+            raise ValueError("footnotes needs a dataset, or a table with a bulletin column in it")
+        found = []
+        for dataset in datasets:
+            result = footnotes(dataset)
+            found.append(result)
+            self.session.cite(result["citation"])
+        self.session.facts.setdefault("footnotes", []).extend(found)
+        return ", ".join(f"{r['dataset']}: {r['n_notes']} note(s)" for r in found)
 
     # -- steps -------------------------------------------------------------
 
@@ -132,7 +160,7 @@ class Executor:
             best = candidates[0]
             series = fetch_series(best["key"], source=best["source"],
                                   dataset=best["dataset"] if best["source"] == "bulletin" else None,
-                                  currency="total" if best["source"] != "macro" else None,
+                                  currency=best.get("currency") or ("total" if best["source"] != "macro" else None),
                                   start=plan.start, end=plan.end)
             resolved_by = f" (key {key!r} not found; resolved to {best['key']!r} by discovery)"
 
@@ -142,14 +170,17 @@ class Executor:
         # monthly grain using the rule the series' own semantics imply.
         values, transform = series.values, None
         if source == "weekly":
-            rule = {"stock": "last", "rate": "avg", "flow": "sum"}.get(series.temporal_semantics, "last")
+            rule = _monthly_rule(series.temporal_semantics)
             values = T.resample_to_monthly(series.values, rule)
             transform = f"resample_to_monthly({rule})"
 
-        name = _column_name(step, re.sub(r"[^\w]+", "_", key))
+        name = self.session.touch_column(_column_name(step, re.sub(r"[^\w]+", "_", key)))
+        # Three slices of one line share a name; the label says which slice
+        # this is, or the composer cannot tell the FX column from the TL one.
+        label = series.name + {"FX": " (YP)", "TL": " (TL)"}.get(currency or "", "")
         self.session.artifact.add_column(name, values, ColumnLineage(
             transform=transform,
-            column=name, label=series.name, source=series.source, unit=series.unit,
+            column=name, label=label, source=series.source, unit=series.unit,
             temporal_semantics=series.temporal_semantics, key=series.key,
             citation=series.citation()))
         self.session.cite(series.citation())
@@ -169,43 +200,90 @@ class Executor:
         elif step.operation == "ratio":
             denominator = self._resolve_column(step.other_column, required="ratio needs other_column")
             name = T.ratio(artifact, column, denominator, step.as_name)
+        elif step.operation == "in_usd":
+            rate = self._resolve_column(step.other_column, required="in_usd needs other_column (USD/TRY)")
+            name = T.in_usd(artifact, column, rate, step.as_name)
         else:
             raise ValueError(f"unknown transform {step.operation!r}")
+        self.session.touch_column(name)
         return f"{name} = {artifact.lineage[name].transform}"
+
+    def _full_history(self, column: str):
+        """(series, describe, citation) for an analysis that needs a baseline.
+
+        A lakehouse-backed column is re-read in full, unwindowed, with the
+        same currency/metric filters the column was fetched with -- the
+        artifact's own copy may be windowed to 60 months, and a rolling
+        baseline wants more than what happens to be on screen. A weekly
+        series is put on the monthly grain first, with the same rule `_fetch`
+        used, so `window=12` means twelve months and no two observations
+        share a "%Y-%m" label. A derived or external column has no lakehouse
+        row to go back to; its artifact values are the only copy.
+        """
+        lineage = self.session.artifact.lineage[column]
+        filters = lineage.citation.get("filters") or {}
+        if lineage.source in LAKEHOUSE_SOURCES and lineage.key:
+            loaded = load_series(lineage.key, source=lineage.source, dataset=filters.get("dataset"),
+                                 currency=filters.get("currency"), metric=filters.get("metric"))
+            values = loaded.values
+            if lineage.source == "weekly":
+                values = T.resample_to_monthly(values, _monthly_rule(loaded.temporal_semantics))
+            return values, loaded.describe(), loaded.citation()
+        describe = {"source": lineage.source, "key": lineage.key, "name": lineage.label,
+                    "unit": lineage.unit, "temporal_semantics": lineage.temporal_semantics,
+                    "value_column": column}
+        return self.session.artifact.frame[column].dropna(), describe, lineage.citation
+
+    def _second_column(self, step: Step, column: str, prefer: Optional[str] = None) -> tuple:
+        """The `against` column, or a deterministic stand-in when the plan
+        named none: a plan that is 95% right should still produce an answer,
+        and the result says the choice was automatic."""
+        named = step.against or step.other_column
+        if named:
+            try:
+                return self._resolve_column(named), False
+            except ValueError:
+                pass
+        artifact = self.session.artifact
+        others = [c for c in artifact.column_names() if c != column]
+        if prefer == "index":
+            others = [c for c in others if artifact.lineage[c].temporal_semantics == "index"] or others
+        if not others:
+            raise ValueError(f"{step.method} needs a second column beside {column!r}; the table has none")
+        return self.session.touch_column(others[0]), True
 
     def _analyze(self, step: Step, plan: Plan) -> str:
         column = self._resolve_column(step.column)
-        lineage = self.session.artifact.lineage[column]
+        artifact = self.session.artifact
+        against, auto = None, False
         if step.method == "anomaly":
-            if lineage.source in ("bulletin", "weekly", "macro") and lineage.key:
-                # Re-fetch the full, unwindowed history from the lakehouse
-                # rather than the artifact's own (possibly plan.start/end
-                # windowed, or too-short) column, so the rolling baseline has
-                # more than what happens to be on screen to compare against.
-                result = detect_anomalies(lineage.key, source=lineage.source,
-                                          dataset=(lineage.citation.get("filters") or {}).get("dataset"))
-            else:
-                # A `transform`-derived or `ingest_external` column has no
-                # lakehouse row to go back to -- the artifact's own values
-                # are the only copy that exists, so score those directly.
-                series = self.session.artifact.frame[column].dropna()
-                result = detect_anomalies_in_series(
-                    series,
-                    describe={"source": lineage.source, "key": lineage.key, "name": lineage.label,
-                             "unit": lineage.unit, "temporal_semantics": lineage.temporal_semantics,
-                             "value_column": column},
-                    citation=lineage.citation)
+            series, describe, citation = self._full_history(column)
+            result = detect_anomalies_in_series(series, describe, citation, window=step.window or 12)
+            result["inputs"] = [column]
         elif step.method == "changepoint":
-            result = self._changepoint(column)
+            series, describe, citation = self._full_history(column)
+            result = detect_changepoints_in_series(series, describe, citation)
+            result["inputs"] = [column]
         elif step.method == "causality":
-            other = self._resolve_column(step.against or step.other_column,
-                                         required="causality needs a second column")
-            result = self._causality(column, other)
+            against, auto = self._second_column(step, column)
+            describe = {c: {"name": artifact.lineage[c].label, "unit": artifact.lineage[c].unit,
+                            "temporal_semantics": artifact.lineage[c].temporal_semantics}
+                        for c in (column, against)}
+            result = granger_both_directions(artifact.frame, column, against, describe=describe)
+        elif step.method == "decompose":
+            against, auto = self._second_column(step, column, prefer="index")
+            result = T.decompose_growth(artifact, column, against)
         else:
             raise ValueError(f"unknown analysis method {step.method!r}")
-        self.session.facts.setdefault("analysis", {})[f"{step.method}:{column}"] = result
-        return f"{step.method} on {column}: " + str(
-            result.get("n_anomalies", result.get("n_breakpoints", result.get("verdict", "done"))))
+        if auto:
+            result["against_auto"] = True
+        # The second column is part of the key so two analyses of one target
+        # against different partners do not overwrite each other.
+        key = f"{step.method}:{column}" + (f"~{against}" if against else "")
+        self.session.facts.setdefault("analysis", {})[key] = result
+        headline = result.get("n_anomalies", result.get("n_breakpoints", result.get("verdict", "done")))
+        return (f"{step.method} on {column}" + (f" vs {against}" if against else "")
+                + (" (against chosen automatically)" if auto else "") + f": {headline}")
 
     def _find_periods(self, step: Step, plan: Plan) -> str:
         result = T.find_periods(
@@ -233,7 +311,7 @@ class Executor:
         series = ingest_external_series(
             step.url, step.value_column, period_column=step.period_column,
             sheet=step.sheet, unit=step.unit, monthly_rule=step.monthly_rule or "last")
-        name = _column_name(step, re.sub(r"[^\w]+", "_", step.value_column))
+        name = self.session.touch_column(_column_name(step, re.sub(r"[^\w]+", "_", step.value_column)))
         self.session.artifact.add_column(name, series.values, ColumnLineage(
             column=name, label=series.value_column, source=series.source, unit=series.unit,
             temporal_semantics=series.temporal_semantics, key=series.key,
@@ -255,8 +333,18 @@ class Executor:
         return f"{len(result.get('results') or [])} result(s)"
 
     def _chart(self, step: Step, plan: Plan) -> str:
-        columns = [self._resolve_column(c) for c in step.columns] if step.columns else None
+        # A chart step runs last, so the columns this turn touched are already
+        # known: a plan that names none draws the turn's own series rather
+        # than every column the conversation has ever accumulated. The same
+        # rule the table follows (`Session.focus`), one step earlier.
         artifact = self.session.artifact
+        if step.columns:
+            columns = [self._resolve_column(c) for c in step.columns]
+        else:
+            scope = set(self.session.turn_columns)
+            if self.session.facts.get("is_followup"):
+                scope |= set(self.session.visible_columns)          # "ayni grafige ekle"
+            columns = [c for c in artifact.column_names() if c in scope] or None
         try:
             figure = build_chart(artifact, columns, step.title)
         except ValueError as exc:
@@ -284,6 +372,8 @@ class Executor:
         n_columns = len(self.session.artifact.column_names())
         self.session.artifact = AnalysisArtifact()
         self.session.citations = []
+        self.session.turn_columns = []
+        self.session.visible_columns = []
         return f"cleared {n_columns} column(s); table is now empty"
 
     # -- helpers -----------------------------------------------------------
@@ -298,81 +388,19 @@ class Executor:
         if name is None:
             raise ValueError(required or "this step needs a column")
         columns = self.session.artifact.column_names()
+        # A resolved column is one this turn read, so it belongs in the
+        # turn's scope beside the columns the turn produced -- a deflated
+        # series with its deflator out of the table explains nothing.
+        touch = self.session.touch_column
         if name in columns:
-            return name
+            return touch(name)
         lowered = {c.lower(): c for c in columns}
         if name.lower() in lowered:
-            return lowered[name.lower()]
+            return touch(lowered[name.lower()])
         cleaned = re.sub(r"[^\w]+", "_", name).strip("_").lower()
         if cleaned in lowered:
-            return lowered[cleaned]
+            return touch(lowered[cleaned])
         partial = [c for c in columns if cleaned and (cleaned in c.lower() or c.lower() in cleaned)]
         if len(partial) == 1:
-            return partial[0]
+            return touch(partial[0])
         raise ValueError(f"column {name!r} is not in the table; have {columns}")
-
-    def _changepoint(self, column: str) -> Dict[str, Any]:
-        """PELT change points on the column's own values."""
-        import numpy as np
-        import ruptures
-
-        series = self.session.artifact.frame[column].dropna()
-        if len(series) < 10:
-            raise ValueError(f"{column!r} has {len(series)} points; need at least 10 for change detection")
-        values = series.to_numpy(dtype=float).reshape(-1, 1)
-        indices = ruptures.Pelt(model="rbf", min_size=3).fit(values).predict(pen=5.0)
-        breaks = [i for i in indices if 0 < i < len(series)]
-        segments = []
-        previous = 0
-        for cut in breaks + [len(series)]:
-            block = series.iloc[previous:cut]
-            segments.append({"from": block.index[0].strftime("%Y-%m"),
-                             "to": block.index[-1].strftime("%Y-%m"),
-                             "mean": round(float(np.mean(block)), 4), "n": int(len(block))})
-            previous = cut
-        return {"column": column, "unit": self.session.artifact.lineage[column].unit,
-                "method": "PELT (rbf, pen=5)", "n_breakpoints": len(breaks),
-                "breakpoints": [series.index[i].strftime("%Y-%m") for i in breaks],
-                "segments": segments}
-
-    def _causality(self, column: str, other: str) -> Dict[str, Any]:
-        """Granger causality other -> column, on differenced series if needed.
-
-        Reported as evidence, never as proof: the test says one series helps
-        predict another, which is not the same claim as causation, and the
-        wording here is what the composer is allowed to repeat.
-        """
-        import numpy as np
-        from statsmodels.tsa.stattools import adfuller, grangercausalitytests
-
-        frame = self.session.artifact.frame[[column, other]].dropna()
-        if len(frame) < 24:
-            raise ValueError(f"need at least 24 aligned observations, have {len(frame)}")
-
-        differenced = False
-        values = frame.copy()
-        for name in (column, other):
-            if adfuller(values[name].to_numpy(dtype=float), autolag="AIC")[1] > 0.05:
-                differenced = True
-        if differenced:
-            values = values.diff().dropna()
-
-        max_lag = min(6, max(1, len(values) // 5 - 1))
-        raw = grangercausalitytests(values[[column, other]].to_numpy(dtype=float), maxlag=max_lag)
-        # int(...): statsmodels' lag keys are numpy.int64, which json.dumps
-        # refuses as a dict key -- this result reaches the API response.
-        by_lag = {int(lag): round(float(stats[0]["ssr_ftest"][1]), 5) for lag, stats in raw.items()}
-        best_lag = min(by_lag, key=by_lag.get)
-        p_value = by_lag[best_lag]
-        correlation = float(np.corrcoef(frame[column], frame[other])[0, 1])
-        return {
-            "target": column, "predictor": other, "differenced": differenced,
-            "max_lag": max_lag, "p_values_by_lag": by_lag,
-            "best_lag": best_lag, "best_p_value": p_value,
-            "correlation": round(correlation, 4),
-            "verdict": ("predictive" if p_value < 0.05 else "not predictive"),
-            "interpretation": (
-                f"{other} Granger-{'oncüler' if p_value < 0.05 else 'oncülemez'} {column} "
-                f"(lag={best_lag}, p={p_value:.4f}). Granger nedensellik ONGORULEBILIRLIKTIR, "
-                "nedensellik KANITI DEGILDIR."),
-        }

@@ -201,6 +201,23 @@ line items. `entity_key` is ASCII-slugified Turkish, so `ILIKE` on the key is ca
 `entity_name` is not — `'İ'.lower()` is not `'i'`, and a Turkish character in a key would silently break the
 search the card documents. `test_entity_keys_are_ascii_so_turkish_search_is_case_safe` pins that.
 
+**All three index tables carry `search_text` and `search_fold`, composed at build time by
+`core.search_text`.** Searching the name and the key alone is narrower than both the corpus's own
+metadata and the words a question uses: no `TP.KTF*` series name contains "faiz" — the series is
+"Ticari Krediler (TL, Akım, %)" and the phrase lives in its data group's title, `Kredi Faiz Oranları
+(Akım)`, a column that was in `macro_series` and never read. `search_text` adds the context that
+*names* a row: its parent line, its table or data-group title, the category above that, and words for
+its unit and kind (`%` → "oran oranı rasyo yüzde"), which is the only way "Oranı" can reach a row
+whose distinguishing feature is a unit. It is scored below the name (×0.6 against ×1.5) so a group
+title can never outrank a series whose own name says the thing.
+
+`search_fold` is the same text through `core.labels.fold` — ASCII, lowercase, combining marks
+dropped — and it is what SQL actually greps, because DuckDB cannot fold Turkish and the alphabet gap
+is silent: a question written "TGA orani" neither contains nor is contained by a published "oranı".
+The natural-language `search_text` is kept beside it for anything semantic. **The source is
+deliberately NOT in either**: "BDDK" and "EVDS" match every row of a corpus equally, so they
+discriminate nothing and only dilute; they are filters, handled as such in `tools.lakehouse`.
+
 ## Data sources
 
 The brief's required corpus is **2021-01 through 2026-06**, and it is wider than what is currently built.
@@ -419,9 +436,9 @@ The model appears at exactly three points: classifying intent, emitting a typed 
 prose over numbers it did not compute. Everything else is Python. `agent/pipeline.py:run_turn` is
 the single entry point and returns the API payload; `Agent` holds one `Session` per conversation.
 
-**The plan DSL is the only language the model speaks.** Ten ops (`discover`, `fetch_series`,
+**The plan DSL is the only language the model speaks.** Eleven ops (`discover`, `fetch_series`,
 `transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_external`,
-`clear_table`) over a flat pydantic `Step`. Flat rather than a discriminated union on purpose:
+`clear_table`, `footnotes`) over a flat pydantic `Step` with `extra="forbid"`. Flat rather than a discriminated union on purpose:
 guided-decoding backends vary in `$ref`/`anyOf` support, and a schema a deployment silently
 mishandles fails with no error message.
 
@@ -464,8 +481,104 @@ cost real debugging, each now a comment in `tools/lakehouse.py`:
   dropped — it adds no vocabulary and only triples the weight of a word the question already used.
 - A long question is several short ones: `discover_concepts` splits on clause boundaries and
   searches each, because no weighting rescues one content word among thirty filler ones.
-- Every corpus is guaranteed seats in the result. A rate-heavy question otherwise fills all of them
-  with EVDS series and the planner never sees the BDDK row it was asked about.
+- **Every clause's own first choice is seeded into the merged list before anything competes on
+  score**, because scores are *not* comparable across clauses — each clause is scored against its own
+  terms. A per-corpus quota stood in for this and is now what fills the seats the clauses did not
+  claim (a rate-heavy question otherwise fills all of them with EVDS series and the planner never
+  sees the BDDK row it was asked about). Measured: applying that quota *twice*, once per concept and
+  once at the merge, inverted the ranking at the `limit=3` `discover_concepts` calls with — a floor
+  of `max(2, limit // 3)` reserves six seats for three — so a 22.4-scoring exact match was dropped
+  for an 8.3-scoring one, and a question about a ratio the corpus publishes was answered "the data
+  does not hold it".
+- **A named source is a filter, not a search term.** `extract_sources` peels `haftalık` / `BDDK` /
+  `EVDS` off the question, narrows the corpora searched, and leaves the rest to rank. Measured before
+  trusting it: those three words appear in **zero** published names, so stripping them can never
+  remove a word that names a line — while `TCMB` and `merkez bankası` occur inside 17 and 12 names
+  and are therefore deliberately *not* source words. "BDDK haftalık bültenine göre toplam krediler"
+  ranked its answer 83rd before this.
+- **A ratio question is not answered with a balance.** "Takipteki Alacaklar" names three rows — a
+  stock and a provision in milyon TL, and the published ratio in % — and the only word separating
+  them is "Oranı". `RATIO_WORDS` in the question prefers `unit = '%'` and demotes monetary units, the
+  mirror of the older rule that stops a `kredi tutarı` question being handed a count in `adet`.
+- **"Ağırlıklı ortalama" is a method, not a subject.** `validation.macro` already records that 92
+  EVDS rate series publish it as their `BIRIMI`; as a search term it discriminates nothing and
+  actively misleads, ranking the TCMB funding cost above the commercial-loan rate a question named.
+  It is a stopword; "ortalama" alone is not, because it is the subject in "Ortalama Toplam Aktifler".
+- **A currency is a dimension, not a search term.** "Yabancı Para (YP) Mevduat" searched as
+  words found the FX *net-position* table (its name contains them) and fetched the deposit line as
+  `total`, so the answer declared that the data holds no TL/FX split -- which every balance-sheet
+  line publishes. `extract_currency` peels YP/TL/döviz off the concept, the search runs on what is
+  left, and the slice comes back as `currency` on each candidate that publishes it; lines that
+  publish a split *without* that slice are excluded, series with no currency dimension (an EVDS
+  rate in the same clause) stay. A line whose own name holds the phrase ("Yabancı Para Net Genel
+  Pozisyonu") is ranked as written. `pipeline.apply_dimensions` then puts the slice on the plan for
+  every plan source -- an unsliced fetch of a tagged key becomes one step per slice, a tagged
+  first-choice key the plan never fetched is fetched -- so the model is never asked to remember the
+  rule. "milyon TL" is a unit and "TP." a code prefix; neither is a slice.
+- ".TRY." is the lira, not a province: the province demotion is `TR/KTR` + `[0-9A-C]`, or every TL
+  deposit rate (`TP.TRY.MT06`) drops out of the ranking.
+
+**A chart or a table is produced only when the question asks for one.** `router.route` reads
+`wants_chart` / `wants_table` from the question (`grafik`, `çiz`, `plot` / `tablo`, `sütun`, a
+follow-up), and `pipeline.apply_presentation` gates every plan source on it: a `chart` step the
+model added unasked is dropped, one the question asked for is appended if missing. The payload
+carries `presentation` and withholds `figure` when no chart was requested; the composer is told
+the same so it does not write "as the table shows" over a table nobody asked to see.
+
+**The question's own words pick the analysis tool, and the plan is guaranteed to contain it.**
+Measured before this existed: the production configuration never emitted an `analyze` step for
+the anomaly or changepoint eval questions -- one prompt line was not enough signal for a 27B
+model. `router.wanted_analyses` reads `wants_analysis` from vocabulary (anomali/aykırı →
+`anomaly`; kırılma/rejim/yapısal → `changepoint`; öncülüyor mu/nedensellik/Granger →
+`causality`; "sebebi fiyat artışı olabilir mi" → `decompose`, because that is a nominal = price ×
+real question, not a lead-lag one), skips the LLM classifier when it finds one, and
+`pipeline.apply_analysis` appends the `analyze` step when the plan lacks it -- the same guarantee
+`apply_presentation` gives charts. The executor fills a missing `against` deterministically and
+marks the result `against_auto`; `verify()` reports `requested_analyses_ran` as a caveat when a
+requested method produced nothing. Analysis facts are keyed `method:column~against` so two runs
+against different partners do not overwrite each other.
+
+**The four analysis tools are pure functions in `backend/tools/`, and each result describes
+itself.** `anomaly` (rolling z AND IQR, baseline strictly *trailing* -- an inclusive window let a
+spike hide inside its own std and found nothing on the housing series where the trailing one finds
+2023-03 and 2024-10; scored by semantics: a rate's point difference, a stock's % change, a flow with
+a near-zero guard), `changepoint.py` (PELT l2 on the z-scored level, `pen = 2·ln n` so the count of
+breaks does not depend on the window length; each break carries before/after means and the shift
+in points or %), `causality.py` (Granger both directions, one lag by BIC instead of min-p over six,
+correlation on the *differences* -- on the demo pair −0.30 where the level correlation is +0.79
+and wrong in sign -- plus the sign of the lagged VAR coefficients and a cointegration p when both
+are I(1)), and `transforms.decompose_growth` (nominal +145%, KFE +1139% ⇒ real −80%, with a Turkish
+reading; a fact, not a column, so the protected demo table gains nothing). Anomaly and changepoint
+re-read the column's full lakehouse history with the currency/metric it was fetched with and put a
+weekly series on the monthly grain first; causality and decompose use the table's window. Every
+result carries `description` (what the composer may say), `inputs` (the columns it read) and the
+parameters the `[H]` legend line quotes.
+
+**Model-written SQL is deliberately not an op.** `run_sql` exists, guarded, for humans
+(`scripts/lakehouse_query.py --sql`) and for the `[K]` legend's reproduction statements. At ~7
+tok/s a 120-token statement costs ~17s before it can fail, and the bin TL / milyon TL 1000× trap
+is exactly what its docstring warns about. The lakehouse facts that are text rather than numbers
+reach the agent through the narrow `footnotes` op (`bulletin_footnotes`, routed by
+`wants_footnotes`); `reconciliation_monitor`, `data_quality_report` and the lifecycle reports stay
+human-only.
+
+**Every figure in the answer carries a source tag, and every tag is checkable.**
+`verifier.source_map` builds `[K1]`/`[K2]` (fetched series), `[H1]` (transform, `find_periods`,
+`analyze`) and `[U1]` (URL/web) from the lineage and facts the tools recorded -- never from the
+model. `quotable_numbers` puts the tag on each fact as `kaynak`; the composer is told to cite it
+after each figure; `attach_sources` then strips any tag the model invented and appends a
+`Kaynaklar:` legend with, for a lakehouse series, a SQL statement that reproduces the column as
+written (`scripts/lakehouse_query.py --sql`). A `Plan` also drops an invalid step and notes it in
+`reasoning` rather than failing (the repair round cost ~45s and usually failed too), and
+`find_periods` returns a Turkish `description` plus `n_column_moves` so the composer cannot
+mislabel "the 4 of 32 rate-fall months where loans did not rise" as "the 4 months the rate fell".
+
+**Every stage is timed.** `run_turn` logs `route` / `plan` / `execute` / `verify` / `compose` at
+INFO on `kkb.agent`, each executor step with its seconds, and `KloudeksClient._post` logs every
+model round trip with latency and token counts on `kkb.llm`; the same numbers come back in the
+payload's `timings` (and the Trust panel's "Süreler"). `backend/api/main.py` calls
+`logging.basicConfig` because uvicorn configures only its own loggers; `KKB_LOG_LEVEL` sets the
+level.
 
 **The artifact is state, not chat history.** The demo's turns 2 and 3 say "bozmadan" — later turns
 extend the table rather than recompute it. `add_column` outer-joins so a new column can never
@@ -473,6 +586,27 @@ shorten the table, and a follow-up inherits the existing window (without that, a
 price index stretched a 60-row answer to 67 and disturbed exactly what the question protected).
 A weekly series is resampled to the monthly grain on the way in, or it adds 296 index entries
 instead of a column.
+
+**But a turn is about a few of the artifact's columns, not all of them, and that is decided in
+Python.** The session accumulates; the answer must not. Measured on the demo conversation: the
+second question ("konut kredilerini ve faizini aylık göster") came back with the first question's
+NPL and commercial-rate columns still in the table, and with a caveat -- "npl ve faiz serilerinde
+%20 veri eksikliği" -- that was really just the earlier pair spanning 2021-2024 against the new
+window's 2021-2025. Every column the executor writes or resolves as a step's input passes through
+`Session.touch_column`, so the turn's own scope is a by-product of execution rather than a
+reconstruction from the plan; `Session.focus` then keeps those columns, adds the previous turn's
+**only** when the question was a follow-up ("bozmadan", "tabloya ekle"), and closes the set over
+`derived_from` so a deflated column never appears without its deflator. `Session.view()` is what
+the payload, the verifier, the composer and `/session/{id}` read -- `session.artifact` itself is
+untouched, so a later follow-up can still reach a column this turn did not show, and the payload
+carries `table.all_columns` beside the visible ones for the panel to say so. The rule is one turn
+deep, not cumulative: three questions in, the third does not inherit the first's columns. An
+unnamed `chart` step follows the same scope one step earlier, out of `session.turn_columns`.
+
+**"Göster" is a display verb in "aylık olarak gösteriniz" and the verb "exhibit" in "değişim
+göstermiş".** `router.wants_a_table` strips the second family of collocations before looking for
+the word, because both phrasings turn up in one question and a table nobody asked for is exactly
+what the presentation gate exists to prevent.
 
 **Citations and the audit trail are by-products of execution, not a later reconstruction.** Each
 `fetch_series` appends `{table, filters, value_column, unit, semantics, period range}`; each step
@@ -483,6 +617,45 @@ costs a column rather than the turn.
 tools already computed. Afterwards `unsupported_numbers()` re-reads the prose and flags any figure
 matching nothing computed. (Turkish groups thousands with `.`, so "678.970" means 678970; reading
 it as 678.97 made every correctly-quoted large figure look unsupported.)
+
+**And it never sees a raw number either.** Handed `3423006` with unit `milyon TL`, the model wrote
+"3,42 milyar TL" -- a thousandfold error made in its head, and a regex that hunts for it afterwards
+is the wrong layer. `agent/formatting.py` renders every series figure once, in Python, at a human
+scale in Turkish notation (`3,42 trilyon TL`, `%49,83`, `+27,51 puan`, `188,98 milyar USD`), and
+`quotable_numbers` hands the composer those strings (`ilk`, `son`, `degisim`, `min`, `max`) with no
+`first_value` beside them; the prompt says copy, never convert. The strings' own numbers are what
+`unsupported_numbers` accepts, so a rescaled figure is still caught.
+
+**An FX stock in TL moves with the exchange rate by construction, and the guard for that is
+code.** "USD rose in 42 months and FX deposits rose in all 42" was the finding once: an identity,
+not a correlation, because BDDK publishes the FX slice in TL. `pipeline.apply_valuation_guard`
+fires when a plan fetches a `TL`/`FX` slice of a line beside a `TP.DK.USD`/`EUR` series and adds,
+model-free, the line's other slices, the TL share (`ratio` TL/total, %) and the FX slice in dollars
+(the `in_usd` transform: milyon TL / kur = milyon USD). `quotable_numbers` then carries
+`notlar` with the valuation note, the composer is told to state it, and the exchange rate no longer
+counts as a second monetary unit (it is a price, not an amount, and its change is a percent, not
+points). Measured on the deposit question: TL share 35.5% → 65.1% and FX deposits 253 → 189
+billion USD over 2021-12..2024-12 -- the answer the question was after.
+
+**Dates are parsed in Python.** `router.extract_window` reads "2021 sonundan 2024 sonuna kadar" as
+2021-12..2024-12, "başı"/"ortası"/"ilk yarısı" likewise, and a lone "2021 sonundan itibaren" as an
+open window from December; the model never guesses a month, and a plan that read "2021 sonu" as
+January returned eleven months nobody asked for.
+
+**Discovery quality is a number, and the number is in `backend/eval/discovery_cases.yaml`.** 85
+phrasings of 20 concepts the corpus genuinely publishes — a synonym the regulator does not use, an
+abbreviation, English, a Turkish morphological variant, the concept named with its source —
+each with the key that answers it. `python -m backend.eval.run_discovery_eval --failures` prints
+`recall@1/@3/@8` plus, for every miss, whether the key was *found and ranked badly* or *never a
+candidate at all*: those are different defects with different fixes, and debugging them as one is
+how the ranking stayed a pile of anecdotes. `tests/test_discovery.py` pins the aggregate.
+
+    before this work   54.1 / 62.4 / 72.9   89.4% in pool
+    now                89.4 / 91.8 / 96.5    100% in pool
+
+Three families still miss on individual phrasings and are left failing on purpose, because the fix
+would be an alias for that exact wording: adding one would raise the number without improving the
+system, and the benchmark would stop measuring anything.
 
 `backend/eval/run_eval.py` benchmarks configurations of the one chat model MIA exposes against
 SQL-computed gold numbers. Every `expect_values` entry in `scenarios.yaml` carries the `gold_sql`
@@ -561,16 +734,22 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the TCMB EVDS
-macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 397 tests (15 of the web-tools extension's skip without its containers).
+macro corpus (44 groups, 2021-01..2026-07) and the TBB sectoral corpus — 19 lakehouse tables, 505 tests (15 of the web-tools extension's skip without its containers).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
-pipeline stages, and six of the brief's tools (Lakehouse, Anomaly, Change Detection, Causality, Web
-URL, plus charts). Two tools are stubs the executor already routes to but nothing implements — **web
-search** needs an open backend (ddgs or a SearXNG container), and the **image path of the Web URL
-tool** raises `NotImplementedError` pending a call to `Unlimited-OCR`, which MIA does expose. A ninth
-op, `ingest_external`, adds a column from an external Excel/CSV URL to the current session's table
-only (see "The agent layer" above) — a team-added capability, not one of the brief's six named tools.
-Not yet written: the FastAPI service, the frontend, Docker, and deployment.
+pipeline stages, and the brief's four data tools -- Lakehouse (discovery, typed fetches, `footnotes`),
+Anomaly, Change Detection and Causality, each a pure function under `backend/tools/` with a
+self-describing result -- plus charts, `find_periods`, `decompose` (nominal = price × real) and the
+FastAPI service (`backend/api/main.py`) with a React frontend under `frontend/`. Web search is the
+optional `extensions/web_tools` SearXNG backend (off unless `WEB_TOOLS_ENABLED=true`); the **image path
+of the Web URL tool** still raises `NotImplementedError` (the extension holds an Unlimited-OCR client
+that is not wired to the agent). A ninth op, `ingest_external`, adds a column from an external
+Excel/CSV URL to the current session's table only (see "The agent layer" above) -- a team-added
+capability, not one of the brief's six named tools. Not yet written: Docker and deployment.
+`backend/eval/scenarios.yaml` holds twelve scenarios, four of them analysis questions with golds
+measured on the real lakehouse (anomaly 2023-03, changepoint 2023-07, the differenced correlation
+−0.30, the −80% real decomposition); the deterministic floor runs every one of them because
+`apply_analysis` needs no model.
 Two tests pin the reference scenario from opposite ends:
 `tests/test_evds.py::test_reference_scenario_table_is_producible_in_sql` proves the demo table is
 producible from the lakehouse in SQL alone, and

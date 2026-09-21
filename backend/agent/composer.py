@@ -14,39 +14,67 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ..llm import KloudeksClient, LLMError
+from .formatting import format_change, format_quantity
 from .state import Session
-from .verifier import quotable_numbers, unsupported_numbers
+from .verifier import VALUATION_NOTE, attach_sources, quotable_numbers, source_map, unsupported_numbers
 
 COMPOSER_SYSTEM = """Sen bir finansal analistsin. Turkce, net ve profesyonel yaziyorsun.
 
 KESIN KURALLAR:
-1. SADECE sana verilen "facts" icindeki sayilari kullan. Yeni sayi HESAPLAMA, TAHMIN ETME, UYDURMA.
-2. Her sayinin BIRIMINI yaz (milyon TL, %, endeks, adet).
+1. SADECE sana verilen "facts" icindeki sayilari, ORADA YAZILDIGI METIN HALIYLE kullan
+   ("3,42 trilyon TL", "%49,83", "+27,51 puan"). Olcek DONUSTURME (milyon->milyar vb.),
+   yeniden yuvarlama, hesaplama, tahmin, uydurma YOK.
+2. Birim metnin icinde hazirdir; oldugu gibi kopyala. Birimsiz sayi yazma.
 3. Bir seri 'stock' ise bu bir DONEM SONU STOGUDUR; "kullandirilan kredi" veya "yeni kredi" DEME.
    Aylik degisim net bakiye degisimidir (yeni kullandirim eksi geri odemeler).
 4. 'cumulative_ytd' ise yil basindan itibaren birikimlidir.
-5. Granger sonucu ONGORULEBILIRLIKTIR; "neden oldu" DEME.
+5. facts.analysis girdilerinin "description" alani NE bulundugunu soyler -- aynen o anlamda kullan:
+   causality: Granger = ONGORULEBILIRLIK ("X'in gecmisi Y'yi ongormeye yardim eder/etmez"); "neden oldu" DEME.
+   decompose: nominal = fiyat x reel ayristirmasidir; "veri ... ile TUTARLI/TUTARSIZ" de, kanit deme.
+   anomaly: "aykiri ay" de (hata/yanlis veri deme); degisimi scored_unit'e gore % veya puan; en fazla 3 ay say.
+   changepoint: "seviye/rejim degisimi" de; kirilma ayini ve oncesi/sonrasi ortalamayi ver.
 6. caveats listesindeki uyarilari cevapta belirt.
-7. Kisa yaz: 2-4 paragraf. Once dogrudan cevap, sonra gerekce.
+7. KISA yaz: en fazla 3 kisa paragraf, toplam ~150 kelime. Once dogrudan cevap, sonra gerekce.
+   Gereksiz giris/kapanis cumlesi yazma.
+8. "sunum" alaninda tablo=false ise cevapta tablodan bahsetme, "tabloda goruldugu gibi" DEME;
+   grafik=false ise grafikten bahsetme. Sayilari duz metin icinde ver.
+9. facts icinde find_periods varsa sorunun "... oldugu donemler var mi" kismini ONUNLA cevapla.
+   "description" alani listenin NE oldugunu soyler -- aynen o anlamda kullan: n_column_moves
+   ilk serinin o yonde hareket ettigi TOPLAM ay sayisi, n_periods bunlarin icinde kosulu
+   saglayan ay sayisi, periods[].period o aylar. Ay UYDURMA, listeyi yanlis adlandirma.
+10. Bir oran serisinin SEVIYESI yuzdedir ("%18,4"), iki seviye arasindaki DEGISIMI puandir
+   (change_points: "+18,9 puan"). Tutar serisinin degisimi change_pct ile yuzdedir.
+11. KAYNAK ETIKETI: her onemli sayi veya bulgudan hemen sonra, o veriyi tasiyan facts girdisinin
+   "kaynak" etiketini koseli parantezle yaz: "... 678.970 milyon TL'ye yukseldi [K1]",
+   "... 32 ayin 4'unde yukselmedi [H1]". SADECE "kaynaklar" listesindeki etiketleri kullan,
+   yeni etiket uydurma. Etiket listesini sen yazma; cevabin sonuna otomatik eklenecek.
+12. facts.notlar varsa oradaki yontem notunu uygula ve cevapta bir cumleyle belirt (ornegin YP
+   stokunun TL karsiliginin kurla mekanik olarak arttigi; yorumu TL payi ve USD bazli sutunla yap).
 """
 
 
 def compose(session: Session, question: str, client: Optional[KloudeksClient] = None,
-            think: bool = False, max_tokens: int = 900) -> Dict[str, Any]:
-    """Return {'summary', 'unsupported_numbers', 'facts_used'} for one turn."""
+            think: bool = False, max_tokens: int = 600) -> Dict[str, Any]:
+    """Return {'summary', 'composed_by', 'unsupported_numbers', 'caveats', 'sources'}."""
+    sources = source_map(session)
     facts = quotable_numbers(session)
     verification = session.facts.get("verification", {})
     caveats: List[str] = verification.get("caveats", [])
 
     if client is None:
-        return {"summary": deterministic_summary(session, question), "composed_by": "template",
-                "unsupported_numbers": [], "caveats": caveats}
+        return {"summary": attach_sources(deterministic_summary(session, question), sources),
+                "composed_by": "template", "unsupported_numbers": [], "caveats": caveats,
+                "sources": list(sources.values())}
 
     payload = {
         "soru": question,
         "facts": facts,
-        "tablo_sutunlari": session.artifact.units(),
+        # Tag -> short label only; the checkable detail and SQL are appended
+        # in Python after composition, so the model never spends tokens on it.
+        "kaynaklar": {tag: src["label"] for tag, src in sources.items()},
+        "tablo_sutunlari": session.view().units(),
         "caveats": caveats,
+        "sunum": session.facts.get("presentation", {"tablo": False, "grafik": False}),
     }
     messages = [
         {"role": "system", "content": COMPOSER_SYSTEM},
@@ -61,12 +89,16 @@ def compose(session: Session, question: str, client: Optional[KloudeksClient] = 
         summary = deterministic_summary(session, question)
         composed_by = f"template (model unavailable: {exc})"
 
+    # Checked before the legend is appended: the legend's own figures (period
+    # bounds, point counts) are not claims the model made.
     flagged = unsupported_numbers(summary, facts)
+    summary = attach_sources(summary, sources)
     if flagged:
         summary += ("\n\n_Not: bu cevaptaki bazi sayilar hesaplanan verilerle eslesmedi "
                     f"({', '.join(str(n) for n in flagged[:5])}); lutfen tabloyu esas alin._")
     return {"summary": summary, "composed_by": composed_by,
-            "unsupported_numbers": flagged, "caveats": caveats}
+            "unsupported_numbers": flagged, "caveats": caveats,
+            "sources": list(sources.values())}
 
 
 def deterministic_summary(session: Session, question: str) -> str:
@@ -75,27 +107,42 @@ def deterministic_summary(session: Session, question: str) -> str:
     Not a graceful degradation so much as the floor the system guarantees --
     the numbers and their units are already known before any prose is written.
     """
-    artifact = session.artifact
+    artifact = session.view()
     if artifact.is_empty():
         failures = "; ".join(a.detail for a in session.audit if not a.ok)
         return f"Tablo olusturulamadi. {failures or 'Veri bulunamadi.'}"
 
     lines = [f"{len(artifact.frame)} donem, {len(artifact.frame.columns)} seri "
              f"({artifact.periods()[0][:7]} .. {artifact.periods()[-1][:7]}):", ""]
+    sources = session.facts.get("sources") or {}
+    tag_of_column = {s["column"]: tag for tag, s in sources.items() if s.get("column")}
     for name, stats in artifact.summary().items():
         if not stats.get("n"):
             continue
-        change = f", degisim %{stats['change_pct']:+.1f}" if stats.get("change_pct") is not None else ""
+        tag = f" [{tag_of_column[name]}]" if name in tag_of_column else ""
+        change = format_change(stats)
         lines.append(
             f"- {stats['label']} ({stats['unit']}, {stats['temporal_semantics']}): "
-            f"{stats['first_period']} {stats['first_value']:,.2f} -> "
-            f"{stats['last_period']} {stats['last_value']:,.2f}{change}")
+            f"{stats['first_period']} {format_quantity(stats['first_value'], stats['unit'])} -> "
+            f"{stats['last_period']} {format_quantity(stats['last_value'], stats['unit'])}"
+            f"{', degisim ' + change if change else ''}{tag}")
+    if any((line.transform or "").startswith("in_usd(") for line in artifact.lineage.values()):
+        lines += ["", "Not: " + VALUATION_NOTE]
 
     for found in session.facts.get("find_periods", []):
         months = ", ".join(p["period"] for p in found["periods"][:8])
-        lines += ["", f"{found['column']} '{found['direction']}' yonunde hareket ettigi ve "
-                      f"{found.get('against', '-')} beklendigi gibi davranmadigi "
-                      f"{found['n_periods']} donem: {months or '-'}"]
+        tag = f" [{found['kaynak']}]" if found.get("kaynak") else ""
+        lines += ["", f"{found.get('description', found['column'])}: "
+                      f"{found['n_periods']} donem: {months or '-'}{tag}"]
+
+    # An analysis that ran is part of the answer even with no model to
+    # narrate it -- its own `description` states the finding.
+    for key, result in (session.facts.get("analysis") or {}).items():
+        if not isinstance(result, dict):
+            continue
+        method, _, column = key.partition(":")
+        tag = f" [{result['kaynak']}]" if result.get("kaynak") else ""
+        lines += ["", (result.get("description") or f"{method} analizi: {column}") + tag]
 
     caveats = session.facts.get("verification", {}).get("caveats", [])
     if caveats:

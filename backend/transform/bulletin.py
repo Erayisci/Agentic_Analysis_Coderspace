@@ -13,6 +13,9 @@ needs both, labelled.
 """
 import pandas as pd
 
+from ..core import search_text
+from ..domain.bulletin_tables import TABLES
+
 CUMULATIVE = "cumulative_ytd"
 
 # The identity of one series through time, within which a difference is meaningful.
@@ -127,8 +130,25 @@ def build_bulletin_entities(observations: pd.DataFrame) -> pd.DataFrame:
     index = index.merge(children, on=["dataset", "entity_key"], how="left")
     index["n_children"] = index.n_children.fillna(0).astype(int)
 
+    # The text discovery searches. Composed here rather than at query time
+    # because the parent's NAME is only available while the whole index is in
+    # hand -- `parent_key` alone is a slug, and the six `a) Gerçek Kişiler`
+    # rows are told apart by the deposit type above them, not by their key.
+    parent_names = index.set_index(["dataset", "entity_key"]).entity_name
+    index["parent_name"] = [
+        parent_names.get((dataset, parent)) if isinstance(parent, str) else None
+        for dataset, parent in zip(index.dataset, index.parent_key)]
+    titles = {table.slug: table.title for table in TABLES}
+    index["search_text"] = [
+        search_text.for_bulletin_entity(row.entity_name, row.parent_name, row.dataset,
+                                        titles.get(row.dataset), row.entity_type,
+                                        row.unit, row.temporal_semantics)
+        for row in index.itertuples()]
+    index["search_fold"] = [search_text.searchable(t) for t in index.search_text]
+
     columns = [*stable, "currencies", "metrics", "n_children", "formula", "footnote",
-               "first_period", "last_period", "n_periods", "n_observations"]
+               "first_period", "last_period", "n_periods", "n_observations",
+               "search_text", "search_fold"]
     return index[columns].sort_values(["dataset", "entity_key"]).reset_index(drop=True)
 
 

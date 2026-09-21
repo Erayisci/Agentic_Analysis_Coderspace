@@ -54,10 +54,13 @@ export default function App() {
       setTurns((prev) => prev.map((t, i) =>
         i === prev.length - 1
           ? { question: trimmed, summary: data.summary, composed_by: data.composed_by,
-              unsupported_numbers: data.unsupported_numbers }
+              unsupported_numbers: data.unsupported_numbers, sources: data.sources }
           : t));
       setLatest(data);
-      if (data.figure) setActiveTab("chart");
+      // The side panel follows what the question asked for: a chart only when
+      // one was requested, the table only when it was, otherwise stay put.
+      if (data.presentation?.chart && data.figure) setActiveTab("chart");
+      else if (data.presentation?.table) setActiveTab("table");
     } catch (err) {
       setTurns((prev) => prev.map((t, i) =>
         i === prev.length - 1 ? { question: trimmed, error: err.message } : t));
@@ -152,13 +155,18 @@ export default function App() {
             <button className={activeTab === "trust" ? "tab active" : "tab"} onClick={() => setActiveTab("trust")}>Güven Katmanı</button>
           </div>
           <div className="tab-content">
-            {activeTab === "table" && <DataTable table={latest?.table} />}
+            {activeTab === "table" && (
+              latest && latest.presentation && !latest.presentation.table
+                ? <p className="empty-hint">Bu soru tablo istemedi. Tabloyu görmek için soruda "tablo" deyin.</p>
+                : <DataTable table={latest?.table} />
+            )}
             {activeTab === "chart" && <ChartPanel figure={latest?.figure} />}
             {activeTab === "trust" && (
               <TrustPanel
                 citations={latest?.citations}
                 verification={latest?.verification}
                 audit={latest?.audit}
+                timings={latest?.timings}
               />
             )}
           </div>

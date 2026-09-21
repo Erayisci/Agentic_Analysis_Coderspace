@@ -337,9 +337,10 @@ def test_causality_result_is_json_serialisable():
     session = Executor(Session()).run(plan)
     assert session.audit[-1].ok, session.audit[-1].detail
 
-    result = session.facts["analysis"]["causality:konut"]
-    assert type(result["best_lag"]) is int  # not numpy.int64
-    assert all(type(lag) is int for lag in result["p_values_by_lag"])
+    result = session.facts["analysis"]["causality:konut~faiz"]
+    assert type(result["lag"]) is int  # not numpy.int64
+    assert all(type(lag) is int for d in result["directions"].values() for lag in d["p_values_by_lag"])
+    assert set(result["directions"]) == {"faiz->konut", "konut->faiz"}
     json.dumps(result)  # raises if a numpy scalar leaked through
 
 
@@ -449,7 +450,7 @@ def test_an_ingested_external_column_works_with_transform_analyze_and_chart_unmo
         Step(op="ingest_external", url="https://example.com/altin.xlsx",
              value_column="Altin (USD)", as_name="altin"),
         Step(op="transform", operation="index_to_base", column="altin", base_period="2021-01-01"),
-        Step(op="analyze", method="anomaly", column="altin", window=6, z_threshold=2.0, iqr_multiplier=1.0),
+        Step(op="analyze", method="anomaly", column="altin", window=6),
         Step(op="chart"),
     ])
     session = Executor(Session()).run(plan)
@@ -537,3 +538,731 @@ def test_a_hallucinated_key_is_resolved_by_discovery():
     assert session.audit[0].ok
     assert "resolved to" in session.audit[0].detail
     assert len(session.artifact.frame) == 12
+
+
+# --- presentation: a chart or table only when asked ------------------------
+
+@pytest.mark.parametrize("question, chart, table", [
+    ("2021-2025 arasinda konut kredileri nasil degisti?", False, False),
+    ("konut kredilerini grafik olarak ciz", True, False),
+    ("konut kredilerini tablo halinde ver", False, True),
+    ("plot housing loans against the policy rate", True, False),
+    # "göster" is the display verb here...
+    ("konut kredilerini aylik olarak gosteriniz", False, True),
+    # ...and the verb "exhibit" here, which asks for prose, not a table.
+    ("faiz dustugunde kredi miktari nasil degisim gostermis?", False, False),
+    ("kredi hacmi 2023'te guclu bir artis gosterdi mi?", False, False),
+])
+def test_the_router_reads_chart_and_table_requests_from_the_question(question, chart, table):
+    decided = route(question, client=None)
+    assert (decided.wants_chart, decided.wants_table) == (chart, table)
+
+
+def test_a_followup_keeps_the_table_it_extends():
+    decided = route("Bu tabloyu hic bozmadan yeni bir sutun ekle", has_artifact=True, client=None)
+    assert decided.wants_table
+
+
+def test_a_chart_step_survives_only_when_the_question_asked_for_one():
+    """Every plan source -- model, deterministic, template -- passes through
+    the same gate, so a model that charts unasked is corrected, and a
+    question that asks is charted even when the plan forgot."""
+    from backend.agent.pipeline import apply_presentation
+
+    def plan_with_chart():
+        return Plan(intent="series_analysis", steps=[
+            Step(op="fetch_series", key="k", source="bulletin"), Step(op="chart")])
+
+    unasked = apply_presentation(plan_with_chart(), route("konut kredileri", client=None), "q")
+    assert [s.op for s in unasked.steps] == ["fetch_series"]
+
+    asked = apply_presentation(
+        Plan(intent="series_analysis", steps=[Step(op="fetch_series", key="k", source="bulletin")]),
+        route("konut kredilerini ciz", client=None), "q")
+    assert [s.op for s in asked.steps] == ["fetch_series", "chart"]
+
+    # Nothing to draw over: a metadata plan never gains a chart.
+    nothing = apply_presentation(template_plan("metadata", "q"), route("listeyi ciz", client=None), "q")
+    assert [s.op for s in nothing.steps] == ["discover"]
+
+
+def test_a_turn_shows_the_columns_it_touched_not_everything_the_session_holds():
+    """The artifact accumulates across turns by design; a turn's table must not.
+
+    Measured on the demo conversation: question 2 ("konut kredilerini aylik
+    goster") arrived with question 1's NPL and commercial-rate columns beside
+    its own, and carried a coverage caveat about them -- those series simply
+    span a different window. The artifact still holds them; the turn does not
+    show them.
+    """
+    session = Session()
+    session.artifact = synthetic("npl", unit="%", semantics="rate")
+    konut = session.artifact.frame["npl"] * 1000
+    session.artifact.add_column("konut", konut, ColumnLineage(
+        column="konut", label="Konut", source="bulletin", unit="milyon TL",
+        temporal_semantics="stock", key="konut", citation={"table": "t", "filters": {}}))
+
+    session.start_turn("konut kredilerini goster")
+    session.touch_column("konut")
+    assert session.focus() == ["konut"]
+    assert session.view().column_names() == ["konut"]
+    assert session.artifact.column_names() == ["npl", "konut"]          # nothing was dropped
+
+    # A derived column brings its input along -- a table that cannot explain
+    # its own numbers is what the verifier checks for.
+    session.start_turn("bu tabloyu bozmadan reel hale getir")
+    T.index_to_base(session.artifact, "konut", None, "konut_endeks")
+    session.touch_column("konut_endeks")
+    assert session.focus(keep_previous=True) == ["konut", "konut_endeks"]
+
+    # A turn that touches nothing keeps the table the user is looking at.
+    session.start_turn("bu veriler hangi kaynaktan geliyor?")
+    assert session.focus() == ["konut", "konut_endeks"]
+
+
+def test_the_planner_is_shown_the_table_on_screen_not_the_whole_session(monkeypatch):
+    """A column an earlier question fetched is named as leftover, not offered
+    as part of the current table -- the planner copies what it is shown."""
+    from backend.agent import pipeline
+
+    monkeypatch.setattr(pipeline, "discover_concepts",
+                        lambda *a, **k: {"candidates": [], "by_concept": []})
+    session = Session()
+    session.artifact = synthetic("npl", unit="%", semantics="rate")
+    session.artifact.add_column("konut", session.artifact.frame["npl"] * 1000, ColumnLineage(
+        column="konut", label="Konut", source="bulletin", unit="milyon TL",
+        temporal_semantics="stock", key="konut", citation={"table": "t", "filters": {}}))
+    session.visible_columns = ["konut"]
+
+    context = pipeline.build_context("soru", session, route("konut kredileri", client=None))
+    current = context.split("ONCEKI SORULARDAN KALAN")[0]
+    assert "konut" in current and "npl" not in current
+    assert "npl" in context.split("ONCEKI SORULARDAN KALAN")[1]
+
+
+def test_a_new_question_does_not_drag_the_previous_questions_columns_into_its_table():
+    needs_lakehouse()
+    from backend.agent.pipeline import Agent
+    agent = Agent()
+    first = agent.ask("2021-2024 doneminde takipteki alacaklar orani ile ticari kredi faizleri "
+                      "arasindaki iliskiyi tablo halinde goster", session_id="scope")
+    second = agent.ask("2021-2025 arasinda konut kredilerini ve konut kredisi faiz oranlarini "
+                       "aylik tablo olarak goster", session_id="scope")
+    assert first["table"]["columns"] and second["table"]["columns"]
+    assert set(first["table"]["columns"]).isdisjoint(second["table"]["columns"])
+    # The session kept them; this turn's table did not show them.
+    assert set(first["table"]["columns"]) < set(second["table"]["all_columns"])
+    assert len(second["table"]["rows"]) == 60                    # 2021-01..2025-12, not the union
+
+    third = agent.ask("Bu tabloyu bozmadan yeni bir sutun ekle", session_id="scope")
+    assert set(second["table"]["columns"]) <= set(third["table"]["columns"])
+    assert set(first["table"]["columns"]).isdisjoint(third["table"]["columns"])
+
+
+def test_a_turn_reports_stage_timings_and_withholds_an_unrequested_figure():
+    needs_lakehouse()
+    from backend.agent.pipeline import Agent
+    agent = Agent()
+    result = agent.ask("2021-2025 arasinda konut kredileri nasil degisti?", session_id="t")
+    assert set(result["timings"]) == {"route", "plan", "execute", "verify", "compose", "total"}
+    assert result["presentation"] == {"table": False, "chart": False}
+    assert result["figure"] is None
+    assert result["session"].facts["presentation"] == {"tablo": False, "grafik": False}
+
+    result = agent.ask("Bu tabloyu bozmadan grafik olarak ciz", session_id="t")
+    assert result["presentation"] == {"table": True, "chart": True}
+    assert result["figure"] is not None
+    assert result["plan"]["steps"][-1]["op"] == "chart"
+
+
+def test_an_invalid_step_is_dropped_rather_than_failing_the_plan():
+    """The model writes `transform` with `method` and no `operation`; that
+    costs one step and a note in `reasoning`, not a repair round."""
+    plan = Plan.model_validate({"intent": "series_analysis", "steps": [
+        {"op": "fetch_series", "key": "TP.KTF12", "source": "macro", "as_name": "faiz"},
+        {"op": "transform", "method": "changepoint", "title": "kirilma"},
+        {"op": "analyze", "method": "causality"},
+        {"op": "find_periods", "column": "faiz", "direction": "down"},
+    ]})
+    assert [s.op for s in plan.steps] == ["fetch_series", "find_periods"]
+    assert "dropped invalid step(s)" in plan.reasoning
+    assert "transform" in plan.reasoning and "analyze" in plan.reasoning
+
+    with pytest.raises(ValueError, match="at least one step"):
+        Plan.model_validate({"intent": "series_analysis", "steps": [{"op": "analyze"}]})
+
+
+def test_a_year_range_is_not_read_as_a_negative_number():
+    from backend.agent.verifier import numbers_in_text
+    assert numbers_in_text("2021-2025 arasinda 678.970 milyon TL, -3,5 puan") == [2021.0, 2025.0, 678970.0, -3.5]
+    assert unsupported_numbers("2021-2025 doneminde %145,31 artis", {"x": 145.31}) == []
+
+
+def test_find_periods_says_what_its_list_means():
+    """The composer reads the dict, so the dict must name the list: the months
+    where the rate fell *and* loans did not rise, out of all rate-fall months."""
+    artifact = AnalysisArtifact()
+    periods = pd.date_range("2021-01-01", periods=6, freq="MS")
+    artifact.add_column("rate", pd.Series([10, 9, 8, 8.5, 7, 6], index=periods),
+                        ColumnLineage(column="rate", label="r", unit="%", temporal_semantics="rate", source="macro"))
+    artifact.add_column("loan", pd.Series([100, 110, 105, 108, 120, 115], index=periods),
+                        ColumnLineage(column="loan", label="l", unit="milyon TL", temporal_semantics="stock", source="bulletin"))
+    found = T.find_periods(artifact, "rate", "down", against="loan", against_direction="down")
+    assert found["n_column_moves"] == 4          # 02, 03, 05, 06
+    assert found["n_periods"] == 2               # 03 and 06: loans fell too
+    assert [p["period"] for p in found["periods"]] == ["2021-03", "2021-06"]
+    assert "4 ayin icinde" in found["description"] and "yukselmedigi" in found["description"]
+
+
+def test_a_rate_column_reports_its_change_in_points_not_percent():
+    artifact = AnalysisArtifact()
+    periods = pd.date_range("2021-01-01", periods=3, freq="MS")
+    artifact.add_column("rate", pd.Series([18.4, 30.0, 37.3], index=periods),
+                        ColumnLineage(column="rate", label="r", unit="%", temporal_semantics="rate", source="macro"))
+    artifact.add_column("loan", pd.Series([100.0, 150.0, 200.0], index=periods),
+                        ColumnLineage(column="loan", label="l", unit="milyon TL", temporal_semantics="stock", source="bulletin"))
+    stats = artifact.summary()
+    assert stats["rate"]["change_points"] == pytest.approx(18.9) and "change_pct" not in stats["rate"]
+    assert stats["loan"]["change_pct"] == 100.0 and "change_points" not in stats["loan"]
+
+
+# --- sources: every bracket in the answer resolves to a checkable line -------
+
+def test_source_map_tags_series_and_computations_and_gives_runnable_sql():
+    needs_lakehouse()
+    from backend.agent.verifier import attach_sources, source_map
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="transform", operation="index_to_base", column="konut", as_name="konut_endeks"),
+        Step(op="find_periods", column="faiz", direction="down", against="konut", against_direction="down"),
+    ])
+    session = Executor(Session()).run(plan)
+    sources = source_map(session)
+    assert list(sources) == ["K1", "K2", "H1", "H2"]
+    assert sources["K1"]["column"] == "konut" and sources["K2"]["column"] == "faiz"
+    assert sources["H1"]["inputs"] == ["K1"]                      # the index over konut
+    assert sources["H2"]["inputs"] == ["K2", "K1"] and sources["H2"]["periods"]
+    assert session.facts["find_periods"][0]["kaynak"] == "H2"
+
+    # The SQL reproduces the cited column exactly.
+    rows = run_sql(sources["K1"]["sql"])["rows"]
+    assert len(rows) == 60 and rows[0]["value"] == 276785.0
+    rows = run_sql(sources["K2"]["sql"])["rows"]
+    assert len(rows) == 60 and rows[0]["value"] == pytest.approx(18.388, abs=1e-3)
+
+    text = attach_sources("Stok 678.970 milyon TL [K1]; 4 ay [H2]; uydurma [K9].", sources)
+    assert "[K9]" not in text
+    assert "[K1] bulletin_observations" in text and "SQL: SELECT" in text
+    assert "[H2] find_periods" in text and "[H1]" not in text.split("Kaynaklar:")[1]
+
+
+def test_quotable_numbers_carry_the_source_tag():
+    from backend.agent.verifier import quotable_numbers
+    session = Session()
+    session.artifact = synthetic("x")
+    facts = quotable_numbers(session)
+    assert facts["series"]["x"]["kaynak"] == "K1"
+
+
+def test_a_phrase_with_a_dash_before_a_year_is_not_a_negative_number():
+    from backend.agent.verifier import numbers_in_text
+    assert numbers_in_text("2023 sonu-2024 başı, %17,99") == [2023.0, 2024.0, 17.99]
+
+
+# --- analysis intent: the question's words pick the tool ---------------------
+
+@pytest.mark.parametrize("question, expected", [
+    ("Konut kredilerinde olagandisi hareketler var mi? Anomali analizi yap.", ["anomaly"]),
+    ("Konut kredisi faiz oranlarinda rejim degisikligi oldugu donemleri bul.", ["changepoint"]),
+    ("Faiz konut kredilerini onculuyor mu? Nedensellik testi yap.", ["causality"]),
+    ("Faiz dustugu halde kredilerin artmamasinin sebebi fiyat artisi olabilir mi?", ["decompose"]),
+    ("Mevduattaki dusus neden oldu?", ["causality"]),
+    ("2021-2025 konut kredileri nasil degisim gostermis, yukselmedigi donemler olmus mu?", []),
+    ("Are there structural breaks or outliers in deposits?", ["anomaly", "changepoint"]),
+])
+def test_the_router_reads_analysis_intent_from_the_question(question, expected):
+    assert route(question, client=None).wants_analysis == expected
+
+
+def test_an_analysis_question_is_not_routed_to_metadata_and_skips_the_classifier():
+    class Boom:
+        def structured(self, *a, **k):
+            raise AssertionError("classifier must not be called")
+    decided = route("Konut serilerini listele ve anomali analizi yap", client=Boom())
+    assert decided.intent == "series_analysis" and decided.wants_analysis == ["anomaly"]
+    assert decided.decided_by == "rules"
+
+
+def _two_series_plan(**extra):
+    return Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        *extra.get("steps", [])])
+
+
+def test_an_analyze_step_is_appended_when_the_question_asked_and_the_model_omitted_it():
+    from backend.agent.pipeline import apply_analysis
+    plan = apply_analysis(_two_series_plan(), route("anomali var mi", client=None), Session())
+    assert [(s.op, s.method, s.column) for s in plan.steps][-1] == ("analyze", "anomaly", "konut")
+
+    plan = apply_analysis(_two_series_plan(), route("faiz krediyi onculuyor mu", client=None), Session())
+    last = plan.steps[-1]
+    assert (last.method, last.column, last.against) == ("causality", "konut", "faiz")
+
+
+def test_an_analyze_step_the_model_wrote_is_not_duplicated():
+    from backend.agent.pipeline import apply_analysis
+    written = Step(op="analyze", method="anomaly", column="faiz", window=6)
+    plan = apply_analysis(_two_series_plan(steps=[written]), route("anomali var mi", client=None), Session())
+    assert [s for s in plan.steps if s.op == "analyze"] == [written]
+
+
+def test_decompose_appends_a_cpi_fetch_when_no_price_index_is_planned():
+    from backend.agent.pipeline import apply_analysis
+    plan = apply_analysis(_two_series_plan(), route("artmamasinin sebebi fiyat olabilir mi", client=None), Session())
+    ops = [(s.op, s.key or s.method) for s in plan.steps]
+    assert ("fetch_series", "TP.GENENDEKS.T1") in ops
+    last = plan.steps[-1]
+    assert (last.method, last.column, last.against) == ("decompose", "konut", "tufe")
+    assert "fetched as deflator" in plan.reasoning
+
+
+def test_decompose_uses_the_price_index_already_in_the_plan():
+    from backend.agent.pipeline import apply_analysis
+    plan = _two_series_plan(steps=[Step(op="fetch_series", key="TP.KFE.TR", source="macro", as_name="kfe")])
+    plan = apply_analysis(plan, route("sebebi fiyat artisi olabilir mi", client=None), Session())
+    last = plan.steps[-1]
+    assert (last.method, last.column, last.against) == ("decompose", "konut", "kfe")
+    assert not any(s.key == "TP.GENENDEKS.T1" for s in plan.steps)
+
+
+def test_causality_is_skipped_when_only_one_column_is_planned():
+    from backend.agent.pipeline import apply_analysis
+    plan = Plan(intent="series_analysis", steps=[Step(op="fetch_series", key="TP.KTF12", source="macro")])
+    plan = apply_analysis(plan, route("nedensellik", client=None), Session())
+    assert all(s.op != "analyze" for s in plan.steps)
+
+
+def test_a_step_rejects_unknown_fields():
+    with pytest.raises(ValueError):
+        Step(op="analyze", method="anomaly", column="x", z_threshold=2.0)
+
+
+def test_causality_without_against_falls_back_to_the_other_column():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="analyze", method="causality", column="konut"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    assert "against chosen automatically" in session.audit[-1].detail
+    result = session.facts["analysis"]["causality:konut~faiz"]
+    assert result["against_auto"] and result["inputs"] == ["konut", "faiz"]
+
+
+def test_the_demo_decomposition_ties_the_three_numbers_together():
+    """The real failure: nominal +145%, KFE +1139%, real -36% reached the
+    composer as three unrelated facts. One fact now states the relation."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KFE.TR", source="macro", as_name="kfe"),
+        Step(op="analyze", method="decompose", column="konut", against="kfe"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    result = session.facts["analysis"]["decompose:konut~kfe"]
+    assert result["nominal_pct"] == pytest.approx(145.3, abs=0.2)
+    assert result["price_pct"] == pytest.approx(1139.3, abs=1.0)
+    assert result["real_pct"] == pytest.approx(-80.2, abs=0.3)
+    assert "tutarli" in result["description"]
+
+
+def test_anomaly_refetch_keeps_the_columns_currency_and_metric(monkeypatch):
+    """A TL-only column re-scored on the total series is a different series."""
+    needs_lakehouse()
+    from backend.agent import executor as ex
+    captured = {}
+    real = ex.load_series
+
+    def spy(key, **kwargs):
+        captured.update(kwargs)
+        return real(key, **kwargs)
+    monkeypatch.setattr(ex, "load_series", spy)
+    plan = Plan(intent="series_analysis", start="2024-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", currency="TL", as_name="konut_tl"),
+        Step(op="analyze", method="anomaly", column="konut_tl"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    assert captured["currency"] == "TL" and captured["dataset"] == "tuketici_kredileri"
+    result = session.facts["analysis"]["anomaly:konut_tl"]
+    assert result["period_start"] == "2021-01"       # full history, not the 24-month window
+
+
+def test_a_weekly_column_is_analysed_at_the_monthly_grain():
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2023-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="5690", source="weekly", as_name="haftalik"),
+        Step(op="analyze", method="anomaly", column="haftalik"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert session.audit[-1].ok, session.audit[-1].detail
+    result = session.facts["analysis"]["anomaly:haftalik"]
+    periods = [a["period"] for a in result["anomalies"]]
+    assert len(periods) == len(set(periods))
+    assert result["n_points"] < 100                  # months, not ~300 Fridays
+
+
+def test_analysis_fact_keys_include_the_second_column_and_source_map_details_them():
+    needs_lakehouse()
+    from backend.agent.verifier import source_map
+    plan = Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+        Step(op="fetch_series", key="TP.KTF12", source="macro", as_name="faiz"),
+        Step(op="analyze", method="changepoint", column="faiz"),
+        Step(op="analyze", method="causality", column="konut", against="faiz"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert set(session.facts["analysis"]) == {"changepoint:faiz", "causality:konut~faiz"}
+    sources = source_map(session)
+    by_kind = {s["label"]: s for s in sources.values() if s["kind"] == "analysis"}
+    change = next(s for s in by_kind.values() if "changepoint" in s["detail"])
+    assert "2023-07" in change["detail"] and change["inputs"] == ["K2"]
+    cause = next(s for s in by_kind.values() if "causality" in s["detail"])
+    assert "faiz->konut p=" in cause["detail"] and cause["inputs"] == ["K1", "K2"]
+    assert session.facts["analysis"]["causality:konut~faiz"]["kaynak"] == cause["tag"]
+
+
+def test_deterministic_summary_states_analysis_results():
+    from backend.agent.composer import deterministic_summary
+    session = Session()
+    session.artifact = synthetic("x")
+    session.facts["analysis"] = {"anomaly:x": {"description": "x: 2 aykiri ay bulundu", "kaynak": "H1"}}
+    assert "x: 2 aykiri ay bulundu [H1]" in deterministic_summary(session, "q")
+
+
+def test_quotable_numbers_trims_long_anomaly_lists_and_drops_the_citation():
+    from backend.agent.verifier import quotable_numbers
+    session = Session()
+    session.artifact = synthetic("x")
+    session.facts["analysis"] = {"anomaly:x": {
+        "citation": {"table": "t"}, "inputs": ["x"],
+        "anomalies": [{"period": f"2021-{m:02d}", "z_score": float(m)} for m in range(1, 11)]}}
+    facts = quotable_numbers(session)
+    quoted = facts["analysis"]["anomaly:x"]
+    assert "citation" not in quoted and len(quoted["anomalies"]) == 6
+    assert quoted["anomalies"][0]["z_score"] == 10.0 and quoted["n_anomalies_shown"] == 6
+
+
+def test_a_requested_analysis_that_did_not_run_is_a_caveat():
+    session = Session()
+    session.artifact = synthetic("x")
+    session.facts["wants_analysis"] = ["anomaly"]
+    report = verify(session)
+    assert any("istenen analiz calismadi: anomaly" in c for c in report["caveats"])
+    session.facts["analysis"] = {"anomaly:x": {"inputs": ["x"]}}
+    assert not any("calismadi" in c for c in verify(session)["caveats"])
+
+
+def test_a_metadata_turn_verifies_without_a_table():
+    session = Session()
+    session.facts["intent"] = "metadata"
+    session.facts["discovery"] = [{"candidates": [{"key": "k"}]}]
+    report = verify(session)
+    assert report["passed"]
+    assert not any("no columns" in c for c in report["caveats"])
+
+
+def test_discovered_keys_carry_their_period_span():
+    from backend.agent.verifier import quotable_numbers
+    session = Session()
+    session.facts["discovery"] = [{"candidates": [
+        {"key": "k", "name": "n", "source": "bulletin", "dataset": "d", "unit": "milyon TL",
+         "temporal_semantics": "stock", "currencies": ["TL", "FX", "total"],
+         "first_period": "2021-01-01", "last_period": "2026-07-01", "n_periods": 67, "score": 9.0}]}]
+    keys = quotable_numbers(session)["discovered_keys"]
+    assert keys[0]["n_periods"] == 67 and keys[0]["currencies"] == ["TL", "FX", "total"]
+    assert "score" not in keys[0]
+
+
+def test_deterministic_series_plan_uses_concept_discovery(monkeypatch):
+    from backend.agent import pipeline
+    called = {}
+
+    def fake(question, limit=8, **kwargs):
+        called["question"] = question
+        return {"candidates": [{"key": "TP.KTF12", "source": "macro", "dataset": None}]}
+    monkeypatch.setattr(pipeline, "discover_concepts", fake)
+    plan = pipeline.deterministic_series_plan("faiz", route("faiz", client=None))
+    assert called["question"] == "faiz" and plan.steps[0].key == "TP.KTF12"
+
+
+# --- footnotes: the one lakehouse fact that is text ---------------------------
+
+def test_a_footnote_question_routes_to_a_footnotes_step():
+    from backend.agent.pipeline import apply_analysis
+    decided = route("Sektorel kredi dagilimi tablosunun dipnotu ne diyor?", client=None)
+    assert decided.wants_footnotes
+    plan = apply_analysis(template_plan("metadata", "q"), decided, Session())
+    assert plan.steps[-1].op == "footnotes"
+
+
+def test_footnotes_reach_the_facts_with_a_runnable_citation():
+    needs_lakehouse()
+    from backend.agent.verifier import quotable_numbers, source_map
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="imalat_sanayi", source="bulletin", dataset="sektorel_kredi_dagilimi",
+             as_name="nakdi"),
+        Step(op="footnotes"),
+    ])
+    session = Executor(Session()).run(plan)
+    ok = [a for a in session.audit if a.op == "footnotes"][0]
+    assert ok.ok, ok.detail
+    found = session.facts["footnotes"][0]
+    assert found["dataset"] == "sektorel_kredi_dagilimi" and found["n_notes"] >= 1
+    assert "Bankalara Kullandırılan Krediler" in found["notes"][0]["footnote"]
+    sources = source_map(session)
+    tag = found["kaynak"]
+    assert sources[tag]["kind"] == "footnotes" and run_sql(sources[tag]["sql"])["n_rows"] == found["n_notes"]
+    assert quotable_numbers(session)["footnotes"][0]["notes"][0]["footnote"].startswith("*")
+
+
+def test_footnotes_without_a_dataset_or_bulletin_column_fails_as_one_step():
+    session = Executor(Session()).run(Plan(intent="series_analysis", steps=[Step(op="footnotes")]))
+    assert not session.audit[0].ok and "needs a dataset" in session.audit[0].detail
+
+
+def test_an_analyze_step_written_with_columns_is_mapped_onto_column_and_against():
+    """Measured on every live analysis question: the model writes the chart
+    field `columns` on an analyze step. Same intent, wrong slot."""
+    plan = Plan.model_validate({"intent": "series_analysis", "steps": [
+        {"op": "analyze", "method": "decompose", "columns": ["konut", "kfe"]},
+        {"op": "analyze", "method": "anomaly", "columns": ["faiz"]},
+    ]})
+    assert [(s.column, s.against) for s in plan.steps] == [("konut", "kfe"), ("faiz", None)]
+    assert "dropped" not in (plan.reasoning or "")
+
+
+def test_a_sign_written_in_the_prose_does_not_make_a_number_unsupported():
+    facts = {"real_pct": -80.21, "by_year": [{"real_pct": -52.2}]}
+    assert unsupported_numbers("reel stok %80,21 daraldi; 2022: -%52,2", facts) == []
+    assert unsupported_numbers("reel stok %75,5 daraldi", facts) == [75.5]
+
+
+# --- currency is a dimension, not a search term -------------------------------
+
+@pytest.mark.parametrize("concept, currency, rest", [
+    ("Yabancı Para (YP) Mevduat", "FX", "Mevduat"),
+    ("TL Mevduat stokunu", "TL", "Mevduat stokunu"),
+    ("USD/TRY kuru", None, "USD/TRY kuru"),
+    ("konut kredisi milyon TL", None, "konut kredisi milyon TL"),   # a unit, not a slice
+    ("TP.KTF12 faizi", None, "TP.KTF12 faizi"),                       # a series code prefix
+    ("TL ve YP mevduat", None, "TL ve YP mevduat"),                   # both: ambiguous, left alone
+])
+def test_currency_words_are_peeled_off_the_concept(concept, currency, rest):
+    from backend.tools.lakehouse import extract_currency
+    assert extract_currency(concept) == (currency, rest)
+
+
+def test_a_currency_slice_filters_to_series_that_publish_it_and_tags_them():
+    """"YP mevduat" is the FX slice of the deposit line. Searching the words
+    found the FX net-position table instead, whose name contains them."""
+    needs_lakehouse()
+    top = discover("Yabancı Para (YP) Mevduat", limit=4)["candidates"]
+    assert top[0]["key"] == "mevduat_katilim_fonu" and top[0]["currency"] == "FX"
+    # Every line that publishes a currency split carries the slice; a series
+    # with no such dimension (an EVDS rate) may still rank, untagged.
+    assert all(c["currency"] == "FX" for c in top if c.get("currencies"))
+    assert not any(c["key"].startswith("yabanci_para") for c in top)
+
+
+def test_a_line_whose_own_name_holds_the_currency_words_is_not_sliced():
+    needs_lakehouse()
+    found = discover("yabancı para net genel pozisyonu", limit=2)
+    assert found["currency"] is None
+    assert found["candidates"][0]["key"] == "yabanci_para_net_genel_pozisyonu"
+
+
+def test_the_same_key_survives_the_merge_once_per_slice():
+    needs_lakehouse()
+    from backend.tools.lakehouse import discover_concepts
+    found = discover_concepts("YP mevduat ve TL mevduat stoku", limit=8)
+    slices = {(c["key"], c["currency"]) for c in found["candidates"] if c["key"] == "mevduat_katilim_fonu"}
+    assert slices == {("mevduat_katilim_fonu", "FX"), ("mevduat_katilim_fonu", "TL")}
+
+
+def test_tl_deposit_rates_are_not_demoted_as_provinces():
+    """".TRY." is the lira; the province pattern demoted every TL deposit rate."""
+    needs_lakehouse()
+    assert discover("mevduat faizleri", limit=1)["candidates"][0]["key"] == "TP.TRY.MT06"
+
+
+def _discovery(*candidates, by_concept=None):
+    return {"candidates": list(candidates),
+            "by_concept": by_concept or [[(c["source"], c["key"], c.get("currency"))] for c in candidates]}
+
+
+def test_apply_dimensions_splits_an_unsliced_fetch_into_the_slices_the_question_named():
+    from backend.agent.pipeline import apply_dimensions
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="mevduat_katilim_fonu", source="bulletin", dataset="bilanco", as_name="mevduat"),
+        Step(op="fetch_series", key="TP.DK.USD.A.YTL", source="macro", as_name="kur")])
+    found = _discovery(
+        {"source": "bulletin", "key": "mevduat_katilim_fonu", "dataset": "bilanco", "currency": "FX"},
+        {"source": "bulletin", "key": "mevduat_katilim_fonu", "dataset": "bilanco", "currency": "TL"})
+    plan = apply_dimensions(plan, found)
+    fetched = [(s.key, s.currency, s.as_name) for s in plan.steps if s.op == "fetch_series"]
+    assert fetched == [("mevduat_katilim_fonu", "FX", "mevduat_fx"),
+                       ("mevduat_katilim_fonu", "TL", "mevduat_tl"),
+                       ("TP.DK.USD.A.YTL", None, "kur")]
+
+
+def test_apply_dimensions_respects_a_slice_the_plan_already_names_and_fetches_a_missing_key():
+    from backend.agent.pipeline import apply_dimensions
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="krediler", source="bulletin", dataset="krediler", currency="TL", as_name="tl_kredi")])
+    found = _discovery(
+        {"source": "bulletin", "key": "krediler", "dataset": "krediler", "currency": "TL"},
+        {"source": "bulletin", "key": "mevduat_katilim_fonu", "dataset": "bilanco", "currency": "FX"})
+    plan = apply_dimensions(plan, found)
+    fetched = [(s.key, s.currency, s.as_name) for s in plan.steps if s.op == "fetch_series"]
+    assert fetched == [("krediler", "TL", "tl_kredi"), ("mevduat_katilim_fonu", "FX", "mevduat_katilim_fonu_fx")]
+    assert "dimension" in plan.reasoning
+
+
+def test_apply_dimensions_leaves_a_plan_alone_when_no_slice_was_named():
+    from backend.agent.pipeline import apply_dimensions
+    plan = Plan(intent="series_analysis", steps=[Step(op="fetch_series", key="krediler", source="bulletin")])
+    same = apply_dimensions(plan, _discovery({"source": "bulletin", "key": "krediler", "dataset": "krediler"}))
+    assert [s.currency for s in same.steps] == [None]
+
+
+# --- the valuation guard: an FX stock in TL moves with the rate by construction ---
+
+def test_valuation_guard_adds_the_tl_share_and_the_dollar_stock():
+    from backend.agent.pipeline import apply_valuation_guard
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="mevduat_katilim_fonu", source="bulletin", dataset="bilanco",
+             currency="FX", as_name="mevduat_fx"),
+        Step(op="fetch_series", key="TP.DK.USD.A.YTL", source="macro", as_name="kur"),
+        Step(op="analyze", method="anomaly", column="kur")])
+    plan = apply_valuation_guard(plan, Session())
+    ops = [(s.op, s.operation or s.currency, s.as_name) for s in plan.steps]
+    assert ops == [("fetch_series", "FX", "mevduat_fx"),
+                   ("fetch_series", None, "kur"),
+                   ("fetch_series", "TL", "mevduat_tl"),
+                   ("fetch_series", "total", "mevduat_total"),
+                   ("transform", "ratio", "mevduat_tl_payi"),
+                   ("transform", "in_usd", "mevduat_fx_usd"),
+                   ("analyze", None, None)]
+    share = plan.steps[4]
+    assert (share.column, share.other_column) == ("mevduat_tl", "mevduat_total")
+    usd = plan.steps[5]
+    assert (usd.column, usd.other_column) == ("mevduat_fx", "kur")
+
+
+def test_valuation_guard_is_silent_without_an_exchange_rate_or_a_slice():
+    from backend.agent.pipeline import apply_valuation_guard
+    no_rate = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="mevduat_katilim_fonu", source="bulletin", currency="FX")])
+    assert len(apply_valuation_guard(no_rate, Session()).steps) == 1
+    no_slice = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="mevduat_katilim_fonu", source="bulletin"),
+        Step(op="fetch_series", key="TP.DK.USD.A.YTL", source="macro")])
+    assert len(apply_valuation_guard(no_slice, Session()).steps) == 2
+
+
+def test_the_deposit_question_builds_the_share_and_dollar_columns_with_no_model():
+    """The question that produced "the data holds no TL/FX split": it does,
+    and the model-free path now fetches both slices, the TL share and the
+    FX stock in dollars over the window the question named (2021 sonu)."""
+    needs_lakehouse()
+    from backend.agent.pipeline import run_turn
+    result = run_turn("2021 sonundan 2024 sonuna kadar BDDK bültenindeki Yabancı Para (YP) Mevduat "
+                      "ve TL Mevduat stokunu, EVDS'deki USD/TRY kuru ve TCMB Politika Faizi ile eşleştir.",
+                      client=None)
+    columns = result["table"]["columns"]
+    assert {"mevduat_katilim_fonu_fx", "mevduat_katilim_fonu_tl", "mevduat_katilim_fonu_total",
+            "mevduat_katilim_fonu_tl_payi", "mevduat_katilim_fonu_fx_usd"} <= set(columns)
+    rows = result["table"]["rows"]
+    assert rows[0]["period"].startswith("2021-12") and rows[-1]["period"].startswith("2024-12")
+    assert rows[0]["mevduat_katilim_fonu_tl_payi"] == pytest.approx(35.46, abs=0.05)
+    assert rows[-1]["mevduat_katilim_fonu_tl_payi"] == pytest.approx(65.11, abs=0.05)
+    assert rows[-1]["mevduat_katilim_fonu_fx_usd"] == pytest.approx(188_980, rel=0.01)
+    assert result["table"]["units"]["mevduat_katilim_fonu_fx_usd"] == "milyon USD"
+    assert not any("mixed monetary" in c for c in result["verification"]["caveats"])
+    assert "mekanik" in result["summary"]
+
+
+# --- numbers are formatted in Python, never rescaled by the model -----------------
+
+@pytest.mark.parametrize("value, unit, expected", [
+    (3423006, "milyon TL", "3,42 trilyon TL"),
+    (678970, "milyon TL", "678,97 milyar TL"),
+    (40418, "milyon TL", "40,42 milyar TL"),
+    (1234.5, "bin TL", "1,23 milyon TL"),
+    (34.9, "TL", "34,90 TL"),
+    (188980, "milyon USD", "188,98 milyar USD"),
+    (49.83, "%", "%49,83"),
+    (1139.3, "endeks", "1.139,30 endeks"),
+    (123456, "adet", "123.456 adet"),
+])
+def test_format_quantity_writes_a_human_scale_in_turkish_notation(value, unit, expected):
+    from backend.agent.formatting import format_quantity
+    assert format_quantity(value, unit) == expected
+
+
+def test_quotable_numbers_hand_the_composer_finished_text_not_raw_values():
+    from backend.agent.verifier import quotable_numbers
+    session = Session()
+    session.artifact = synthetic("dep", n=3, start=3_423_006.0, step=1_000_000.0)
+    facts = quotable_numbers(session)["series"]["dep"]
+    assert facts["ilk"] == "2021-01: 3,42 trilyon TL" and facts["son"] == "2021-03: 5,42 trilyon TL"
+    assert facts["degisim"] == "%+58,4"
+    assert "first_value" not in facts and "last_value" not in facts
+
+
+def test_a_correctly_copied_scaled_figure_is_supported_and_a_rescaled_one_is_not():
+    from backend.agent.verifier import quotable_numbers
+    session = Session()
+    session.artifact = synthetic("dep", n=3, start=3_423_006.0, step=1_000_000.0)
+    facts = quotable_numbers(session)
+    assert unsupported_numbers("Mevduat 3,42 trilyon TL'den 5,42 trilyon TL'ye cikti", facts) == []
+    assert unsupported_numbers("Mevduat 3.423.006 milyon TL idi", facts) == [3423006.0]
+
+
+def test_an_exchange_rate_changes_in_percent_not_points_and_is_not_a_monetary_unit():
+    artifact = synthetic("kur", n=2, start=13.53, step=21.37, unit="TL", semantics="rate")
+    stats = artifact.summary()["kur"]
+    assert "change_pct" in stats and "change_points" not in stats
+    artifact.add_column("dep", artifact.frame["kur"] * 1e6, ColumnLineage(
+        column="dep", label="Dep", source="bulletin", unit="milyon TL", temporal_semantics="stock",
+        citation={"table": "t"}))
+    session = Session()
+    session.artifact = artifact
+    checks = {c["check"]: c for c in verify(session)["checks"]}
+    assert checks["monetary_columns_share_one_unit"]["passed"]
+
+
+# --- dates are parsed in Python -----------------------------------------------------
+
+@pytest.mark.parametrize("question, expected", [
+    ("2021 sonundan 2024 sonuna kadar", ("2021-12-01", "2024-12-01")),
+    ("2022 basindan 2023 ortasina", ("2022-01-01", "2023-06-01")),
+    ("2021 yılının sonundan itibaren", ("2021-12-01", None)),
+    ("2024 sonuna kadar", (None, "2024-12-01")),
+    ("2023 yılının ilk yarısı", ("2023-01-01", "2023-06-01")),
+    ("2021 yılı sonunda", ("2021-12-01", "2021-12-01")),
+])
+def test_qualified_years_resolve_to_months(question, expected):
+    assert extract_window(question) == expected

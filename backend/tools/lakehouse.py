@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 import duckdb
 
 from ..core.config import DUCKDB_PATH
+from ..core.labels import fold, slugify
 from .series import SeriesResult, load_series
 
 # Read-only surface the agent is allowed to query. `observations` and the TBB
@@ -62,10 +63,150 @@ ALIASES: Dict[str, List[str]] = {
     "policy rate": ["APIFON4"], "politika faizi": ["APIFON4"],
     "funding cost": ["APIFON4"], "fonlama maliyeti": ["APIFON4"],
     "exchange rate": ["DK.USD", "kur"], "doviz kuru": ["DK.USD"], "usd": ["DK.USD"],
+    # TL deposit rates are EVDS flow-weighted series; "mevduat faizi" otherwise
+    # ranks the interest-rate swap line, which merely contains both words.
+    "mevduat faizi": ["TRY.MT06"], "mevduat faizleri": ["TRY.MT06"], "mevduat faiz": ["TRY.MT06"],
+    "deposit rate": ["TRY.MT06"],
+    # KKM is published in BOTH corpora: the weekly bulletin carries it as an
+    # informational line and EVDS publishes the TCMB aggregate (bie_kkm).
+    "kkm": ["kur korumal"], "kur korumali": ["kur korumal"], "kur korumalı": ["kur korumal"],
     "house sales": ["KONUTSAT"], "konut satis": ["KONUTSAT"],
     "mortgaged sales": ["AKONUTSAT2", "IPOTEKLI"], "ipotekli": ["IPOTEKLI", "AKONUTSAT2"],
     "unemployment": ["issizlik"], "gdp": ["GSYIH"], "growth": ["GSYIH"],
+    # Added after the discovery benchmark: each of these reached NO key at all,
+    # and every target below was checked to resolve to exactly one row.
+    # Abbreviations especially -- they are shorter than the four-letter floor
+    # `_terms` applies to plain words, so an abbreviation only ever enters the
+    # search as an alias.
+    "syr": ["sermaye_yeterliligi_standart"], "capital adequacy ratio": ["sermaye_yeterliligi_standart"],
+    "roe": ["ortalama_ozkaynaklar"], "return on equity": ["ortalama_ozkaynaklar"],
+    "ozkaynak karliligi": ["ortalama_ozkaynaklar"], "ozkaynak getirisi": ["ortalama_ozkaynaklar"],
+    "ozkaynak karlilik": ["ortalama_ozkaynaklar"],
+    "tga": ["takipteki"], "donmus": ["takipteki"],
+    "sorunlu": ["takipteki"], "sorunlu alacak": ["takipteki"],
+    "net profit": ["donem_net_kari"], "net kar": ["donem_net_kari"],
+    "net kar tutari": ["donem_net_kari"], "sektorun kari": ["donem_net_kari"],
+    "total deposits": ["mevduat"], "toplam mevduat": ["mevduat"],
+    "dolar kuru": ["DK.USD"], "amerikan dolari": ["DK.USD"],
+    "loan to deposit": ["nakdi_krediler_toplam_mevduat"],
+    "kredi mevduat orani": ["nakdi_krediler_toplam_mevduat"],
+    "ev kredisi": ["konut"],
+    # "mevduat faiz" alone loses the longest-match race to "faiz oranlari",
+    # which overlaps it and is one character longer, so the full phrase is
+    # registered rather than relying on the tie.
+    "mevduat faiz oranlari": ["TRY.MT06"], "mevduat faiz orani": ["TRY.MT06"],
 }
+
+
+# A currency is a DIMENSION of the fact tables, not a word to search for.
+# Measured on "Yabancı Para (YP) Mevduat ve TL Mevduat": searching the words
+# matched the FX net-position table (its *name* contains "yabancı para") and
+# fetched the deposit line as `total`, so the answer declared that the data
+# holds no TL/FX split -- which it does, in every balance-sheet line. So the
+# currency words are peeled off the concept before search, the search runs on
+# what is left ("mevduat"), and the slice comes back as `currency` on every
+# candidate that publishes it, for the plan to pass straight into the fetch's
+# WHERE clause. Nothing here is left to the model or to a ranking bonus.
+# "milyon TL" names a unit, not a slice, and is left alone; "TP." is a series
+# code prefix, not Türk Parası.
+CURRENCY_TERMS = {
+    "FX": re.compile(r"(?<!\w)(yp|fx|yabanc[ıi]\s+para|d[öo]viz\s+cinsi(?:nden)?|d[öo]vizli|"
+                     r"foreign[- ]currency)(?!\w)", re.I),
+    "TL": re.compile(r"(?<!\w)(?<!milyon )(?<!milyar )(?<!bin )(?<!trilyon )"
+                     r"(tl|tp(?![\w.])|t[üu]rk\s+liras[ıi]|t[üu]rk\s+paras[ıi]|turkish[- ]lira)(?![\w])", re.I),
+}
+
+
+def extract_currency(text: str):
+    """(currency, text without the currency words) -- (None, text) when the
+    concept names no slice or names both, which the clause split normally
+    prevents ("YP mevduat ve TL mevduat" arrives as two concepts)."""
+    text = text or ""
+    found = [currency for currency, pattern in CURRENCY_TERMS.items() if pattern.search(text)]
+    if len(found) != 1:
+        return None, text
+    stripped = CURRENCY_TERMS[found[0]].sub(" ", text)
+    stripped = re.sub(r"\(\s*\)", " ", stripped)               # "(YP)" leaves "()"
+    return found[0], re.sub(r"\s+", " ", stripped).strip()
+
+
+# A named source is a filter, not a search term -- the same lesson as the
+# currency slice, in the other dimension. "BDDK haftalik bultenine gore toplam
+# krediler" scored the weekly row it asks for at pool rank 83, because
+# "haftalik" and "bulten" match nothing in any row and only dilute the two
+# words that do. Measured before trusting these as filters: `haftalik`, `bddk`
+# and `evds` appear in ZERO series names across all three corpora, so peeling
+# them off can never remove a word that names a line.
+#
+# `tcmb` and `merkez bankasi` are deliberately absent: they occur inside 17 and
+# 12 published names ("TCMB Agirlikli Ortalama Fonlama Maliyeti"), so treating
+# them as a source would strip the subject out of the question.
+#
+# BDDK publishes both the monthly and the weekly bulletin, so "bddk" alone
+# narrows to those two rather than to either one; the sets are intersected so
+# "BDDK haftalik bulten" resolves to weekly and "BDDK aylik bulten" to monthly.
+_SUFFIX = r"(?:['\u2019]\w*)?"
+_BULTEN = r"\s+b[\u00fcu]lten\w*" + _SUFFIX
+SOURCE_TERMS = (
+    ("bddk", re.compile(r"(?<!\w)haftal[\u0131i]k(?:" + _BULTEN + r")?(?!\w)", re.I), {"weekly"}),
+    ("bddk", re.compile(r"(?<!\w)ayl[\u0131i]k" + _BULTEN, re.I), {"bulletin"}),
+    # "BDDK bulteni" with neither "aylik" nor "haftalik" said is the monthly
+    # one: the weekly release is never called anything but "haftalik bulten".
+    ("bddk", re.compile(r"(?<!\w)bddk" + _SUFFIX + _BULTEN, re.I), {"bulletin"}),
+    ("evds", re.compile(r"(?<!\w)evds" + _SUFFIX, re.I), {"macro"}),
+    # Least specific in its publisher, so it is listed last: it only decides
+    # when nothing above it said which BDDK release.
+    ("bddk", re.compile(r"(?<!\w)bddk" + _SUFFIX, re.I), {"bulletin", "weekly"}),
+)
+
+ALL_SOURCES = {"bulletin", "macro", "weekly"}
+
+
+def extract_sources(text: str):
+    """(allowed sources or None, text without the source words).
+
+    None means the question named no source and every corpus is eligible --
+    which is the common case, and the reason this narrows rather than routes.
+    """
+    text = text or ""
+    allowed, spans, decided = None, [], set()
+    for publisher, pattern, sources in SOURCE_TERMS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        # SOURCE_TERMS is ordered specific-first, and a later pattern inside a
+        # region an earlier one already claimed says nothing new. Letting both
+        # cut left "BDDK bultenindeki Takipteki" as "kipteki": the second cut
+        # was measured against the original text and applied to the shortened
+        # one, so it ate the start of the next word.
+        if any(match.start() < end and start < match.end() for start, end in spans):
+            continue
+        spans.append(match.span())
+        # Every match gets its words stripped; only the first per publisher
+        # narrows the sources, so a second mention of the same release cannot
+        # widen what a more specific phrase already settled.
+        if publisher not in decided:
+            decided.add(publisher)
+            allowed = set(sources) if allowed is None else allowed | sources
+    if allowed is None:
+        return None, text
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + " " + text[end:]
+    return allowed, re.sub(r"\s+", " ", text).strip()
+
+
+def _names_the_currency(candidate, query: str) -> bool:
+    """Does the candidate's own key or name contain the currency phrase the
+    question used? Then the phrase names the line, not a slice of it."""
+    for pattern in CURRENCY_TERMS.values():
+        match = pattern.search(query or "")
+        if not match:
+            continue
+        phrase = slugify(match.group(0))
+        haystack = f"{candidate.get('key') or ''} {slugify(candidate.get('name') or '')}"
+        if re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", haystack):
+            return True
+    return False
 
 
 def _connect():
@@ -81,8 +222,23 @@ def _connect():
 # book; "takipteki konut kredileri" is a different, much smaller series that
 # happens to contain the first as a substring, so matching alone ranks it
 # first. Penalise a qualifier the question did not ask for.
+# Does the question ask for a quotient rather than a quantity? Used to gate the
+# derived-series bonus; the unit words in `core.search_text` cover the rest.
+RATIO_WORDS = re.compile(
+    r"(?<!\w)(oran|orani|oranlari|oranini|rasyo|rasyosu|yuzde|payi|share|ratio|%)(?!\w)", re.I)
+
+# The property type a sales question would have to name to mean commercial
+# premises. Absent these, TCMB's `K`-prefixed housing series is what was meant.
+WORKPLACE_WORDS = re.compile(r"(?<!\w)(is\s*yeri|isyeri|ticari\s+gayrimenkul|dukkan|ofis|commercial|workplace)", re.I)
+
 QUALIFIERS = {
-    "takipteki": ("takipteki", "npl", "non-performing", "batik", "sorunlu"),
+    "takipteki": ("takipteki", "npl", "non-performing", "batik", "sorunlu", "tga", "donmus"),
+    # "Konut satislari" is every sale; "ipotekli konut satislari" is the
+    # mortgaged subset, and the derived share series is named with both phrases
+    # inside it -- so the query phrase "konut satislari" is a literal substring
+    # of "ipotekli konut satislarinin toplam konut satislarina orani" and the
+    # ratio outranked the count it is computed from.
+    "ipotekli": ("ipotekli", "mortgaged", "ipotek"),
     "dovize_endeksli": ("dovize", "endeksli", "fx-indexed"),
     "reeskont": ("reeskont", "accrual"),
     "bilgi": ("bilgi",),
@@ -108,6 +264,16 @@ STOPWORDS = {
     "degisim", "değişim", "gostermis", "göstermiş", "olmus", "olmuş",
     "yukselmedigi", "yükselmediği", "dustugu", "düştüğü", "halde", "sadece",
     "yeni", "sutun", "sütun", "hangi", "yapabilir", "verilerini", "kullanarak",
+    "gore", "göre", "gostermektedir", "bulten", "bülten", "bulteni", "bülteni",
+    # "Agirlikli ortalama" names a METHOD, not a subject: `validation.macro`
+    # already records that 92 EVDS rate series publish it as their BIRIMI, which
+    # is why the unit is resolved per series instead of read from the group. It
+    # discriminates nothing as a search term either, and it actively misleads --
+    # "Agirlikli Ortalama Ticari Kredi Faizleri" ranked the TCMB funding cost
+    # first, whose name carries both words, above the commercial-loan rate the
+    # question names. "ortalama" is left alone: it is the subject in
+    # "Ortalama Toplam Aktifler".
+    "agirlikli", "ağırlıklı",
 }
 
 
@@ -126,7 +292,11 @@ def _terms(query: str):
       dropped. "politika faizi" maps to the funding-cost proxy; without this,
       the "faizi" alias fired alongside it and pulled up interest-rate swaps.
     """
-    lowered = query.lower().strip()
+    # Folded, not just lowercased: 'İ'.lower() is 'i̇' (i plus a combining dot),
+    # which matches nothing, and a question writing "orani" must reach a row
+    # published as "oranı". Keys are ASCII already, so this only changes what
+    # the names and the search text can be compared against.
+    lowered = fold(query).strip()
     single_word = len(lowered.split()) == 1
     weighted = {lowered: 1.5 if single_word else 4.0}
 
@@ -171,8 +341,13 @@ def _score(candidate, terms) -> float:
     registered precisely as the ones a demo question needs, and province-level
     codes are pushed down -- "konut satislari" means Turkiye unless a city is named.
     """
-    key = str(candidate.get("key") or "").lower()
-    name = str(candidate.get("name") or "").lower()
+    key = fold(candidate.get("key") or "")
+    name = fold(candidate.get("name") or "")
+    # The context that names the row -- parent line, table or data group title,
+    # category, words for its unit and kind. Scored below the name on purpose: a
+    # data group called "Kredi Faiz Oranları" must help the series inside it be
+    # found and must never outrank a series whose own name says "kredi faizi".
+    context = str(candidate.get("search_fold") or "")
     score = 0.0
     for term, weight in terms:
         if term in key:
@@ -181,8 +356,30 @@ def _score(candidate, terms) -> float:
                 score += weight
         if term in name:
             score += weight * 1.5
+        elif term in context:
+            score += weight * 0.6
     if not score:
         return 0.0
+
+    # Coverage beats any single boost: "konut kredileri" names two concepts,
+    # and a series matching both ("Tüketici Kredileri - Konut") is what was
+    # asked for, where one matching only "konut" (the mortgaged-sales share:
+    # tier 0 and derived, +5 of structural bonus) is a neighbour. Measured:
+    # without this the share outranked the loan book for the anomaly question.
+    # A concept is a question word (weight 1.0) or its 5-character stem -- the
+    # phrase and the alias expansions are not separate concepts, and counting
+    # the stem beside its word double-counted "enflasyon".
+    stems = {term for term, weight in terms if weight == 0.8}
+    concepts = 0
+    for term, weight in terms:
+        if weight != 1.0:
+            continue
+        stem = term[:5] if len(term) > 6 and term[:5] in stems else None
+        haystacks = (key, name, context)
+        if any(term in field for field in haystacks) or (
+                stem and any(stem in field for field in haystacks)):
+            concepts += 1
+    score += 2.0 * max(0, concepts - 1)
 
     query_text = terms[0][0] if terms else ""
     for qualifier, asked_words in QUALIFIERS.items():
@@ -197,6 +394,18 @@ def _score(candidate, terms) -> float:
     # consumer-loan table instead, and mixing the two is a 1000x error.
     if candidate.get("dataset") == "sektorel_kredi_dagilimi" and "sekt" not in query_text:
         score -= 3.0
+
+    # "Takipteki Alacaklar" names three different rows -- a balance-sheet stock
+    # in milyon TL, a provision in milyon TL, and the published ratio in %. The
+    # only word separating them is the one the question actually used, and a
+    # unit has no spelling a text search reaches. Measured: without this the
+    # stock won "NPL orani" outright, so a question about a ratio the corpus
+    # publishes was answered with a quantity a thousand times its size.
+    if RATIO_WORDS.search(query_text):
+        if candidate.get("unit") == "%":
+            score += 3.0
+        elif str(candidate.get("unit") or "").endswith("TL"):
+            score -= 3.0
 
     # "Konut kredileri" is an amount; "konut satislari" is a count. Both match
     # the word "konut", and EVDS publishes the sales count under a name that
@@ -219,12 +428,26 @@ def _score(candidate, terms) -> float:
         # than promoting the canonical row: a bonus on "TOPLAM" is not confined
         # to the tie it was meant to break, and twice let house SALES outrank
         # the housing-loan rate for "mortgage interest rate".
+        # A province code is TR/KTR followed by a digit or A-C (TR100..TRC11);
+        # ".TRY." is the lira, and the wider pattern demoted every TL deposit
+        # rate (TP.TRY.MT06) out of the ranking.
         if re.search(r"\.K?MA$", raw_key):
             score -= 2.0
-        elif "TOPLAM" not in raw_key.upper() and re.search(r"\.(KTR|TR)[A-Z0-9]", raw_key):
+        elif "TOPLAM" not in raw_key.upper() and re.search(r"\.(KTR|TR)[0-9A-C]", raw_key):
             score -= 6.0
-        if raw_key.startswith("DERIVED."):
-            score += 2.0                                # built at build time for exactly this question
+        # Built at build time so the agent never divides -- but only when the
+        # question wants the quotient. There are 166 derived shares, and an
+        # unconditional bonus let them outrank the very series they divide.
+        if raw_key.startswith("DERIVED.") and RATIO_WORDS.search(query_text):
+            score += 2.0
+        # TCMB suffixes house sales with the property type: a leading `K` is
+        # Konut, its absence Is Yeri. The two are published under names that
+        # differ in that word alone, so "mortgaged sales share" separated them
+        # by 0.03 points -- a key-length tie-break deciding between housing and
+        # commercial property. A sales question means housing unless it says
+        # otherwise, the same way it means Turkiye unless a city is named.
+        if re.search(r"(?:AKONUTSAT\d|IPOTEKLI_PAY)\.(?!K)", raw_key) and not WORKPLACE_WORDS.search(query_text):
+            score -= 5.0
     return round(score, 3)
 
 
@@ -249,21 +472,44 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
     if not chunks:
         chunks = [question]
 
-    merged, seen = [], set()
+    # Identity includes the currency slice: "YP mevduat" and "TL mevduat" are
+    # the same key twice, and both must survive the merge.
+    merged, seen, by_concept = [], set(), []
     for chunk in chunks[:6]:
-        for candidate in discover(chunk, limit=per_concept)["candidates"]:
-            identity = (candidate["source"], candidate["key"])
+        found = discover(chunk, limit=per_concept)["candidates"]
+        by_concept.append([(c["source"], c["key"], c.get("currency")) for c in found])
+        for candidate in found:
+            identity = (candidate["source"], candidate["key"], candidate.get("currency"))
             if identity not in seen:
                 seen.add(identity)
                 merged.append(candidate)
     merged.sort(key=lambda c: -c["score"])
 
-    # The same guarantee `discover` makes per query, applied across the merge:
-    # one loud clause ("faiz oranlarini") otherwise fills every slot and the
-    # BDDK series the other clause asked for never reaches the planner.
-    kept, per_source = [], {}
+    # Every clause's own first choice gets a seat, before anything competes on
+    # score. This is the guarantee that matters, and a per-corpus quota was
+    # standing in for it: scores are NOT comparable across clauses, because
+    # each clause is scored against its own terms. Measured on the NPL/loan-rate
+    # question -- clause 2's best answer, the commercial-loan rate, scored below
+    # clause 4's best, so a merge ordered by score filled all eight seats
+    # without it and the planner never saw the series the question named.
+    kept = []
+    for ranked in by_concept:
+        if not ranked:
+            continue
+        candidate = next((c for c in merged if (c["source"], c["key"], c.get("currency")) == ranked[0]), None)
+        if candidate is not None and candidate not in kept:
+            kept.append(candidate)
+
+    # Then the per-corpus quota, on the seats the clauses did not claim: a
+    # rate-heavy question otherwise fills the remainder with EVDS series and the
+    # planner sees no BDDK row to pair them with.
+    per_source = {}
+    for candidate in kept:
+        per_source[candidate["source"]] = per_source.get(candidate["source"], 0) + 1
     for candidate in merged:
-        if per_source.get(candidate["source"], 0) < max(2, limit // 3):
+        if len(kept) >= limit:
+            break
+        if candidate not in kept and per_source.get(candidate["source"], 0) < max(2, limit // 3):
             kept.append(candidate)
             per_source[candidate["source"]] = per_source.get(candidate["source"], 0) + 1
     for candidate in merged:
@@ -273,8 +519,11 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
             kept.append(candidate)
     kept = sorted(kept[:limit], key=lambda c: -c["score"])
 
+    # `by_concept` keeps each clause's own ranking: the merged list orders by
+    # score, and a loud clause's second choice can outscore a quiet clause's
+    # first. A deterministic plan wants the first choice of each clause.
     return {"query": question, "n_concepts": len(chunks), "concepts": chunks[:6],
-            "n_candidates": len(kept), "candidates": kept}
+            "by_concept": by_concept, "n_candidates": len(kept), "candidates": kept}
 
 
 def discover(query: str, source=None, limit: int = 8):
@@ -292,40 +541,59 @@ def discover(query: str, source=None, limit: int = 8):
     and metrics the series actually publishes. A planner that reads this cannot
     invent a filter the data does not support.
     """
-    terms = _terms(query)
+    # Two dimensions are peeled off the question before it is searched, for the
+    # same reason: a word that names WHERE the series lives, or WHICH slice of
+    # it is wanted, is a filter, and searching it ranks whatever row happens to
+    # repeat it. The source goes first, because "BDDK haftalik bulten" is three
+    # words of pure dilution around the one that matters.
+    named_sources, query_body = extract_sources(query)
+    currency, concept = extract_currency(query_body)
+    plain_terms = _terms(query_body)
+    terms = _terms(concept) if currency and concept else plain_terms
     if not terms:
-        return {"query": query, "terms_used": [], "n_candidates": 0, "candidates": []}
+        return {"query": query, "terms_used": [], "currency": currency,
+                "sources": sorted(named_sources) if named_sources else None,
+                "n_candidates": 0, "candidates": []}
 
     con = _connect()
     try:
         pooled = []
-        wanted = {source} if source else {"bulletin", "macro", "weekly"}
-        words = [term for term, _ in terms]
+        # An explicit `source` argument is the caller's, and outranks the
+        # question's own wording.
+        wanted = {source} if source else (named_sources or set(ALL_SOURCES))
+        # The pool is queried with both readings of the concept so that the
+        # slice can be rejected below without a second round trip.
+        words = list(dict.fromkeys([term for term, _ in terms] + [term for term, _ in plain_terms]))
 
+        # `search_text` is the row's own name plus the context that names it,
+        # composed at build time by `core.search_text`. Searching it rather than
+        # the name alone is what lets a question use a word the series does not:
+        # no `TP.KTF*` name contains "faiz", its data group's title does.
         if "bulletin" in wanted:
-            where = " OR ".join(["entity_key ILIKE ? OR entity_name ILIKE ?"] * len(words))
+            where = " OR ".join(["entity_key ILIKE ? OR search_fold ILIKE ?"] * len(words))
             params = [p for term in words for p in (f"%{term}%", f"%{term}%")]
             pooled += con.execute(
                 "SELECT 'bulletin' AS source, dataset, entity_key AS key, entity_name AS name, unit, "
-                "temporal_semantics, currencies, metrics, NULL AS tier, n_periods, "
+                "temporal_semantics, currencies, metrics, NULL AS tier, n_periods, search_fold, "
                 "first_period::VARCHAR AS first_period, last_period::VARCHAR AS last_period "
                 f"FROM bulletin_entities WHERE {where}", params).df().to_dict("records")
 
         if "macro" in wanted:
-            where = " OR ".join(["series_code ILIKE ? OR name_tr ILIKE ? OR coalesce(name_en,'') ILIKE ?"] * len(words))
-            params = [p for term in words for p in (f"%{term}%", f"%{term}%", f"%{term}%")]
+            where = " OR ".join(["series_code ILIKE ? OR search_fold ILIKE ?"] * len(words))
+            params = [p for term in words for p in (f"%{term}%", f"%{term}%")]
             pooled += con.execute(
                 "SELECT 'macro' AS source, datagroup AS dataset, series_code AS key, name_tr AS name, unit, "
                 "temporal_semantics, NULL AS currencies, monthly_rule AS metrics, tier, NULL AS n_periods, "
-                "published_start AS first_period, published_end AS last_period "
+                "search_fold, published_start AS first_period, published_end AS last_period "
                 f"FROM macro_series WHERE {where}", params).df().to_dict("records")
 
         if "weekly" in wanted:
-            where = " OR ".join(["entity_name ILIKE ?"] * len(words))
+            where = " OR ".join(["search_fold ILIKE ?"] * len(words))
             pooled += con.execute(
                 "SELECT 'weekly' AS source, dataset, entity_key AS key, entity_name AS name, "
                 "'milyon TL' AS unit, 'stock' AS temporal_semantics, 'TL,FX,total' AS currencies, "
-                "NULL AS metrics, NULL AS tier, NULL AS n_periods, NULL AS first_period, NULL AS last_period "
+                "NULL AS metrics, NULL AS tier, NULL AS n_periods, search_fold, "
+                "NULL AS first_period, NULL AS last_period "
                 f"FROM weekly_items WHERE retired_on IS NULL AND ({where})",
                 [f"%{term}%" for term in words]).df().to_dict("records")
     finally:
@@ -337,28 +605,57 @@ def discover(query: str, source=None, limit: int = 8):
                 candidate[field_name] = value.item()
             elif value is not None and str(value) == "nan":
                 candidate[field_name] = None
+        if isinstance(candidate.get("currencies"), str):
+            candidate["currencies"] = candidate["currencies"].split(",")
         candidate["score"] = _score(candidate, terms)
 
     scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
 
-    # Guarantee every corpus a seat. A question about loan volumes and interest
-    # rates matches dozens of EVDS rate series, and a pure top-k list handed the
-    # planner eight macro candidates and not one BDDK loan row -- so it planned
-    # against house SALES. The planner can only choose among what it is shown.
-    ranked, per_source = [], {}
-    for candidate in scored:
-        source_count = per_source.get(candidate["source"], 0)
-        if source_count < max(2, limit // 3):
-            ranked.append(candidate)
-            per_source[candidate["source"]] = source_count + 1
-    for candidate in scored:
-        if len(ranked) >= limit:
-            break
-        if candidate not in ranked:
-            ranked.append(candidate)
-    ranked = sorted(ranked[:limit], key=lambda c: -c["score"])
+    # The slice is a filter, not a score: when the concept named a currency,
+    # only series that publish that slice can answer it, and each carries the
+    # slice for the fetch. If nothing publishes it (an EVDS rate has no
+    # currency column; "TL mevduat faizi" is one series, not a slice), the
+    # word was a qualifier of the concept and the plain ranking stands.
+    if currency:
+        # Excluded: a line that publishes a currency split without this
+        # slice (the FX net position is `total` only). Kept beside the tagged
+        # lines: series with no currency dimension at all -- an EVDS rate in
+        # the same clause ("TL mevduat stokunu USD/TRY kuru ile") is still
+        # what the clause asked for.
+        sliced = [c for c in scored if currency in (c.get("currencies") or [])]
+        if sliced and _names_the_currency(sliced[0], query):
+            # "Yabancı Para Net Genel Pozisyonu" is a line whose own name
+            # contains the currency words: the phrase is the entity, not a
+            # slice of it. Rank the question as written.
+            currency, sliced = None, []
+            for candidate in pooled:
+                candidate["score"] = _score(candidate, plain_terms)
+            scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
+        if sliced:
+            for candidate in sliced:
+                candidate["currency"] = currency
+            scored = [c for c in scored if c.get("currency") == currency or not c.get("currencies")]
 
-    return {"query": query, "terms_used": [t for t, _ in terms],
+    # One concept, ranked by score alone.
+    #
+    # There used to be a per-corpus seat guarantee here as well as in
+    # `discover_concepts`, and applying it twice broke it. The floor was
+    # `max(2, limit // 3)` per source, which at the `limit=3` that
+    # `discover_concepts` calls with reserves six seats for three -- so the
+    # truncation kept the top-scoring of the *reserved* set rather than of the
+    # ranking. Measured on "Takipteki Alacaklar (TGA / NPL) Oranı": the
+    # published NPL ratio scored 22.38 and was dropped for a weekly row scoring
+    # 8.31, which is how a question about a ratio the corpus publishes was
+    # answered with "the data does not hold it".
+    #
+    # The guarantee itself is sound and it stays -- one clause loud enough to
+    # fill every slot really does hide the row another clause asked for. But it
+    # belongs to the merge across clauses, where the list the planner sees is
+    # actually built, and not to the ranking of a single concept.
+    ranked = scored[:limit]
+
+    return {"query": query, "terms_used": [t for t, _ in terms], "currency": currency,
+            "sources": sorted(named_sources) if named_sources else None,
             "n_candidates": len(ranked), "candidates": ranked}
 
 
@@ -376,6 +673,32 @@ def fetch_series(
     domain rules live in `series.load_series` so every tool inherits them."""
     return load_series(key, source=source, dataset=dataset, currency=currency,
                        metric=metric, start=start, end=end, **kwargs)
+
+
+def footnotes(dataset: str) -> Dict[str, Any]:
+    """BDDK's own methodology notes for one bulletin table, with the months
+    each one covers.
+
+    Three of these change what a sum means (table 05's bank loans and table
+    08's repo securities sit outside their own totals; table 06 counts a
+    multi-product customer once) and no arithmetic check can see that -- the
+    published totals reconcile without those rows. This is the only lakehouse
+    fact the agent needs that is text rather than a number, so it gets a
+    narrow op rather than a SQL escape hatch.
+    """
+    con = _connect()
+    try:
+        frame = con.execute(
+            "SELECT footnote, first_period, last_period, n_periods FROM bulletin_footnotes "
+            "WHERE dataset = ? ORDER BY first_period", [dataset]).df()
+    finally:
+        con.close()
+    notes = [{"footnote": str(row.footnote),
+              "first_period": str(row.first_period)[:7], "last_period": str(row.last_period)[:7],
+              "n_periods": int(row.n_periods)} for row in frame.itertuples()]
+    sql = f"SELECT footnote, first_period, last_period FROM bulletin_footnotes WHERE dataset = '{dataset}'"
+    return {"dataset": dataset, "n_notes": len(notes), "notes": notes,
+            "citation": {"table": "bulletin_footnotes", "filters": {"dataset": dataset}, "sql": sql}}
 
 
 def run_sql(sql: str, limit: int = 200) -> Dict[str, Any]:

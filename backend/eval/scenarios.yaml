@@ -78,13 +78,27 @@ scenarios:
     expect_preserves_columns: true
     expect_keys: [TP.KFE.TR]
     expect_units: ["endeks"]
+    expect_wants_analysis: [decompose]
+    expect_analysis: {method: decompose, fields: [nominal_pct, price_pct, real_pct, description]}
+    expect_find_periods: true
     expect_values:
       kfe_first: 16.49
       kfe_last: 204.36
-    tolerance_pct: 0.5
+      nominal_pct: 145.3
+      price_pct: 1139.3
+      real_pct: -80.2
+    tolerance_pct: 1.0
     gold_sql: >-
       SELECT period, value FROM macro_observations WHERE series_code='TP.KFE.TR'
       AND period BETWEEN DATE '2021-01-01' AND DATE '2025-12-01' ORDER BY period
+    gold_python: >-
+      nominal = 678970/276785-1 (+145.3%), price = 204.36/16.49-1 (+1139.3%),
+      real = (1+nominal)/(1+price)-1 (-80.2%) -- backend.tools.transforms.decompose_growth
+    notes: >-
+      "Sebebi fiyat artisi olabilir mi" is a decomposition question, not a Granger one:
+      the answer is that nominal growth fell far short of price growth, so the real stock
+      shrank -- consistent with the price explanation. The three numbers used to reach the
+      composer as unrelated facts; `decompose` states the relation.
 
   # --- single-turn coverage of the rest of the surface ----------------------
   - id: discovery_english_alias
@@ -122,15 +136,47 @@ scenarios:
   - id: anomaly_on_housing_loans
     question: Konut kredilerinde olagandisi hareketler var mi? Anomali analizi yap.
     expect_intent: series_analysis
-    expect_analysis: anomaly
+    expect_wants_analysis: [anomaly]
+    expect_analysis: {method: anomaly, min_count: 1, contains_period: "2023-03"}
     expect_keys: [tuketici_kredileri_konut]
+    gold_python: >-
+      backend.tools.anomaly.detect_anomalies("tuketici_kredileri_konut"): monthly % change
+      of the stock, trailing 12-month baseline, |z|>=3 AND IQR x1.5 -> 2023-03 (+6.49%, z 3.57)
+      and 2024-10 (+3.26%, z 3.54). Pinned by period, not count: new months may add flags.
     notes: Must score the change, not the level, and report the unit.
 
   - id: changepoint_on_rate
     question: Konut kredisi faiz oranlarinda rejim degisikligi oldugu donemleri bul.
     expect_intent: series_analysis
-    expect_analysis: changepoint
+    expect_wants_analysis: [changepoint]
+    expect_analysis: {method: changepoint, contains_period: "2023-07"}
     expect_keys: [TP.KTF12]
+    gold_python: >-
+      backend.tools.changepoint.detect_changepoints("TP.KTF12", source="macro"): PELT l2 on the
+      z-scored level, pen = 2 ln n -> 2023-07 (the post-election policy shift), for every
+      penalty scale between 1 and 3.
+
+  - id: causality_rate_leads_loans
+    question: >-
+      2021-2025 arasinda konut kredisi faizi konut kredilerini onculuyor mu? Nedensellik testi yap.
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_wants_analysis: [causality]
+    expect_analysis: {method: causality, fields: [directions, verdict, correlation_diff, description]}
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    expect_values:
+      correlation_diff: -0.298
+    tolerance_pct: 5.0
+    gold_python: >-
+      backend.tools.causality.granger_both_directions on the 60 aligned months: both I(1),
+      differenced; VAR BIC lag 1; faiz->konut p 0.164, konut->faiz p 0.199 at lag 1 (min-p
+      over six lags was 0.069 / 0.096 -- the multiple-testing artefact this replaces);
+      correlation of the differences -0.30 (levels +0.79, the shared trend).
+    notes: >-
+      Neither direction is predictive at the 5% level on 60 months; the answer must say
+      "does not help predict", not "no relationship", and must quote the differenced
+      correlation with its sign.
 
   - id: weekly_latest_credit
     question: BDDK haftalik bultenine gore en guncel toplam kredi buyuklugu nedir?
@@ -148,4 +194,20 @@ scenarios:
     question: Lakehouse'da hangi konut ile ilgili seriler var? Listele.
     expect_intent: metadata
     expect_keys: [tuketici_kredileri_konut]
-    notes: Discovery only; no table is required.
+    expect_verified: true
+    notes: >-
+      Discovery only; no table is required, and the verifier must not report the empty
+      table as an error. The composer sees each candidate's period span.
+
+  - id: footnotes_sectoral_table
+    question: >-
+      Sektorel kredi dagilimi tablosunda imalat sanayi nakdi kredileri; bu tablonun dipnotu
+      ve metodoloji notu ne diyor?
+    expect_intent: series_analysis
+    expect_keys: [imalat_sanayi]
+    expect_footnotes: true
+    gold_sql: >-
+      SELECT footnote FROM bulletin_footnotes WHERE dataset='sektorel_kredi_dagilimi'
+    notes: >-
+      Table 05's note says "Bankalara Kullandirilan Krediler" is published outside the
+      table's totals -- the one kind of lakehouse fact no arithmetic check can surface.

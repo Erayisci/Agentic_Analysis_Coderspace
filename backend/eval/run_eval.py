@@ -64,6 +64,21 @@ def load_scenarios(path: Path = SCENARIOS_PATH) -> List[Dict[str, Any]]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))["scenarios"]
 
 
+def _numbers_in(node: Any, into: List[float]) -> None:
+    """Every numeric leaf of a nested result (analysis dicts nest their
+    per-direction p-values and per-year decompositions)."""
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (int, float)):
+        into.append(float(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _numbers_in(value, into)
+    elif isinstance(node, list):
+        for value in node:
+            _numbers_in(value, into)
+
+
 def _values_in_table(result: Dict[str, Any]) -> List[float]:
     """Every number the produced table holds, for gold matching."""
     numbers: List[float] = []
@@ -71,10 +86,32 @@ def _values_in_table(result: Dict[str, Any]) -> List[float]:
         numbers.extend(float(v) for k, v in row.items() if k != "period" and isinstance(v, (int, float)))
     for found in (result.get("find_periods") or []):
         numbers.append(float(found.get("n_periods", 0)))
-    for analysis in (result.get("analysis") or {}).values():
-        if isinstance(analysis, dict):
-            numbers.extend(float(v) for v in analysis.values() if isinstance(v, (int, float)))
+    _numbers_in(result.get("analysis") or {}, numbers)
     return numbers
+
+
+def _analysis_matches(expect: Any, analyses: Dict[str, Any]) -> Dict[str, Optional[bool]]:
+    """`expect_analysis` as a method name (did it run?) or a mapping that also
+    looks at the result: `min_count` (anomalies/breakpoints), `contains_period`
+    (a flagged month), `fields` (keys the result must carry)."""
+    spec = {"method": expect} if isinstance(expect, str) else dict(expect)
+    method = spec["method"]
+    matching = [r for key, r in analyses.items() if key.partition(":")[0] == method and isinstance(r, dict)]
+    checks: Dict[str, Optional[bool]] = {"analysis_ran": bool(matching)}
+    if len(spec) == 1:
+        return checks
+    result = matching[0] if matching else {}
+    content = bool(matching)
+    if "min_count" in spec:
+        count = result.get("n_anomalies", result.get("n_breakpoints", 0))
+        content = content and count >= spec["min_count"]
+    if "contains_period" in spec:
+        periods = {a.get("period") for a in (result.get("anomalies") or result.get("breakpoints") or [])}
+        content = content and spec["contains_period"] in periods
+    if "fields" in spec:
+        content = content and all(field in result for field in spec["fields"])
+    checks["analysis_content"] = content
+    return checks
 
 
 def score_scenario(scenario: Dict[str, Any], result: Dict[str, Any], seconds: float) -> Dict[str, Any]:
@@ -120,8 +157,19 @@ def score_scenario(scenario: Dict[str, Any], result: Dict[str, Any], seconds: fl
             column in table["columns"] for column in scenario["_previous_columns"])
 
     if "expect_analysis" in scenario:
-        checks["analysis_ran"] = any(scenario["expect_analysis"] in key
-                                     for key in (result.get("analysis") or {}))
+        checks.update(_analysis_matches(scenario["expect_analysis"], result.get("analysis") or {}))
+
+    if "expect_wants_analysis" in scenario:
+        checks["analysis_routed"] = result["route"].get("wants_analysis") == list(scenario["expect_wants_analysis"])
+
+    if scenario.get("expect_find_periods"):
+        checks["find_periods_ran"] = bool(result.get("find_periods"))
+
+    if scenario.get("expect_footnotes"):
+        checks["footnotes_ran"] = any(a["op"] == "footnotes" and a["ok"] for a in result["audit"])
+
+    if "expect_verified" in scenario:
+        checks["verified_as_expected"] = result["verification"]["passed"] == bool(scenario["expect_verified"])
 
     if "expect_values" in scenario:
         tolerance = float(scenario.get("tolerance_pct", 1.0)) / 100.0

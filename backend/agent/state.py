@@ -75,7 +75,32 @@ class AnalysisArtifact:
         return self
 
     def units(self) -> Dict[str, str]:
-        return {name: line.unit for name, line in self.lineage.items()}
+        return {name: line.unit for name, line in self.lineage.items() if name in self.frame.columns}
+
+    def subset(self, columns: List[str]) -> "AnalysisArtifact":
+        """A view of this table holding only `columns` -- the artifact itself
+        is untouched.
+
+        The artifact accumulates across turns by design, but a *turn* is about
+        a few of its columns. Handing the whole thing to the payload made the
+        answer to "konut kredilerini aylik goster" arrive with the previous
+        question's NPL and rate columns beside it, and its coverage caveat
+        ("npl ve faiz serilerinde %20 eksik") was about columns nobody had
+        asked about in that turn -- the earlier series simply span fewer
+        months than the new window. `Session.focus` decides which columns a
+        turn is about; this produces the table for them.
+
+        Rows that hold nothing in the selection are dropped: the index is the
+        union of every column's periods, so a narrower selection legitimately
+        spans fewer months.
+        """
+        keep = [name for name in self.frame.columns if name in set(columns)]
+        if not keep or len(keep) == len(self.frame.columns):
+            return self
+        return AnalysisArtifact(
+            title=self.title,
+            frame=self.frame[keep].dropna(how="all"),
+            lineage={name: self.lineage[name] for name in keep if name in self.lineage})
 
     def column_names(self) -> List[str]:
         return list(self.frame.columns)
@@ -132,6 +157,12 @@ class AnalysisArtifact:
                 out[name] = {"unit": self.lineage[name].unit, "n": 0}
                 continue
             first, last = float(series.iloc[0]), float(series.iloc[-1])
+            # A rate moves in points, not percent-of-percent: 18.4% -> 37.3% is
+            # "+18.9 puan", and "+102.8%" invites the reader to misread it.
+            # An exchange rate is declared `rate` too, but 13.53 TL -> 34.90 TL
+            # is a +158% move, not "+21 puan": points are for percentages.
+            unit = self.lineage[name].unit or ""
+            is_rate = unit == "%" or (self.lineage[name].temporal_semantics == "rate" and unit in ("", "puan"))
             out[name] = {
                 "label": self.lineage[name].label,
                 "unit": self.lineage[name].unit,
@@ -140,7 +171,8 @@ class AnalysisArtifact:
                 "first_value": round(first, 4),
                 "last_period": series.index[-1].strftime("%Y-%m"),
                 "last_value": round(last, 4),
-                "change_pct": round(100 * (last / first - 1), 2) if first else None,
+                **({"change_points": round(last - first, 4)} if is_rate
+                   else {"change_pct": round(100 * (last / first - 1), 2) if first else None}),
                 "min_value": round(float(series.min()), 4),
                 "min_period": series.idxmin().strftime("%Y-%m"),
                 "max_value": round(float(series.max()), 4),
@@ -176,6 +208,10 @@ class Session:
     audit: List[AuditStep] = field(default_factory=list)
     facts: Dict[str, Any] = field(default_factory=dict)
     turns: List[Dict[str, Any]] = field(default_factory=list)
+    # Which columns THIS turn wrote or read, and which ones the answer is
+    # about. The artifact is the whole conversation; these two are the turn.
+    turn_columns: List[str] = field(default_factory=list)
+    visible_columns: List[str] = field(default_factory=list)
 
     def cite(self, citation: Dict[str, Any]) -> None:
         """Record provenance once. Turn 3 re-reads turn 1's series; the answer
@@ -184,10 +220,58 @@ class Session:
             self.citations.append(citation)
 
     def start_turn(self, question: str) -> None:
-        """A turn's audit and facts are its own; the artifact is not."""
+        """A turn's audit, facts and touched columns are its own; the
+        artifact is not."""
         self.audit = []
         self.facts = {}
+        self.turn_columns = []
         self.turns.append({"question": question, "n": len(self.turns) + 1})
+
+    def touch_column(self, name: Optional[str]) -> Optional[str]:
+        """Record that this turn wrote or read `name`.
+
+        Every column the executor creates, and every one it resolves as a
+        step's input, passes through here. That is what makes the turn's own
+        scope a by-product of execution rather than a guess reconstructed
+        from the plan afterwards -- a fetch whose key discovery had to repair
+        lands under the name the executor actually assigned.
+        """
+        if name and name not in self.turn_columns:
+            self.turn_columns.append(name)
+        return name
+
+    def focus(self, keep_previous: bool = False) -> List[str]:
+        """Decide which columns this turn's answer is about; remember them.
+
+        The rule is one turn deep, not cumulative: a new question is about
+        the columns it touched, and a follow-up ("bozmadan", "tabloya ekle")
+        is about those plus the ones the *previous* turn showed. Carrying the
+        whole session forward instead is what put four columns under a
+        question that named two, and three turns in it would have been six.
+
+        A derived column's inputs come along: the table must be able to
+        explain the numbers it shows, and `verifier` checks exactly that.
+        """
+        existing = self.artifact.column_names()
+        scope = {c for c in self.turn_columns if c in existing}
+        if keep_previous:
+            scope |= {c for c in self.visible_columns if c in existing}
+        for _ in range(len(existing)):
+            parents = {p for c in scope for p in self.artifact.lineage[c].derived_from
+                       if c in self.artifact.lineage and p in existing}
+            if parents <= scope:
+                break
+            scope |= parents
+        if not scope:
+            # A turn that produced nothing (metadata, a failed plan) leaves
+            # the table it found in place rather than blanking the panel.
+            scope = {c for c in self.visible_columns if c in existing} or set(existing)
+        self.visible_columns = [c for c in existing if c in scope]
+        return self.visible_columns
+
+    def view(self) -> AnalysisArtifact:
+        """The artifact as this turn should present it -- see `focus`."""
+        return self.artifact.subset(self.visible_columns) if self.visible_columns else self.artifact
 
     def has_artifact(self) -> bool:
         return not self.artifact.is_empty()

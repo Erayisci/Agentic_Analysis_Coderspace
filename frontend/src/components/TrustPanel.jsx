@@ -23,8 +23,8 @@ function Section({ title, count, children, defaultOpen = false }) {
   );
 }
 
-export default function TrustPanel({ citations, verification, audit }) {
-  const hasAnything = (citations?.length || verification || audit?.length) ?? false;
+export default function TrustPanel({ citations, verification, audit, timings }) {
+  const hasAnything = (citations?.length || verification || audit?.length || timings) ?? false;
   if (!hasAnything) {
     return <p className="empty-hint">Henüz bir doğrulama kaydı yok.</p>;
   }
@@ -80,11 +80,29 @@ export default function TrustPanel({ citations, verification, audit }) {
               <li key={i} className={step.ok ? "audit-ok" : "audit-fail"}>
                 <span className="audit-op">{step.op}</span>
                 <span className="audit-detail">{step.detail}</span>
+                {typeof step.seconds === "number" ? (
+                  <span className="audit-seconds">{step.seconds.toFixed(2)} s</span>
+                ) : null}
               </li>
             ))}
           </ul>
         ) : (
           <p className="empty-hint">Adım çalışmadı.</p>
+        )}
+      </Section>
+
+      <Section title="Süreler" count={timings ? `${(timings.total ?? 0).toFixed(1)} s` : undefined}>
+        {timings ? (
+          <ul className="audit-list">
+            {Object.entries(timings).map(([stage, seconds]) => (
+              <li key={stage} className="audit-ok">
+                <span className="audit-op">{stage}</span>
+                <span className="audit-detail">{seconds.toFixed(3)} s</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="empty-hint">Süre kaydı yok.</p>
         )}
       </Section>
     </div>

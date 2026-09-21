@@ -16,7 +16,11 @@ export default function DataTable({ table }) {
     return <p className="empty-hint">Henüz bir tablo oluşturulmadı.</p>;
   }
 
-  const { columns, units, rows } = table;
+  const { columns, units, rows, all_columns: allColumns } = table;
+  // The session's table keeps every column the conversation has built; this
+  // turn shows the ones its own question is about. Saying so is the
+  // difference between "a column went missing" and "it is still there".
+  const hidden = (allColumns || []).filter((col) => !columns.includes(col));
 
   return (
     <div className="table-scroll">
@@ -43,6 +47,12 @@ export default function DataTable({ table }) {
           ))}
         </tbody>
       </table>
+      {hidden.length > 0 ? (
+        <p className="table-note">
+          Bu soruyla ilgili {columns.length} sütun gösteriliyor; oturumdaki {hidden.length} sütun
+          ({hidden.join(", ")}) saklı — "tabloya ekle" diyerek geri getirebilirsiniz.
+        </p>
+      ) : null}
     </div>
   );
 }

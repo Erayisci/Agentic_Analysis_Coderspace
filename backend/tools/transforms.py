@@ -132,6 +132,29 @@ def ratio(artifact: AnalysisArtifact, numerator: str, denominator: str,
     return name
 
 
+def in_usd(artifact: AnalysisArtifact, column: str, rate: str, as_name: Optional[str] = None) -> str:
+    """A TL-denominated column divided by the USD/TRY rate: the same stock in dollars.
+
+    An FX deposit stock is published in TL, so it rises with the exchange rate
+    by construction -- "USD rose in 42 months and FX deposits rose in all 42"
+    is an identity, not a finding. Dividing by the rate removes the valuation
+    effect; what is left is whether dollars actually moved. The unit follows:
+    milyon TL becomes milyon USD.
+    """
+    top, fx = _require(artifact, column), _require(artifact, rate)
+    if "TL" not in (top.unit or "") or fx.unit != "TL":
+        raise ValueError(
+            f"in_usd needs a TL amount and a TL-per-USD rate, got {column!r} ({top.unit}) "
+            f"and {rate!r} ({fx.unit})")
+    name = as_name or f"{column}_usd"
+    values = artifact.frame[column] / artifact.frame[rate]
+    artifact.add_column(name, values, ColumnLineage(
+        column=name, label=f"{top.label} (USD bazinda, {fx.label} ile)", source=DERIVED,
+        unit=top.unit.replace("TL", "USD"), temporal_semantics=top.temporal_semantics,
+        transform=f"in_usd({column}, {rate})", derived_from=[column, rate], citation={}))
+    return name
+
+
 def find_periods(artifact: AnalysisArtifact, column: str, direction: str = "down",
                  against: Optional[str] = None, against_direction: str = "up",
                  min_abs_change: float = 0.0) -> dict:
@@ -146,12 +169,22 @@ def find_periods(artifact: AnalysisArtifact, column: str, direction: str = "down
     moves = artifact.frame[column].diff()
     wanted = moves < -abs(min_abs_change) if direction == "down" else moves > abs(min_abs_change)
 
-    result = {"column": column, "direction": direction, "n_periods": 0, "periods": []}
+    word = {"down": "dustugu", "up": "yukseldigi"}[direction]
+    result = {"column": column, "direction": direction,
+              "n_column_moves": int(wanted.fillna(False).sum()),
+              "description": f"{column} {word} aylar",
+              "n_periods": 0, "periods": []}
     if against is not None:
         _require(artifact, against)
         other = artifact.frame[against].diff()
         other_wanted = other > 0 if against_direction == "up" else other <= 0
         wanted = wanted & other_wanted
+        # The composer reads this dict, not the code: without the description
+        # it reported "the 4 months the rate fell" for what is really "the 4
+        # of 27 rate-fall months in which loans did not rise".
+        other_word = {"up": "yukseldigi", "down": "yukselmedigi (dustugu veya sabit kaldigi)"}[against_direction]
+        result["description"] = (f"{column} {word} {result['n_column_moves']} ayin icinde "
+                                 f"{against} {other_word} aylar")
         result.update({"against": against, "against_direction": against_direction})
 
     hits = artifact.frame.index[wanted.fillna(False)]
@@ -163,6 +196,75 @@ def find_periods(artifact: AnalysisArtifact, column: str, direction: str = "down
         **({against: round(float(artifact.frame.loc[stamp, against]), 4)} if against else {}),
     } for stamp in hits]
     return result
+
+
+def decompose_growth(artifact: AnalysisArtifact, nominal: str, deflator: str) -> dict:
+    """Split a nominal column's growth into price growth and real growth.
+
+    nominal = price x real, so over any window
+    (1 + g_nominal) = (1 + g_price) x (1 + g_real). The demo's third turn asks
+    "faiz düştüğü halde kredilerin artmamasının sebebi fiyat artışı olabilir
+    mi?", and the three numbers that answer it -- nominal +145%, house prices
+    +1139%, real -80% -- were already on the table as three separate facts
+    that a small model did not connect. This connects them, in Python, and
+    says what the connection means.
+
+    A fact rather than a column: the table the question protects gains no
+    column, and the deliverable is the sentence.
+    """
+    import math
+
+    nominal_line, price_line = _require(artifact, nominal), _require(artifact, deflator)
+    if nominal_line.unit == "%":
+        raise ValueError(f"{nominal!r} is a percentage; a rate has no price component to remove")
+    if price_line.temporal_semantics not in ("index", "ratio", "rate"):
+        raise ValueError(f"deflator {deflator!r} is {price_line.temporal_semantics}, expected a price index")
+
+    aligned = artifact.frame[[nominal, deflator]].dropna()
+    if len(aligned) < 2:
+        raise ValueError("need at least two aligned observations to decompose growth")
+    first, last = aligned.iloc[0], aligned.iloc[-1]
+    if not first[nominal] or not first[deflator]:
+        raise ValueError("first observation is zero; growth is undefined")
+
+    g_nom = float(last[nominal] / first[nominal] - 1)
+    g_price = float(last[deflator] / first[deflator] - 1)
+    g_real = (1 + g_nom) / (1 + g_price) - 1
+    price_share = (math.log1p(g_price) / math.log1p(g_nom)) if g_nom > 0 and g_price > -1 else None
+
+    by_year = []
+    dec = aligned[aligned.index.month == 12]
+    for prev, cur in zip(dec.index[:-1], dec.index[1:]):
+        yn = float(dec.loc[cur, nominal] / dec.loc[prev, nominal] - 1)
+        yp = float(dec.loc[cur, deflator] / dec.loc[prev, deflator] - 1)
+        by_year.append({"year": int(cur.year), "nominal_pct": round(100 * yn, 1),
+                        "price_pct": round(100 * yp, 1), "real_pct": round(100 * ((1 + yn) / (1 + yp) - 1), 1)})
+
+    span = f"{aligned.index.min():%Y-%m}..{aligned.index.max():%Y-%m}"
+    if g_real < -0.02:
+        reading = ("Nominal artis fiyat artisinin gerisinde kaldi: reel stok daraldi -- "
+                   "'artmama fiyat artisiyla tutarli' okumasini destekler")
+    elif g_real > 0.02:
+        reading = "Nominal artis fiyat artisini asti: reel stok da buyudu -- artmama fiyatla aciklanamaz"
+    else:
+        reading = "Nominal artis fiyat artisiyla basa bas: reel stok yaklasik sabit"
+    description = (f"{span}: nominal {100 * g_nom:+.1f}%, fiyat ({price_line.label}) {100 * g_price:+.1f}%, "
+                   f"reel {100 * g_real:+.1f}%. {reading}.")
+
+    return {
+        "nominal": nominal, "deflator": deflator,
+        "unit": nominal_line.unit, "deflator_label": price_line.label,
+        "period_start": aligned.index.min().strftime("%Y-%m"),
+        "period_end": aligned.index.max().strftime("%Y-%m"),
+        "nominal_first": round(float(first[nominal]), 4), "nominal_last": round(float(last[nominal]), 4),
+        "price_first": round(float(first[deflator]), 4), "price_last": round(float(last[deflator]), 4),
+        "nominal_pct": round(100 * g_nom, 2), "price_pct": round(100 * g_price, 2),
+        "real_pct": round(100 * g_real, 2),
+        "price_share_of_nominal_growth": round(price_share, 3) if price_share is not None else None,
+        "by_year": by_year,
+        "description": description,
+        "inputs": [nominal, deflator],
+    }
 
 
 def resample_to_monthly(series: pd.Series, rule: str = "last") -> pd.Series:

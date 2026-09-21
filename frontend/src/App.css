@@ -379,10 +379,19 @@
   margin-top: 24px;
 }
 
+.table-note {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 10px 14px 2px;
+  margin: 0;
+}
+
 /* ---------- data table ---------- */
 
 .table-scroll {
   overflow: auto;
+  max-height: 70vh;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -544,4 +553,58 @@
 .audit-detail {
   color: var(--text-muted);
   word-break: break-word;
+}
+
+.audit-seconds {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.sources {
+  margin: 8px 0 4px;
+  font-size: 0.85em;
+}
+
+.sources-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--navy);
+  cursor: pointer;
+  font: inherit;
+}
+
+.sources-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.source-ref {
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.source-detail {
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.source-sql {
+  display: block;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
 }

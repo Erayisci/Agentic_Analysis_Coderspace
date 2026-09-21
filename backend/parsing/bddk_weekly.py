@@ -44,6 +44,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from ..core import search_text
 from ..core.labels import canonical_key, strip_decorations
 from ..domain.weekly_tables import (
     BY_ID,
@@ -213,6 +214,19 @@ def _attach_parents(items: pd.DataFrame) -> pd.DataFrame:
     self_parented = items[items.parent_key == items.entity_key]
     if not self_parented.empty:
         raise ValueError(f"weekly items parented to themselves: {self_parented.entity_key.tolist()}")
+
+    # The text discovery searches. Composed once the parents are known, because
+    # `entity_key` here is BDDK's numeric item id -- unlike the monthly path it
+    # carries no words at all, so the name and the line above it are everything
+    # a search has to work with.
+    names = items.set_index("entity_key").entity_name
+    items["search_text"] = [
+        search_text.for_weekly_item(
+            row.entity_name,
+            names.get(row.parent_key) if isinstance(row.parent_key, str) else None,
+            row.dataset, bool(row.is_informational))
+        for row in items.itertuples()]
+    items["search_fold"] = [search_text.searchable(t) for t in items.search_text]
     return items
 
 

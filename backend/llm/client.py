@@ -25,6 +25,7 @@ a plan can be valid JSON and still name a series that does not exist. On a
 pydantic validation failure the client re-asks once, quoting the error, then
 gives up -- an unbounded repair loop is how an agent burns a demo slot.
 """
+import logging
 import time
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
@@ -40,6 +41,8 @@ from ..core.config import (
 )
 
 Model = TypeVar("Model", bound=BaseModel)
+
+logger = logging.getLogger("kkb.llm")
 
 
 class LLMError(RuntimeError):
@@ -143,13 +146,19 @@ class KloudeksClient:
             raise LLMError("Kloudeks returned a non-JSON body") from exc
 
         usage = body.get("usage") or {}
-        self.usage = self.usage.add(Usage(
+        call = Usage(
             prompt_tokens=usage.get("prompt_tokens", 0) or 0,
             completion_tokens=usage.get("completion_tokens", 0) or 0,
             reasoning_tokens=(usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0,
             latency_seconds=round(elapsed, 3),
             calls=1,
-        ))
+        )
+        self.usage = self.usage.add(call)
+        # One line per round trip: with the pipeline's stage timings this says
+        # whether a slow "plan" stage is the model or the discovery around it.
+        logger.info("llm %s %7.3fs prompt=%d completion=%d reasoning=%d max_tokens=%s",
+                    path, elapsed, call.prompt_tokens, call.completion_tokens,
+                    call.reasoning_tokens, payload.get("max_tokens"))
         return body
 
     # Reasoning tokens are billed against max_tokens, so a budget sized for the
@@ -228,6 +237,10 @@ class KloudeksClient:
             return schema.model_validate_json(_strip_json(raw))
         except (ValidationError, LLMError) as exc:
             first_error = exc
+            # A failed plan costs a second round trip and, if that fails too,
+            # the whole model plan: worth a WARNING with what the model said.
+            logger.warning("%s did not validate (%s); raw=%r", schema.__name__,
+                           str(exc).splitlines()[0][:200], raw[:600])
             if not repair:
                 raise LLMError(f"{schema.__name__} validation failed: {exc}") from exc
 
@@ -245,6 +258,8 @@ class KloudeksClient:
         try:
             return schema.model_validate_json(_strip_json(raw))
         except (ValidationError, LLMError) as exc:
+            logger.warning("%s invalid after repair (%s); raw=%r", schema.__name__,
+                           str(exc).splitlines()[0][:200], raw[:600])
             raise LLMError(f"{schema.__name__} invalid after one repair attempt: {exc}") from exc
 
     def embed(self, texts: List[str], model: str = KLOUDEKS_EMBEDDING_MODEL) -> List[List[float]]:

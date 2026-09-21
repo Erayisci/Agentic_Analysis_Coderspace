@@ -21,6 +21,8 @@ crawler containers from `extensions/web_tools/` running) the extension's
 reader is always the in-process `backend.tools.web_url.read_url`.
 """
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -37,6 +39,15 @@ from ..llm import KloudeksClient
 from ..tools.web_url import read_url
 
 logger = logging.getLogger("kkb.api")
+
+# uvicorn configures only its own loggers; without a root handler the `kkb.*`
+# INFO lines (stage and model-call timings) never reach the console. No-op if
+# the process already configured logging. KKB_LOG_LEVEL=DEBUG widens it.
+logging.basicConfig(
+    level=os.environ.get("KKB_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def _build_client() -> Optional[KloudeksClient]:
@@ -116,8 +127,14 @@ def ask(request: AskRequest) -> Dict[str, Any]:
     """Run one turn and return the API payload `run_turn` already builds --
     everything except the raw `Session` object, which carries a pandas
     DataFrame and is not JSON-serialisable."""
+    started = time.perf_counter()
     result = _agent().ask(request.question.strip(), session_id=request.session_id)
-    return {key: value for key, value in result.items() if key != "session"}
+    payload = {key: value for key, value in result.items() if key != "session"}
+    # Request time minus the pipeline's own total is serialisation: a 67-row
+    # table and a Plotly figure are cheap, but this is where that would show.
+    logger.info("/ask session=%s %.3fs (pipeline %.3fs)", request.session_id,
+                time.perf_counter() - started, result["timings"]["total"])
+    return payload
 
 
 @app.post("/debug/ingest_external")
@@ -141,12 +158,18 @@ def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
                 sheet=request.sheet, unit=request.unit, monthly_rule=request.monthly_rule)
     plan = Plan(intent="url_analysis", steps=[step])
     Executor(session, url_reader=_agent().url_reader, web_search=_agent().web_search).run(plan)
+    # Adding a file's column to the table is an extension of it, so the
+    # columns already on screen stay -- the same rule a "bozmadan" follow-up
+    # gets in the pipeline.
+    session.focus(keep_previous=True)
     verification = verify(session)
+    view = session.view()
     return {
         "table": {
-            "columns": session.artifact.column_names(),
-            "units": session.artifact.units(),
-            "rows": session.artifact.to_records(),
+            "columns": view.column_names(),
+            "units": view.units(),
+            "rows": view.to_records(),
+            "all_columns": session.artifact.column_names(),
         },
         "citations": session.citations,
         "verification": verification,
@@ -161,12 +184,15 @@ def get_session(session_id: str) -> Dict[str, Any]:
     if session_id not in _agent().sessions:
         raise HTTPException(404, f"no session {session_id!r}")
     session = _agent().sessions[session_id]
+    # What the last turn showed, not everything the conversation has built.
+    view = session.view()
     return {
         "session_id": session_id,
         "table": {
-            "columns": session.artifact.column_names(),
-            "units": session.artifact.units(),
-            "rows": session.artifact.to_records(),
+            "columns": view.column_names(),
+            "units": view.units(),
+            "rows": view.to_records(),
+            "all_columns": session.artifact.column_names(),
         },
         "citations": session.citations,
         "n_turns": len(session.turns),

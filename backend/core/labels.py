@@ -124,6 +124,27 @@ def slugify(name: str) -> str:
     return text.strip("_")
 
 
+def fold(text: str) -> str:
+    """ASCII-lowercase for searching, with spacing and punctuation left alone.
+
+    `slugify` exists because a key must be a stable identifier; this exists
+    because a *search* must match across the same alphabet gap without becoming
+    one. Turkish case folding is the reason both are needed: 'İ'.lower() is not
+    'i', so a question written "TGA orani" does not contain, and is not
+    contained by, a published "oranı" -- and a ranker comparing the two finds
+    nothing while looking like it searched. Measured: this alone is why the
+    published NPL ratio, whose row says "oranı" in every spelling a user would
+    reach for, lost to a balance-sheet stock that says nothing of the kind.
+    """
+    text = str(text).translate(TURKISH_TO_ASCII).lower()
+    # The circumflex is not in TURKISH_TO_ASCII and is not a Turkish letter:
+    # BDDK writes "Dönem Net Kârı" and a question writes "kari". Decomposing
+    # and dropping the combining marks is what `slugify` already does one line
+    # later, for the same reason.
+    return "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(ch))
+
+
 def canonical_key(label: str) -> str:
     """Slug of a label with its formula, footnote and unit decorations removed."""
     name, _, _, _ = strip_decorations(label)

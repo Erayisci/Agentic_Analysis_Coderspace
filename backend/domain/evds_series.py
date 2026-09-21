@@ -136,11 +136,33 @@ BY_CODE: Dict[str, DataGroup] = {g.code: g for g in GROUPS}
 
 # Series the build derives from the raw ones. Kept here so the catalogue lists
 # them like any other series; the arithmetic lives in transform.macro.
+# The name is a template, not a sentence, because the property type is not
+# constant across the series produced. The suffix after `TP.AKONUTSAT{1,2}.`
+# is not the region alone: a leading `K` means Konut and its absence means
+# İş Yeri, so KTRTOPLAM and TRTOPLAM are housing and commercial-premises sales
+# for the same Türkiye. Naming every derived row "konut" published 83 rows of
+# commercial-premises data under a housing name, identical in every character
+# to the housing row beside it -- and discovery, having nothing to tell them
+# apart, answered a housing question with the commercial one.
 DERIVED_SERIES = (
     ("DERIVED.IPOTEKLI_PAY", "bie_akonutsat2", "rate",
-     "İpotekli konut satışlarının toplam satışlara oranı (%)",
-     "Mortgaged house sales as % of total house sales"),
+     "İpotekli {tip} satışlarının toplam {tip} satışlarına oranı (%)",
+     "Mortgaged {tip} sales as % of total {tip} sales"),
 )
+
+# The property-type segment as TCMB spells it, mapped to the forms the derived
+# name needs: (Turkish mid-sentence, English). Read from the source series' own
+# name rather than derived from the `K`, for the same reason series names are
+# never hand-typed -- TCMB's spelling is the fact.
+#
+# The Turkish form is spelled out rather than computed, because `str.lower()`
+# is wrong for exactly these words: 'İ'.lower() is 'i' followed by a COMBINING
+# DOT ABOVE, so "İş Yeri".lower() produces a name no search can match and no
+# reader expects.
+PROPERTY_TYPE_WORDS = {
+    "Konut": ("konut", "house"),
+    "İş Yeri": ("iş yeri", "commercial premises"),
+}
 
 
 def _check_registry() -> None:

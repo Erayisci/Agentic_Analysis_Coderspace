@@ -14,7 +14,8 @@ where they belong and nowhere else.
 """
 import pandas as pd
 
-from ..domain.evds_series import DERIVED_SERIES
+from ..core import search_text
+from ..domain.evds_series import DERIVED_SERIES, PROPERTY_TYPE_WORDS
 
 
 def _month_start(dates: pd.Series) -> pd.Series:
@@ -72,8 +73,10 @@ def add_derived_series(monthly: pd.DataFrame) -> pd.DataFrame:
 def _ipotekli_share(monthly: pd.DataFrame) -> pd.DataFrame:
     """Mortgaged sales / total sales, per month and per region suffix.
 
-    The suffix after `TP.AKONUTSAT{1,2}.` names the region (KTRTOPLAM is
-    Türkiye, the rest are provinces), so the two groups pair up by suffix.
+    The suffix after `TP.AKONUTSAT{1,2}.` is property type and region together
+    -- a leading `K` is Konut, its absence İş Yeri -- so pairing on the whole
+    suffix pairs like with like, and 166 shares come out of 83 regions. The
+    arithmetic was always right; only the catalogue's names were not.
     """
     total = monthly[monthly.datagroup == "bie_akonutsat1"].copy()
     mortgaged = monthly[monthly.datagroup == "bie_akonutsat2"].copy()
@@ -106,13 +109,29 @@ def expand_derived_catalogue(catalogue: pd.DataFrame, monthly: pd.DataFrame) -> 
         region = code.split(".", 2)[2]
         base = template.loc[base_code]
         source = catalogue[catalogue.series_code == f"TP.AKONUTSAT2.{region}"].iloc[0]
+        # TCMB names these `{Region}_{PropertyType}_{SalesType}`. Taking only
+        # the region dropped the one segment that separates Konut from İş Yeri,
+        # so half the derived catalogue said "konut" over commercial-premises
+        # sales -- see the note on DERIVED_SERIES.
+        region_name, property_type = source["name_tr"].split("_")[:2]
         row = base.to_dict()
         row["series_code"] = code
-        row["name_tr"] = f"{base['name_tr']} - {source['name_tr'].split('_')[0]}"
-        row["name_en"] = f"{base['name_en']} - {source['name_tr'].split('_')[0]}"
+        tip_tr, tip_en = PROPERTY_TYPE_WORDS.get(property_type, (property_type, property_type))
+        row["name_tr"] = f"{base['name_tr'].format(tip=tip_tr)} - {region_name}"
+        row["name_en"] = f"{base['name_en'].format(tip=tip_en)} - {region_name}"
         row["level"] = source["level"]  # Türkiye total is level 1, provinces level 2
         row["published_start"] = source["published_start"]
         row["published_end"] = source["published_end"]
         rows.append(row)
     concrete = pd.DataFrame(rows)
-    return pd.concat([catalogue[~catalogue.derived], concrete], ignore_index=True)
+    full = pd.concat([catalogue[~catalogue.derived], concrete], ignore_index=True)
+
+    # The catalogue is complete here and nowhere earlier: the derived rows only
+    # learn their real names above. Composing the search text before this point
+    # would index 83 commercial-premises series under the template's "konut".
+    full["search_text"] = [
+        search_text.for_macro_series(row.name_tr, row.name_en, row.datagroup_name_tr,
+                                     row.category_tr, row.unit)
+        for row in full.itertuples()]
+    full["search_fold"] = [search_text.searchable(t) for t in full.search_text]
+    return full
