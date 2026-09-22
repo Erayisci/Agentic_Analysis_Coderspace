@@ -29,7 +29,7 @@ from ..core.labels import fold
 from ..ingestion.external import IngestResult, ingest_url
 from ..lakehouse import external_store
 from ..llm import KloudeksClient, LLMError
-from ..tools.lakehouse import _terms, discover_concepts
+from ..tools.lakehouse import discover_concepts
 from .composer import compose
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
@@ -88,13 +88,25 @@ def landed_series(results: List[IngestResult], question: str,
                              "name": row.name_clean or row.name, "unit": row.unit,
                              "temporal_semantics": row.temporal_semantics, "location": row.location,
                              "unit_verified": bool(row.unit_verified), "url": landed.url})
-    if len(rows) > limit:
-        terms = _terms(question)
-        for row in rows:
-            haystack = fold(f"{row['key']} {row['name']}")
-            row["score"] = sum(weight for term, weight in terms if term in haystack)
-        rows.sort(key=lambda row: -row["score"])
+    # Ranked by the question's own words, always: the no-model plan takes the
+    # first two, and "toplam altin islem miktari" must reach the TOTAL column
+    # of a ten-column PDF rather than whichever column came first. The raw
+    # folded words, not `_terms`: the lakehouse stopword list drops "toplam"
+    # and "miktari" as filler, and in a file's column names they are the
+    # signal. A stable sort keeps the file's order among unnamed rows.
+    words = {w for w in re.split(r"[^\w]+", fold(question or "")) if len(w) > 2}
+    words |= {_LANDED_SYNONYMS[w] for w in list(words) if w in _LANDED_SYNONYMS}
+    for row in rows:
+        haystack = fold(f"{row['key']} {row['name']} {row.get('location') or ''}")
+        row["score"] = sum(1 for w in words if w in haystack)
+    rows.sort(key=lambda row: -row["score"])
     return rows[:limit]
+
+
+# A file published in two languages names its columns in both; the question
+# uses one. Just the pairs the brief's own sources need.
+_LANDED_SYNONYMS = {"toplam": "total", "total": "toplam", "hacim": "volume", "volume": "hacim",
+                    "miktar": "amount", "amount": "miktar", "sayisi": "number", "adet": "number"}
 
 
 def _landed_column_name(key: str) -> str:

@@ -17,7 +17,15 @@ from pydantic import BaseModel, Field
 from ..llm import LLMError
 from .planner import Intent
 
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'\)]+", re.I)
+# Square brackets and parentheses end a URL so a Markdown link `[label](url)`
+# yields its target once, not a label that swallows the closing bracket.
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'\[\]()]+", re.I)
+
+
+def extract_urls(question: str) -> List[str]:
+    """Plain URLs and Markdown link targets, deduplicated, trailing
+    punctuation stripped ("... bu dosya: https://x/y.pdf." is not a .pdf. URL)."""
+    return list(dict.fromkeys(url.rstrip(".,;:") for url in URL_PATTERN.findall(question or "")))
 
 # Turkish and English ways of saying "keep the table and add to it". The
 # reference scenario's turns 2 and 3 are both phrased this way, and reading
@@ -313,7 +321,7 @@ def wanted_analyses(question: str) -> List[str]:
 def route(question: str, has_artifact: bool = False, client=None) -> Route:
     """Classify a question. `client` is consulted only if the rules are silent."""
     question = question or ""
-    urls = URL_PATTERN.findall(question)
+    urls = extract_urls(question)
     start, end = extract_window(question)
     # "bunun grafiğini çiz" / "tablo yap" name no series: with a table in the
     # session they can only mean that table, so they are follow-ups that only
