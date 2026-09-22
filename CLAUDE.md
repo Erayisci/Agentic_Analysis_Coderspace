@@ -548,14 +548,34 @@ the five `external_*` VIEWS over `data/external/*/<file>.parquet` and seeds zero
 bind; measured on DuckDB 1.5.5, a `read_only=True` connection sees a Parquet file added after the view
 was created on its next query. The build never materialises these as tables -- that would freeze the
 zone at build time. The same bytes under the same URL are a cache hit that writes nothing; a landing
-page (HTML linking to files) also lands its top-3 file links one level deep, `parent_source_id` set.
-`series_key` is `<source_id>/<location>/<name>` and stays ASCII. Unit and semantics are **inferred**
+page (HTML linking to files) also lands the file links the question picked out, one level deep,
+`parent_source_id` set. `series_key` is `<source_id>/<location>/<name>` and stays ASCII. Unit and semantics are **inferred**
 (`unit_source`, `semantics_source`, `unit_verified=false`); the verifier turns that into the
 `external_units_are_verified` caveat and `external_quality_report` holds what the ingester could not
 establish. **CSV and XLSX are read whole in-process** (`documents._read_csv_native` /
 `_read_xlsx_native`, 100k rows): the extractor's 2,000-row cap keeps the *oldest* rows, which turned a
 FRED daily series starting in 1962 into eight years of the sixties. PDF, XLS, DOCX and images stay with
 the extractor and its caps; a truncated table lands as `status="partial"` with the warning recorded.
+
+**A URL is an address, not a description, and four defects came from scoring it as one.** Borsa
+İstanbul's precious-metals page (`/veriler/kiymetli-madenler-ve-kiymetli-taslar-piyasasi/piyasa-verileri`,
+a landing page linking to 21 reports) is the measurement. `router.without_urls` strips every URL from
+the question before `discover_concepts` and `landed_series` read it -- the path words ranked "Sermaye
+Piyasası İşlemleri Karları" and "Kıymetli Maden Kredileri" above the gold series the question named, and
+the URL itself was split into clauses (`https://www`, `borsaistanbul`); `Route.urls` already carries it,
+so nothing downstream loses the address, and the planner still sees the question verbatim.
+`ingestion.external._hint_without_urls` does the same for the ingester's own hint. In `rank_links`, the
+link label is `fold`ed rather than lowercased -- `'İşlemleri'.lower()` is an `i` plus a combining dot, so
+"Altın İşlemleri" shared *no* word with a question about `islem` -- and a word scores once, because
+`_terms` emits a five-character stem beside a long word and `piyasasi` + `piyas` counted one word twice.
+**Only the links the question picked out are followed**: the file-type and host bonuses order links the
+question is silent about, and letting them fill the remaining two seats landed the silver and platinum
+reports for a question about gold. Those three publish *byte-identical* column names, so
+`deterministic_series_plan` handed two of them one `as_name` and silver silently replaced gold under a
+citation that agreed -- names are now uniquified there the way the executor already uniquifies the ones
+it infers. A sibling PDF carries no `<title>` and `kmp_au` names no metal, so the text of the link that
+led to it becomes the source's title, and `landed_series` ranks on it. Ties are all followed ("altın ve
+gümüş" means both), and a question that matches nothing still takes the first three.
 
 **Typeset PDF tables are read from word positions.** Regulators' PDFs are unruled: pdfplumber's
 line-based `extract_table` returned a 13x1 fragment of Borsa İstanbul's gold trading report (the PDF
@@ -944,7 +964,7 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the BDDK
 FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corpus (44 groups,
-2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables plus the 5 external-zone views, 757 tests (17 skip without the web-tools containers or the lost OCR recording; 9 of the
+2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables plus the 5 external-zone views, 761 tests (17 skip without the web-tools containers or the lost OCR recording; 9 of the
 web-tools extension's Docker and process-group tests fail on Windows).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five

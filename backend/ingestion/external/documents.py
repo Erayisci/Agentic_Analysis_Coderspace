@@ -32,7 +32,7 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from ...core.config import EXTERNAL_CACHE_DIR, EXTERNAL_MAX_DOWNLOAD_BYTES, kloudeks_api_key
-from ...core.labels import TURKISH_TO_ASCII
+from ...core.labels import fold
 from ...extensions.web_tools.asset_common import AssetFailure, failure, normalize
 from ...extensions.web_tools.page_assets import public_assets
 from ...tools import web_url
@@ -329,19 +329,50 @@ def raw_extension(evidence: dict) -> str:
 def rank_links(links: List[dict], hint: str, base_url: str, maximum: int = 3) -> List[dict]:
     """Which linked documents to follow from a landing page: file links only
     (never navigation), scored by the question's terms against the link text
-    and path, spreadsheets slightly above PDFs, same host slightly above others."""
-    terms = [(term.translate(TURKISH_TO_ASCII), weight) for term, weight in _terms(hint or "")]
+    and path, spreadsheets slightly above PDFs, same host slightly above others.
+
+    The link text is `fold`ed, not lowercased: a Turkish link label starting
+    with 'İ' -- which is most of a regulator's file list ('İşlemleri',
+    'İthalatı') -- lowercases to 'i' plus a combining dot and matches no ASCII
+    term at all. Measured on Borsa İstanbul's precious-metals page, that alone
+    cost 'Altın İşlemleri' its match on "islem" and the gold report was never
+    followed for a question asking about gold.
+
+    A word scores once. `_terms` emits a five-character stem beside a long word
+    ('piyasasi' + 'piyas') as a fallback for when the full form does not match;
+    when both match the same link it is one word counted twice, which put three
+    'Piyasası' links above the one the question named. Discovery's own `_score`
+    wants that fallback and is benchmarked with it -- this is a rule about link
+    labels, so it stays here.
+
+    **When the question picks links out, follow only the ones it picked.** The
+    file type and host bonuses exist to order links the question is silent
+    about; letting them fill the remaining seats landed Borsa İstanbul's silver
+    and platinum reports for a question naming gold, and those three publish
+    identical column names, so the answer could quote silver as gold. Links
+    tied at the best term score are all followed -- "altın ve gümüş" means
+    both, and a page of monthly reports matches several equally -- and when
+    nothing matches at all the first `maximum` are taken as before.
+    """
+    terms = [(fold(term), weight) for term, weight in _terms(hint or "")]
     base_host = (urlsplit(base_url).hostname or "").lower()
     scored = []
     for position, link in enumerate(links or []):
         if link.get("type_hint") not in DOCUMENT_TYPES:
             continue
         parts = urlsplit(link.get("url") or "")
-        haystack = f"{link.get('text', '')} {parts.path}".lower().translate(TURKISH_TO_ASCII)
-        score = sum(weight for term, weight in terms if term and term in haystack)
-        score += {"xlsx": 1.0, "xls": 1.0, "csv": 1.0, "pdf": 0.5}.get(link.get("type_hint"), 0.25)
+        haystack = fold(f"{link.get('text', '')} {parts.path}")
+        matched = [(term, weight) for term, weight in terms if term and term in haystack]
+        longer = {term for term, _ in matched}
+        relevance = sum(weight for term, weight in matched
+                        if not any(other != term and other.startswith(term) for other in longer))
+        score = relevance + {"xlsx": 1.0, "xls": 1.0, "csv": 1.0,
+                             "pdf": 0.5}.get(link.get("type_hint"), 0.25)
         if (parts.hostname or "").lower() == base_host:
             score += 0.5
-        scored.append((-score, position, link))
+        scored.append((-score, position, link, relevance))
     scored.sort(key=lambda item: (item[0], item[1]))
-    return [link for _, _, link in scored[:maximum]]
+    best = max((relevance for *_, relevance in scored), default=0.0)
+    if best > 0:
+        scored = [item for item in scored if item[3] >= best]
+    return [link for _, _, link, _ in scored[:maximum]]

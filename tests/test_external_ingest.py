@@ -154,14 +154,16 @@ def test_a_prose_page_lands_empty_and_a_landing_page_follows_its_documents(zone,
     page = "https://example.org/rapor"
     html = b"""<html><head><title>Aylik Rapor</title></head><body>
         <p>Bu sayfada raporun dosyalari yer alir.</p>
-        <a href="/dosyalar/tuketici.xlsx">Tuketici kredileri tablosu (indir)</a>
+        <a href="/dosyalar/tuketici.xlsx">Konut kredileri tablosu (indir)</a>
         <a href="/hakkimizda.html">Hakkimizda</a>
-        <a href="https://example.org/dosyalar/notlar.pdf">Metodoloji notu</a>
+        <a href="https://example.org/dosyalar/notlar.pdf">Konut kredileri metodoloji notu</a>
+        <a href="https://example.org/dosyalar/sunum.pdf">Yatirimci sunumu</a>
         </body></html>"""
     _serve(monkeypatch, {
         page: ("text/html; charset=utf-8", html),
         "https://example.org/dosyalar/tuketici.xlsx": (XLSX, bddk_style_workbook()),
         "https://example.org/dosyalar/notlar.pdf": ("application/pdf", b"%PDF-1.4 not really a pdf"),
+        "https://example.org/dosyalar/sunum.pdf": ("application/pdf", b"%PDF-1.4 not really a pdf"),
     })
 
     result = ingest.ingest_url(page, hint="konut kredileri")
@@ -170,7 +172,8 @@ def test_a_prose_page_lands_empty_and_a_landing_page_follows_its_documents(zone,
     children = {child.url: child for child in result.children}
     assert "https://example.org/dosyalar/tuketici.xlsx" in children     # the file link was followed
     assert "https://example.org/hakkimizda.html" not in children        # navigation was not
-    workbook = children["https://example.org/dosyalar/tuketici.xlsx"]
+    assert "https://example.org/dosyalar/sunum.pdf" not in children     # nor a document the question
+    workbook = children["https://example.org/dosyalar/tuketici.xlsx"]   # did not name (see rank_links)
     assert workbook.status == "ok" and workbook.n_series == 2
     assert store.read_manifest(workbook.source_id)["parent_source_id"] == result.source_id
     assert result.all_series_keys() == workbook.series_keys
@@ -465,3 +468,70 @@ def test_the_extension_model_client_connects_directly_without_a_proxy():
     with pytest.raises(ModelFailure):
         KloudeksClient("https://evil.example.com/v1", "key", None, connection_factory=Connection).chat(
             [], model="x", max_tokens=8)
+
+
+# --- link ranking on a landing page ------------------------------------------
+# A regulator's landing page lists its whole catalogue, and the three rules
+# below were each measured against Borsa Istanbul's precious-metals page, whose
+# gold / silver / platinum reports publish byte-identical column names.
+
+BIST_STYLE_PAGE = [
+    {"url": "https://x.org/dosyalar/kmp_au.pdf", "text": "Altın İşlemleri", "type_hint": "pdf"},
+    {"url": "https://x.org/dosyalar/kmp_ag.pdf", "text": "Gümüş İşlemleri", "type_hint": "pdf"},
+    {"url": "https://x.org/dosyalar/kmp_pl.pdf", "text": "Platin İşlemleri", "type_hint": "pdf"},
+    {"url": "https://x.org/dosyalar/ith_au.pdf", "text": "Altın İthalatı", "type_hint": "pdf"},
+    {"url": "https://x.org/hakkimizda.html", "text": "Hakkımızda", "type_hint": "html"},
+]
+BASE = "https://x.org/veriler/kiymetli-madenler-piyasasi/piyasa-verileri"
+
+
+def _followed(hint, maximum=3):
+    return [link["text"] for link in documents.rank_links(BIST_STYLE_PAGE, hint, BASE, maximum=maximum)]
+
+
+def test_a_turkish_link_label_is_folded_before_it_is_matched():
+    # 'İşlemleri'.lower() is 'i̇şlemleri' -- an i plus a combining dot, which
+    # the ASCII term "islem" is not a substring of. Lowercasing before the
+    # transliteration cost 'Altın İşlemleri' the only word it shared with the
+    # question, and the gold report was never followed.
+    assert _followed("altin islem miktari") == ["Altın İşlemleri"]
+
+
+def test_only_the_documents_the_question_named_are_followed():
+    # The file-type and host bonuses order links the question is silent about;
+    # they must not fill the remaining seats with siblings it excluded. Gold and
+    # silver publish the same column names, so following both is how an answer
+    # quotes silver as gold.
+    assert _followed("altin islem miktari") == ["Altın İşlemleri"]
+    assert _followed("altin ve gumus islemleri") == ["Altın İşlemleri", "Gümüş İşlemleri"]
+    assert _followed("altin ithalati") == ["Altın İthalatı"]
+    # Nothing matched: the ranking has no opinion, so the first few are taken.
+    assert len(_followed("bu sayfadaki dosyalari yukle")) == 3
+
+
+def test_the_url_being_landed_is_not_a_search_term_for_its_own_links():
+    # The hint is normally the whole question, and the question names the URL.
+    # This page's path says "kiymetli-madenler-piyasasi", which describes every
+    # link on it equally and the gold report no better than the rest.
+    question = f"{BASE} sayfasindaki altin islem miktarini goster"
+    assert ingest._hint_without_urls(question) == "sayfasindaki altin islem miktarini goster"
+    assert _followed(ingest._hint_without_urls(question)) == ["Altın İşlemleri"]
+
+
+def test_a_sibling_report_is_named_by_the_link_that_led_to_it(zone, monkeypatch):
+    # A PDF carries no <title>, and 'kmp_au' / 'kmp_ag' name no metal. The link
+    # text is the only thing that distinguishes two sources whose columns are
+    # spelled identically, so it is what the source is called.
+    page = "https://example.org/veriler"
+    html = b"""<html><head><title>Veriler</title></head><body>
+        <a href="https://example.org/dosyalar/kmp_au.pdf">Altin Islemleri</a>
+        </body></html>"""
+    _serve(monkeypatch, {
+        page: ("text/html; charset=utf-8", html),
+        "https://example.org/dosyalar/kmp_au.pdf": (XLSX, bddk_style_workbook()),
+    })
+
+    result = ingest.ingest_url(page, hint="altin islemleri")
+
+    child = result.children[0]
+    assert store.read_manifest(child.source_id)["title"] == "Altin Islemleri"

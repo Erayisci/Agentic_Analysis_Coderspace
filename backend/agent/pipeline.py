@@ -34,7 +34,7 @@ from .composer import compose
 from .evidence_store import EvidenceStorageError
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
-from .router import Route, extract_single_month, extract_urls, route
+from .router import Route, extract_single_month, extract_urls, route, without_urls
 from .state import AuditStep, Session
 from .verifier import verify
 
@@ -84,21 +84,29 @@ def landed_series(results: List[IngestResult], question: str,
             if landed.status == "error" or not landed.series_keys:
                 continue
             series = external_store.read_source(landed.source_id)["series"]
+            title = (external_store.read_manifest(landed.source_id) or {}).get("title") or ""
             for row in series.itertuples():
                 rows.append({"key": row.series_key, "source": "external", "dataset": row.source_id,
                              "name": row.name_clean or row.name, "unit": row.unit,
                              "temporal_semantics": row.temporal_semantics, "location": row.location,
-                             "unit_verified": bool(row.unit_verified), "url": landed.url})
+                             "unit_verified": bool(row.unit_verified), "url": landed.url,
+                             "source_title": title})
     # Ranked by the question's own words, always: the no-model plan takes the
     # first two, and "toplam altin islem miktari" must reach the TOTAL column
     # of a ten-column PDF rather than whichever column came first. The raw
     # folded words, not `_terms`: the lakehouse stopword list drops "toplam"
     # and "miktari" as filler, and in a file's column names they are the
     # signal. A stable sort keeps the file's order among unnamed rows.
+    #
+    # The source's own name is part of the haystack because one landing page
+    # lands siblings: Borsa Istanbul's gold, silver and platinum reports carry
+    # identical column names, so "altin" reaches the right one only through the
+    # title -- the text of the link that led to it.
     words = {w for w in re.split(r"[^\w]+", fold(question or "")) if len(w) > 2}
     words |= {_LANDED_SYNONYMS[w] for w in list(words) if w in _LANDED_SYNONYMS}
     for row in rows:
-        haystack = fold(f"{row['key']} {row['name']} {row.get('location') or ''}")
+        haystack = fold(f"{row['key']} {row['name']} {row.get('location') or ''} "
+                        f"{row.get('source_title') or ''}")
         row["score"] = sum(1 for w in words if w in haystack)
     rows.sort(key=lambda row: -row["score"])
     return rows[:limit]
@@ -260,12 +268,27 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
     if not chosen:
         return template_plan("metadata", question)
 
-    steps = [Step(op="fetch_series", key=c["key"], source=c["source"],
-                  dataset=c["dataset"] if c["source"] in DATASET_SOURCES else None,
-                  currency=c.get("currency"), province=c.get("province"),
-                  as_name=(_slice_name(c["key"], c["currency"]) if c.get("currency")
-                           else _landed_column_name(c["key"]) if c["source"] == "external" else None))
-             for c in chosen]
+    # A deliberate `as_name` replaces a same-named column outright, and the
+    # executor's collision guard only covers the names it infers itself. One
+    # landing page lands siblings whose columns are named identically (Borsa
+    # Istanbul's gold and silver reports both publish "TOPLAM / TOTAL
+    # Miktar/Amount (KG)"), so two chosen series would arrive under one name
+    # and the second would silently replace the first -- gold reported as
+    # silver, with a citation that agreed. Suffix the way the executor does.
+    steps, named = [], set()
+    for c in chosen:
+        as_name = (_slice_name(c["key"], c["currency"]) if c.get("currency")
+                   else _landed_column_name(c["key"]) if c["source"] == "external" else None)
+        if as_name is not None:
+            candidate, suffix = as_name, 2
+            while candidate in named:
+                candidate, suffix = f"{as_name}_{suffix}", suffix + 1
+            as_name = candidate
+            named.add(as_name)
+        steps.append(Step(op="fetch_series", key=c["key"], source=c["source"],
+                          dataset=c["dataset"] if c["source"] in DATASET_SOURCES else None,
+                          currency=c.get("currency"), province=c.get("province"),
+                          as_name=as_name))
     return Plan(intent="series_analysis", start=route_result.start, end=route_result.end,
                 steps=steps, reasoning="deterministic: top-ranked discovery candidates")
 
@@ -639,7 +662,12 @@ def make_plan(question: str, session: Session, route_result: Route,
     whose file produced series is a series question, whatever the router
     called it, and the plan must reach those series.
     """
-    landed = landed_series(ingested or [], question)
+    # Discovery and the landed ranking read the question's words; the URL in it
+    # is an address the router already carries on `route_result.urls`. See
+    # `router.without_urls` for what its path words cost when they rank as
+    # search terms. The model still sees the question as the user wrote it.
+    concepts = without_urls(question)
+    landed = landed_series(ingested or [], concepts)
     series_intent = route_result.intent in ("series_analysis", "followup") or bool(landed)
 
     # "bunun grafiğini çiz" / "tablo yap" over an existing table: there is
@@ -660,13 +688,13 @@ def make_plan(question: str, session: Session, route_result: Route,
         return Plan(intent="followup", steps=[Step(op="clear_table")],
                     reasoning="deterministic: explicit clear request")
 
-    found = (discover_concepts(question, limit=MAX_CANDIDATES_IN_CONTEXT)
+    found = (discover_concepts(concepts, limit=MAX_CANDIDATES_IN_CONTEXT)
              if client is not None or series_intent else {"candidates": [], "by_concept": []})
 
     def fallback() -> Plan:
         if series_intent:
             return apply_dimensions(
-                deterministic_series_plan(question, route_result, discovery=found, landed=landed), found)
+                deterministic_series_plan(concepts, route_result, discovery=found, landed=landed), found)
         return template_plan(route_result.intent, question, route_result.urls,
                              route_result.start, route_result.end)
 

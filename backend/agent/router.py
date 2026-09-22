@@ -27,6 +27,21 @@ def extract_urls(question: str) -> List[str]:
     punctuation stripped ("... bu dosya: https://x/y.pdf." is not a .pdf. URL)."""
     return list(dict.fromkeys(url.rstrip(".,;:") for url in URL_PATTERN.findall(question or "")))
 
+
+def without_urls(question: str) -> str:
+    """The question's own words, with every URL removed.
+
+    A URL is an address, not a description, and a regulator's is made of words
+    that name published series. Measured on the demo-day prompt naming Borsa
+    Istanbul's precious-metals page: the path
+    '/kiymetli-madenler-ve-kiymetli-taslar-piyasasi/piyasa-verileri' ranked
+    'Sermaye Piyasasi Islemleri Karlari' and 'Kiymetli Maden Kredileri' above
+    the gold series the question asked for, and `discover_concepts` split the
+    URL itself into clauses ('https://www', 'borsaistanbul'). The URL is
+    already carried separately on `Route.urls`, so nothing needs it here.
+    """
+    return re.sub(r"\s{2,}", " ", URL_PATTERN.sub(" ", question or "")).strip()
+
 # Turkish and English ways of saying "keep the table and add to it". The
 # reference scenario's turns 2 and 3 are both phrased this way, and reading
 # them as new questions is what produces a silently different table.

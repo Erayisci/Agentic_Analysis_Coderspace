@@ -18,6 +18,7 @@ top-ranked linked documents, one level deep, each as its own source with
 `parent_source_id` set.
 """
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,7 @@ from .verify import cross_check, model_labels
 MAX_SERIES_PER_SOURCE = 200
 MAX_NATIVE_ROWS_PER_SOURCE = 50_000
 MAX_CHILDREN = 3
+_URL_IN_TEXT = re.compile(r"https?://\S+", re.I)
 
 
 @dataclass
@@ -69,15 +71,34 @@ class IngestResult:
         return keys
 
 
+def _hint_without_urls(hint: Optional[str]) -> str:
+    """The hint is usually the whole question, and the question names the URL
+    being landed -- so its own path words arrive as search terms. Measured on
+    Borsa Istanbul's precious-metals page, the path
+    '/kiymetli-madenler-ve-kiymetli-taslar-piyasasi/piyasa-verileri' scored
+    three 'Kiymetli Tas Piyasasi' reports above the gold report the question
+    asked for. An address says where to look, never what to look for."""
+    return _URL_IN_TEXT.sub(" ", hint or "").strip()
+
+
 def ingest_url(url: str, hint: Optional[str] = None, *, force: bool = False, depth: int = 0,
                tools: Optional[dict] = None, follow_links: bool = True,
                parent_source_id: Optional[str] = None, client=None,
-               verify_against_lakehouse: bool = True) -> IngestResult:
+               verify_against_lakehouse: bool = True, title: Optional[str] = None) -> IngestResult:
     """Land one URL. Raises ValueError only when the URL is refused outright
     (SSRF guard, download cap) or the extractor reports an error; a document
-    with no usable table lands with status 'empty' and its warnings."""
+    with no usable table lands with status 'empty' and its warnings.
+
+    `title` names the source when the document itself carries no name -- a PDF
+    has no <title>, so a sibling report's only label is the text of the link
+    that led to it. Borsa Istanbul's gold, silver and platinum reports publish
+    byte-identical column names ('TOPLAM / TOTAL Miktar/Amount (KG)') under
+    URLs that say only 'kmp_au' / 'kmp_ag' / 'kmp_pl': without the link text
+    'Altin Islemleri' nothing downstream can tell which metal a column is.
+    """
     url = store.canonical_url(url)
     source_id = store.source_id_for(url)
+    hint = _hint_without_urls(hint)
     evidence = read_document(url, hint=hint or "", tools=tools)
     if evidence.get("status") == "error":
         error = evidence.get("error") or {}
@@ -94,14 +115,16 @@ def ingest_url(url: str, hint: Optional[str] = None, *, force: bool = False, dep
             n_observations=int(len(parts["observations"])),
             warnings=[w for w in (manifest.get("warnings") or "").split(" | ") if w], cache_hit=True)
     else:
-        result = _land(url, source_id, evidence, hint or "", parent_source_id, client, verify_against_lakehouse)
+        result = _land(url, source_id, evidence, hint or "", parent_source_id, client,
+                       verify_against_lakehouse, title)
 
     if follow_links and depth == 0 and evidence.get("format") == "html":
         for link in rank_links(evidence.get("links") or [], hint or "", url, maximum=MAX_CHILDREN):
             try:
                 child = ingest_url(link["url"], hint, force=force, depth=depth + 1, tools=tools,
                                    follow_links=False, parent_source_id=source_id, client=client,
-                                   verify_against_lakehouse=verify_against_lakehouse)
+                                   verify_against_lakehouse=verify_against_lakehouse,
+                                   title=(link.get("text") or "").strip() or None)
             except Exception as exc:                                   # noqa: BLE001 -- one link, not the page
                 child = IngestResult(source_id=store.source_id_for(link["url"]), url=link["url"],
                                      status="error", error=f"{type(exc).__name__}: {exc}")
@@ -110,7 +133,8 @@ def ingest_url(url: str, hint: Optional[str] = None, *, force: bool = False, dep
 
 
 def _land(url: str, source_id: str, evidence: dict, hint: str, parent_source_id: Optional[str],
-          client=None, verify_against_lakehouse: bool = True) -> IngestResult:
+          client=None, verify_against_lakehouse: bool = True,
+          title: Optional[str] = None) -> IngestResult:
     warnings = [w for w in (evidence.get("warnings") or []) if w != EXTENSION_BOILERPLATE]
     bundles: List[SeriesBundle] = []
     seen: set = set()
@@ -198,7 +222,7 @@ def _land(url: str, source_id: str, evidence: dict, hint: str, parent_source_id:
         "parent_source_id": parent_source_id, "kind": evidence.get("kind") or "unknown",
         "content_type": evidence.get("content_type"), "content_sha256": evidence.get("content_sha256"),
         "n_bytes": evidence.get("n_bytes"), "fetched_at": evidence.get("fetched_at") or _now(),
-        "title": evidence.get("title"), "hint": hint or None,
+        "title": evidence.get("title") or title, "hint": hint or None,
         "extraction_route": evidence.get("extraction_route") or extraction_route(),
         "n_series": len(series_rows), "n_observations": int(len(observations)),
         "status": status, "warnings": " | ".join(warnings) if warnings else None,
