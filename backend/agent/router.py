@@ -86,6 +86,19 @@ ANALYSIS_PATTERNS = {
     "price": re.compile(r"(fiyat|enflasyon|t[üu]fe|kfe|endeks|price|inflation)", re.I),
 }
 
+# A bare keyword match cannot tell "nedensellik var mı" (a question) from
+# "nedensellik iddia etme" (an explicit prohibition) -- both contain
+# "nedensellik". Measured live: a question that named its own guardrail
+# ("aralarında nedensellik iddia etme") still triggered the causality step.
+# Deliberately narrow -- only the handful of phrasings that explicitly forbid
+# or disclaim a claim, never a general negation word -- because Turkish
+# negation is not reliably keyword-local ("değil mi" asks for confirmation,
+# it does not negate) and a broad check would suppress real causality
+# questions phrased with an ordinary negative word nearby.
+CAUSALITY_DISCLAIMED = re.compile(
+    r"(iddia\s+etme|iddia\s+edilemez|ileri\s+s[üu]rme|sanma|varsayma|"
+    r"nedensellik\s+(yok|de[ğg]ildir)|do not\s+claim|don'?t\s+claim)", re.I)
+
 FOOTNOTE_PATTERN = re.compile(
     r"(dipnot|metodoloji|tan[ıi]m[ıi]|nas[ıi]l\s+hesaplan|kapsam\s+d[ıi][şs][ıi]|footnote|methodolog)", re.I)
 
@@ -200,7 +213,9 @@ def wanted_analyses(question: str) -> List[str]:
     "nedensellik", "Granger") ask for a lead-lag test.
     """
     found = [m for m in ("anomaly", "changepoint") if ANALYSIS_PATTERNS[m].search(question)]
-    if ANALYSIS_PATTERNS["causality_strong"].search(question):
+    if CAUSALITY_DISCLAIMED.search(question):
+        pass  # the question forbids a causal claim; do not plan the test at all
+    elif ANALYSIS_PATTERNS["causality_strong"].search(question):
         found.append("causality")
     elif ANALYSIS_PATTERNS["causality_weak"].search(question):
         found.append("decompose" if ANALYSIS_PATTERNS["price"].search(question) else "causality")

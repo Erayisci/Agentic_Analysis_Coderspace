@@ -1729,6 +1729,21 @@ def test_the_router_reads_the_causality_phrasings_the_model_used_to_miss(questio
     assert route(question, client=None).wants_analysis == ["causality"]
 
 
+@pytest.mark.parametrize("question", [
+    "Konut kredisi ile altın arasında nedensellik iddia etme, sadece karşılaştır.",
+    "Bu iki serinin stok/akım farkını açıkla; aralarında nedensellik iddia etme.",
+    "Nedensellik iddia edilemez, sadece aynı yönde mi hareket ettiklerine bak.",
+])
+def test_the_router_does_not_plan_causality_when_the_question_forbids_it(question):
+    """Measured live: "...aralarında nedensellik iddia etme" still triggered a
+    causality step, because `causality_strong` is a bare keyword match on
+    "nedensellik" with no regard for the sentence forbidding the claim it
+    names. The tool refused for lack of data (>=24 observations) and the
+    composer honoured the instruction in prose, so no wrong number reached
+    the user this time -- but the step should never have been planned."""
+    assert route(question, client=None).wants_analysis == []
+
+
 class _StubPlanClient:
     """A fake KloudeksClient that returns one fixed plan, for testing the
     repairs make_plan applies to whatever the model handed back."""
