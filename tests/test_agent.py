@@ -1428,6 +1428,58 @@ def test_fetch_series_loads_a_finturk_metric_for_one_province():
     assert len(session.artifact.frame) == 22          # 2021-Q1..2026-Q2
 
 
+def test_two_provinces_of_the_same_finturk_key_do_not_collide_without_as_name():
+    """Measured live: "Ankara ve İstanbul'daki tasarruf mevduatını karşılaştır"
+    planned two fetch_series steps for one finturk key with neither `as_name`
+    set, both auto-named "tasarruf_mevduati" -- `AnalysisArtifact.add_column`
+    replaces a same-named column outright, so the second step (Ankara)
+    silently overwrote the first (İstanbul) within the same turn, and the
+    composer, seeing only one column left, told the user İstanbul had no data
+    at all. Two different series that would collide on the same auto-name are
+    disambiguated by province instead."""
+    needs_lakehouse()
+    plan = Plan(intent="series_analysis", start="2021-03-01", end="2026-06-01", steps=[
+        Step(op="fetch_series", key="tasarruf_mevduati", source="finturk",
+             dataset="mevduat", province="İSTANBUL"),
+        Step(op="fetch_series", key="tasarruf_mevduati", source="finturk",
+             dataset="mevduat", province="ANKARA"),
+    ])
+    session = Executor(Session()).run(plan)
+    assert all(a.ok for a in session.audit), [a.detail for a in session.audit if not a.ok]
+    columns = session.artifact.column_names()
+    assert len(columns) == 2, columns
+    provinces = {session.artifact.lineage[c].citation["filters"]["province"] for c in columns}
+    assert provinces == {"İSTANBUL", "ANKARA"}
+
+
+def test_a_deliberate_as_name_still_overwrites_a_stale_column_from_an_earlier_turn():
+    """The disambiguation above must not interfere with the existing, opposite
+    repair: a fresh question's plan naming a column explicitly (`as_name`)
+    still replaces whatever an earlier turn left under that name -- see
+    `test_a_fresh_question_never_plans_over_a_previous_questions_column`,
+    which pins this at the `make_plan` level; this pins it at the executor's
+    own collision check, scoped to only the current turn's auto-named
+    columns."""
+    needs_lakehouse()
+    session = Session()
+    session.start_turn("ilk soru")
+    stale = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="konut_kredisi", source="finturk",
+             dataset="bireysel_bankacilik", province="İSTANBUL", as_name="konut"),
+    ])
+    Executor(session).run(stale)
+    assert session.artifact.lineage["konut"].source == "finturk"
+
+    session.start_turn("ikinci soru")
+    fresh = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", key="tuketici_kredileri_konut", source="bulletin",
+             dataset="tuketici_kredileri", as_name="konut"),
+    ])
+    session = Executor(session).run(fresh)
+    assert session.artifact.lineage["konut"].source == "bulletin"
+    assert "konut_2" not in session.artifact.column_names()
+
+
 def test_fetch_series_resolves_a_finturk_province_case_and_dotless_i_safely():
     """Python's plain `.upper()` turns 'istanbul' into 'ISTANBUL', not the DB's
     'İSTANBUL' -- a model or user typing the ASCII-only spelling would

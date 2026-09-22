@@ -311,7 +311,32 @@ class Executor:
             values = T.resample_to_monthly(series.values, rule)
             transform = f"resample_to_monthly({rule})"
 
-        name = self.session.touch_column(_column_name(step, re.sub(r"[^\w]+", "_", key)))
+        citation = series.citation()
+        name = _column_name(step, re.sub(r"[^\w]+", "_", key))
+        # `AnalysisArtifact.add_column` replaces a same-named column outright
+        # (see its own docstring) -- correct when a plan deliberately names a
+        # column (`as_name`, e.g. `pipeline.apply_scope` repairing a stale
+        # reference onto a fresh fetch), but silent data loss when TWO steps
+        # in the SAME plan both fall back to the bare key with no `as_name`.
+        # Measured live: "Ankara ve İstanbul'daki tasarruf mevduatını
+        # karşılaştır" planned two fetch_series steps for one finturk key with
+        # no `as_name`, both auto-named "tasarruf_mevduati" -- the second
+        # (Ankara) silently overwrote the first (İstanbul) within this same
+        # turn, and the composer, seeing only one column left, told the user
+        # İstanbul had no data at all rather than reporting a collision.
+        # Scoped to `turn_columns` (this turn only, not `add_column`), and
+        # only when the plan left the name to be inferred, so a fresh
+        # question's deliberate `as_name` still overwrites a stale column from
+        # an earlier turn exactly as designed.
+        if step.as_name is None and name in self.session.turn_columns:
+            province = (citation.get("filters") or {}).get("province")
+            candidate = f"{name}_{slugify(province)}" if province else name
+            suffix = 2
+            while candidate in self.session.turn_columns:
+                candidate = f"{name}_{suffix}"
+                suffix += 1
+            name = candidate
+        name = self.session.touch_column(name)
         # Three slices of one line share a name; the label says which slice
         # this is, or the composer cannot tell the FX column from the TL one.
         label = series.name + {"FX": " (YP)", "TL": " (TL)"}.get(currency or "", "")
@@ -319,8 +344,8 @@ class Executor:
             transform=transform,
             column=name, label=label, source=series.source, unit=series.unit,
             temporal_semantics=series.temporal_semantics, key=series.key,
-            citation=series.citation()))
-        self.session.cite(series.citation())
+            citation=citation))
+        self.session.cite(citation)
         return (f"{name}: {len(values)} points, {series.unit}, "
                 f"{series.temporal_semantics}, {series.period_start}..{series.period_end}{resolved_by}")
 
