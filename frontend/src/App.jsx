@@ -5,6 +5,7 @@ import DataTable from "./components/DataTable";
 import ChartPanel from "./components/ChartPanel";
 import TrustPanel from "./components/TrustPanel";
 import SourcesPanel from "./components/SourcesPanel";
+import ResearchPanel from "./components/ResearchPanel";
 import kkbLogo from "./assets/kkb-logo.png";
 import "./App.css";
 
@@ -21,6 +22,10 @@ const EXAMPLE_QUESTIONS = [
   "2021-2025 arası konut kredisi ve faiz oranını göster",
   "Enflasyon nasıl değişti",
 ];
+const RESEARCH_QUESTIONS = [
+  "BDDK Türk Bankacılık Sektörü Temel Göstergeleri raporunun resmi sayfasını bul, oku ve kapsamını kaynak göstererek açıkla.",
+  "TCMB'nin en son faiz kararını resmi kaynaktan araştır ve kaynak göstererek özetle.",
+];
 
 export default function App() {
   const [sessionId] = useState(sessionIdFromStorage);
@@ -28,6 +33,8 @@ export default function App() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [modelConfigured, setModelConfigured] = useState(null);
+  const [researchConfigured, setResearchConfigured] = useState(null);
+  const [mode, setMode] = useState("auto");
   const [activeTab, setActiveTab] = useState("table");
   const [latest, setLatest] = useState(null); // last successful /ask response
   // The chart outlives the turn that drew it: "tablo yap" or "enflasyondan
@@ -40,7 +47,10 @@ export default function App() {
 
   useEffect(() => {
     health()
-      .then((data) => setModelConfigured(data.model_configured))
+      .then((data) => {
+        setModelConfigured(data.model_configured);
+        setResearchConfigured(data.research_configured);
+      })
       .catch(() => setModelConfigured(false));
   }, []);
 
@@ -56,19 +66,22 @@ export default function App() {
     setTurns((prev) => [...prev, { question: trimmed, pending: true }]);
 
     try {
-      const data = await ask(trimmed, sessionId);
+      const data = await ask(trimmed, sessionId, mode);
       setTurns((prev) => prev.map((t, i) =>
         i === prev.length - 1
           ? { question: trimmed, summary: data.summary, composed_by: data.composed_by,
-              unsupported_numbers: data.unsupported_numbers, sources: data.sources }
+              unsupported_numbers: data.unsupported_numbers, sources: data.sources,
+              evidence: data.evidence }
           : t));
       setLatest(data);
       if (data.figure) setFigure(data.figure);
       else if (!data.route?.is_followup) setFigure(null);
       // The side panel follows what the question asked for: a chart only when
-      // one was requested, the table only when it was, otherwise stay put.
+      // one was requested, the table only when it was, a research turn shows
+      // its saved evidence, otherwise stay put.
       if (data.presentation?.chart && data.figure) setActiveTab("chart");
       else if (data.presentation?.table) setActiveTab("table");
+      else if (data.research) setActiveTab("research");
     } catch (err) {
       setTurns((prev) => prev.map((t, i) =>
         i === prev.length - 1 ? { question: trimmed, error: err.message } : t));
@@ -117,12 +130,27 @@ export default function App() {
 
       <main className="app-main">
         <section className="chat-panel">
+          <div className="research-controls">
+            <label htmlFor="question-mode">Soru modu</label>
+            <select id="question-mode" value={mode} disabled={loading} onChange={(e) => setMode(e.target.value)}>
+              <option value="auto">Otomatik / veri analizi</option>
+              <option value="research">Web araştırması</option>
+            </select>
+            {mode === "research" ? (
+              <p className="empty-hint">
+                Model arama yapar, kaynakları okur ve kanıtları veritabanına kaydeder.
+                {researchConfigured === false
+                  ? " Web araştırması kapalı: API ve web-tools servislerinde WEB_TOOLS_ENABLED ve WEB_AGENT_ENABLED ayarlarını açın."
+                  : ""}
+              </p>
+            ) : null}
+          </div>
           <div className="chat-scroll" ref={scrollRef}>
             {turns.length === 0 ? (
               <div className="empty-state">
                 <p>Bir soru sorarak başla:</p>
                 <div className="example-chips">
-                  {EXAMPLE_QUESTIONS.map((q) => (
+                  {(mode === "research" ? RESEARCH_QUESTIONS : EXAMPLE_QUESTIONS).map((q) => (
                     <button key={q} className="chip" onClick={() => submitQuestion(q)}>{q}</button>
                   ))}
                 </div>
@@ -132,7 +160,9 @@ export default function App() {
                 turn.pending
                   ? <div className="turn" key={i}>
                       <div className="bubble bubble-user">{turn.question}</div>
-                      <div className="bubble bubble-assistant bubble-loading">Düşünülüyor…</div>
+                      <div className="bubble bubble-assistant bubble-loading">
+                        {mode === "research" ? "Kaynaklar araştırılıyor ve kaydediliyor…" : "Düşünülüyor…"}
+                      </div>
                     </div>
                   : <ChatMessage turn={turn} key={i} />
               ))
@@ -162,8 +192,10 @@ export default function App() {
             <button className={activeTab === "table" ? "tab active" : "tab"} onClick={() => setActiveTab("table")}>Tablo</button>
             <button className={activeTab === "chart" ? "tab active" : "tab"} onClick={() => setActiveTab("chart")}>Grafik</button>
             <button className={activeTab === "trust" ? "tab active" : "tab"} onClick={() => setActiveTab("trust")}>Güven Katmanı</button>
+            <button className={activeTab === "research" ? "tab active" : "tab"} onClick={() => setActiveTab("research")}>Araştırma</button>
           </div>
           <div className="tab-content">
+            {activeTab === "research" && <ResearchPanel sessionId={sessionId} latest={latest} />}
             {activeTab === "table" && (
               latest && latest.presentation && !latest.presentation.table
                 ? <p className="empty-hint">Bu soru tablo istemedi. Tabloyu görmek için soruda "tablo" deyin.</p>

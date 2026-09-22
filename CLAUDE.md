@@ -592,6 +592,19 @@ from session transcripts (branch `recover/external-zone`) and ported onto `integ
 The ranking tweaks made at the same time (abbreviation aliases, product qualifiers, more stopwords)
 were **not** ported: this branch has its own benchmarked ranking (`backend/eval/discovery_cases.yaml`).
 
+**Web evidence is logged before the model sees it; series are not logged there.** `agent/evidence_store.py`
+(ported from `web-search-tool/injestion`) writes every `read_url` / `search_web` / research tool result
+of a turn to `data/research.duckdb` (`research_runs`, `research_tool_results`) under a run id, and
+links the finished payload to it (`payload["evidence"]`); `/session/{id}/research` replays a run after
+a restart or a new chat, and the frontend's **Araştırma** tab shows it. `run_turn` is that wrapper
+around `_run_turn`; without a store the two are the same. `mode="research"` on `/ask` (the website's
+"Web araştırması") and a `search` intent hand the turn to the extension's bounded research loop when
+`WEB_TOOLS_ENABLED` and `WEB_AGENT_ENABLED` are both on; a research answer's verification is
+provenance and coverage only (`scope: web_provenance`) -- the prose is not number-checked, which is a
+known gap. **Not ported from that branch on purpose**: its second copy of external series inside
+`research.duckdb` (the external zone is the one place a URL's numbers land), its BIST-only PDF adapter
+(superseded by `pdf_words`), and its 55 duplicate TBB workbooks under `backend/ingestion/`.
+
 **`ingest_external` (older) adds one named column; `read_url` only ever reads.** `read_url` extracts a
 document's text/preview into `session.facts["documents"]` for the composer to cite -- a URL that yields
 no series still gets one (`make_plan` adds the read step only for URLs that landed nothing).

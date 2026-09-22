@@ -31,9 +31,10 @@ from ..lakehouse import external_store
 from ..llm import KloudeksClient, LLMError
 from ..tools.lakehouse import discover_concepts
 from .composer import compose
+from .evidence_store import EvidenceStorageError
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
-from .router import Route, extract_single_month, route
+from .router import Route, extract_single_month, extract_urls, route
 from .state import AuditStep, Session
 from .verifier import verify
 
@@ -747,10 +748,11 @@ def _table_payload(session: Session) -> Dict[str, Any]:
             "all_columns": session.artifact.column_names()}
 
 
-def run_turn(question: str, session: Optional[Session] = None,
-             client: Optional[KloudeksClient] = None,
-             url_reader=None, web_search=None,
-             compose_answer: bool = True) -> Dict[str, Any]:
+def _run_turn(question: str, session: Optional[Session] = None,
+              client: Optional[KloudeksClient] = None,
+              url_reader=None, web_search=None,
+              compose_answer: bool = True, research_runner=None, mode: str = "auto",
+              on_tool_result=None) -> Dict[str, Any]:
     """One question through the whole pipeline. Returns the API payload."""
     session = session or Session()
     session.start_turn(question)
@@ -759,9 +761,19 @@ def run_turn(question: str, session: Optional[Session] = None,
     logger.info("turn start: %.120s", question)
 
     with _timed(timings, "route"):
-        route_result = route(question, has_artifact=session.has_artifact(), client=client)
+        if mode == "research":
+            # The website's "Web araştırması" mode: the bounded research loop
+            # decides its own searches and reads; nothing here plans.
+            route_result = Route(intent="search", urls=extract_urls(question),
+                                 reason="website web research mode")
+        else:
+            route_result = route(question, has_artifact=session.has_artifact(), client=client)
     logger.info("route -> %s (%s) chart=%s table=%s", route_result.intent,
                 route_result.decided_by, route_result.wants_chart, route_result.wants_table)
+    if route_result.intent == "search" and research_runner is not None:
+        return _research_turn(question, session, route_result, research_runner, on_tool_result, timings)
+    if mode == "research":
+        raise ValueError("Web research is disabled; enable WEB_TOOLS_ENABLED and WEB_AGENT_ENABLED.")
 
     # A URL in the question lands in the lakehouse's external zone first, so
     # the planner chooses among real keys -- the demo-day rule (see module doc).
@@ -835,13 +847,116 @@ def run_turn(question: str, session: Optional[Session] = None,
     }
 
 
+def _research_turn(question: str, session: Session, route_result: Route, runner, on_tool_result,
+                   timings: Dict[str, float]) -> Dict[str, Any]:
+    """A turn answered by the web-tools extension's bounded research loop:
+    the model chooses searches and reads, cites sources by id, and every tool
+    result is recorded through `on_tool_result` before the model sees it. The
+    table is left as it stands; the verification here is provenance and
+    coverage only, never the truth of the prose."""
+    with _timed(timings, "research"):
+        result = runner(question, urls=route_result.urls, on_tool_result=on_tool_result)
+    sources = result.get("sources", [])
+    citations = [{**s, "source": "web", "cited": s["id"] in result.get("citations", [])} for s in sources]
+    caveats = list(result.get("warnings", [])) + list(result.get("missing_information", []))
+    if result.get("error"):
+        caveats.append(result["error"].get("message", result["error"].get("code", "Research failed")))
+    checks = [{"check": "research_completed", "passed": result["status"] == "ok",
+               "severity": "error" if result["status"] == "error" else "warning",
+               "detail": result.get("stop_reason") or result["status"]}]
+    timings["total"] = round(sum(timings.values()), 3)
+    return {
+        "question": question, "route": route_result.model_dump(),
+        "plan": {"intent": "search", "reasoning": "bounded model-selected research tools"},
+        "summary": result.get("answer") or "Araştırma tamamlanamadı. Kaynaklar ve araç hatalarını inceleyin.",
+        "composed_by": "llm" if result.get("answer") else "unavailable",
+        "unsupported_numbers": [], "sources": [],
+        "presentation": {"table": False, "chart": False},
+        # The table as it stands: a research turn touches no column, so the
+        # turn-scoped view would be empty while the conversation's table is not.
+        "table": {"columns": session.artifact.column_names(), "units": session.artifact.units(),
+                  "rows": session.artifact.to_records(), "all_columns": session.artifact.column_names()},
+        "figure": None, "analysis": None, "find_periods": None, "landed_sources": None,
+        "citations": citations,
+        "verification": {"scope": "web_provenance", "passed": result["status"] == "ok", "n_checks": 1,
+                         "n_errors": int(result["status"] == "error"),
+                         "n_warnings": len(caveats), "checks": checks, "caveats": caveats},
+        "audit": [{"index": i + 1, "op": t["tool"], "arguments": t["arguments"],
+                   "ok": t["status"] != "error", "detail": str(t.get("error") or t["status"])}
+                  for i, t in enumerate(result.get("trace", []))],
+        "research": {k: v for k, v in result.items() if k != "evidence"},
+        "timings": timings,
+        "session": session,
+    }
+
+
+def run_turn(question: str, session: Optional[Session] = None,
+             client: Optional[KloudeksClient] = None, url_reader=None, web_search=None,
+             compose_answer: bool = True, research_runner=None, evidence_store=None,
+             mode: str = "auto") -> Dict[str, Any]:
+    """`_run_turn` with every web tool result saved before it is used.
+
+    With an `evidence_store` (backend.agent.evidence_store), each read_url /
+    web_search / research tool call is committed to `data/research.duckdb`
+    under this turn's run before the model sees it, and the finished payload
+    is linked to the run; the payload's `evidence` says so. Without one this is
+    exactly `_run_turn`. A storage failure raises rather than letting a turn
+    report evidence it did not keep.
+    """
+    session = session or Session()
+    run_id = evidence_store.start(session.session_id, question, mode) if evidence_store else None
+
+    def record(name, arguments, output):
+        if evidence_store:
+            evidence_store.record(run_id, name, arguments, output)
+
+    def recorded(tool, name, argument):
+        if tool is None:
+            return None
+
+        def call(value):
+            try:
+                result = tool(value)
+            except EvidenceStorageError:
+                raise
+            except Exception as exc:
+                record(name, {argument: value}, {"status": "error", "error": {"code": type(exc).__name__}})
+                raise
+            record(name, {argument: value}, result)
+            return result
+        return call
+
+    try:
+        result = _run_turn(question, session, client=client,
+                           url_reader=recorded(url_reader, "read_url", "url"),
+                           web_search=recorded(web_search, "search_web", "query"),
+                           compose_answer=compose_answer, research_runner=research_runner,
+                           mode=mode, on_tool_result=record if evidence_store else None)
+        if evidence_store:
+            status = (result.get("research") or {}).get("status") or (
+                "partial" if (any(not step["ok"] for step in result["audit"])
+                              or not result["verification"]["passed"]) else "ok")
+            result["evidence"] = evidence_store.finish(
+                run_id, {k: v for k, v in result.items() if k != "session"}, status)
+        return result
+    except EvidenceStorageError:
+        raise
+    except Exception as exc:
+        if evidence_store:
+            evidence_store.finish(run_id, {"error": type(exc).__name__}, "error")
+        raise
+
+
 class Agent:
     """A conversation: one Session per session_id, reused across turns."""
 
-    def __init__(self, client: Optional[KloudeksClient] = None, url_reader=None, web_search=None):
+    def __init__(self, client: Optional[KloudeksClient] = None, url_reader=None, web_search=None,
+                 research_runner=None, evidence_store=None):
         self.client = client
         self.url_reader = url_reader
         self.web_search = web_search
+        self.research_runner = research_runner
+        self.evidence_store = evidence_store
         self.sessions: Dict[str, Session] = {}
 
     def session(self, session_id: str) -> Session:
@@ -851,4 +966,5 @@ class Agent:
 
     def ask(self, question: str, session_id: str = "default", **kwargs) -> Dict[str, Any]:
         return run_turn(question, self.session(session_id), client=self.client,
-                        url_reader=self.url_reader, web_search=self.web_search, **kwargs)
+                        url_reader=self.url_reader, web_search=self.web_search,
+                        research_runner=self.research_runner, evidence_store=self.evidence_store, **kwargs)

@@ -623,3 +623,31 @@
 .source-series-meta, .source-series-match { font-size: 0.78rem; color: var(--muted, #667); }
 .btn-small { padding: 0.25rem 0.6rem; font-size: 0.8rem; align-self: flex-start; }
 .btn-danger { color: #b3261e; }
+.research-controls { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.research-controls label { margin-right: 10px; font-size: 0.85rem; }
+.research-controls select, .research-panel select {
+  max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface, white); color: var(--text);
+}
+.research-panel { font-size: 0.85rem; overflow-wrap: anywhere; }
+.research-panel h2 { font-size: 1rem; }
+.research-panel h3 { font-size: 0.9rem; margin-top: 20px; }
+.research-panel label { display: block; margin-bottom: 6px; }
+.research-panel select { width: 100%; }
+.research-panel details { border-bottom: 1px solid var(--border); padding: 10px 0; }
+.research-panel summary { cursor: pointer; font-weight: 600; }
+.research-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; font-size: 0.75rem; }
+.research-error { color: var(--red); }
+.research-save-status { color: var(--green); font-weight: 600; }
+.research-query { overflow-wrap: anywhere; }
+.tab-bar { flex-wrap: wrap; }
+
+@media (max-width: 600px) {
+  .app-shell { height: auto; min-height: 100vh; }
+  .app-header { padding: 14px 16px; flex-wrap: wrap; gap: 12px; }
+  .brand { min-width: 0; gap: 10px; }
+  .header-right { width: 100%; justify-content: flex-end; }
+  .chat-scroll { min-height: 220px; }
+  .bubble { overflow-wrap: anywhere; }
+  .chat-input-row input { min-width: 0; }
+}

@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 async function request(path, options) {
   const response = await fetch(`${BASE_URL}${path}`, {
@@ -10,7 +10,9 @@ async function request(path, options) {
     const detail = Array.isArray(body.detail)
       ? body.detail.map((item) => item.msg).join(", ")
       : body.detail || `İstek başarısız oldu (${response.status})`;
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -19,11 +21,19 @@ export function health() {
   return request("/health");
 }
 
-export function ask(question, sessionId) {
+export function ask(question, sessionId, mode = "auto") {
   return request("/ask", {
     method: "POST",
-    body: JSON.stringify({ question, session_id: sessionId }),
+    body: JSON.stringify({ question, session_id: sessionId, mode }),
   });
+}
+
+export function listResearch(sessionId) {
+  return request(`/session/${encodeURIComponent(sessionId)}/research`);
+}
+
+export function getResearch(sessionId, runId) {
+  return request(`/session/${encodeURIComponent(sessionId)}/research/${encodeURIComponent(runId)}`);
 }
 
 export function getSession(sessionId) {

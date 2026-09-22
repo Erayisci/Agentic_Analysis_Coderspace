@@ -1,0 +1,175 @@
+# Test LLM web research from the website
+
+The website's **Web araştırması** mode runs the existing bounded research agent:
+the model chooses a search query, inspects search results, chooses URLs to read,
+and writes an answer with source IDs. **Araştırma** shows the actual tool calls,
+source excerpts, errors, and the complete saved tool outputs for each question.
+In automatic mode, searches and web-only URL plans use the same research loop
+when it is enabled. Supplied URLs are read first so the model can discover and
+follow attachment links before answering. Plans that fetch, ingest or transform
+numerical series keep using the existing analysis pipeline.
+
+For questions combining local BDDK values and an external file, use **Otomatik**.
+See [two mixed-source prompts and their verified answers](mixed-source-tests.md).
+
+## Start the services and website
+
+Use Python 3.10+, Node compatible with the frontend's Vite version (22.16+ works),
+and Docker Engine/Compose. In WSL, enable Docker Desktop's integration for your
+distro first. These commands run from the repository root:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+npm --prefix frontend ci
+npm --prefix frontend run build
+
+./extensions/web_tools/web-tools setup
+```
+
+Set `WEB_KLOUDEKS_API_KEY` in the ignored `extensions/web_tools/.env` if it is
+not already configured. Keep the key out of the browser and source code.
+Then, in the same terminal:
+
+```bash
+export WEB_TOOLS_ENABLED=true
+export WEB_AGENT_ENABLED=true
+export WEB_DOCUMENTS_ENABLED=true
+export WEB_LINKS_ENABLED=true
+
+./extensions/web_tools/web-tools start
+./extensions/web_tools/web-tools check
+.venv/bin/python -m backend.api.serve
+```
+
+Open **http://127.0.0.1:8000**, choose **Web araştırması**, and submit:
+
+> BDDK Türk Bankacılık Sektörü Temel Göstergeleri raporunun resmi sayfasını bul,
+> oku ve raporun hangi konuları kapsadığını kaynak göstererek açıkla.
+
+The launcher loads the web-tools CLI configuration (`.env.example`, extension
+`.env`, then process environment) and also accepts the root model key. It serves
+the built website and API on one origin. For persistent settings across terminals,
+edit the existing flags in the extension `.env` instead of only exporting them.
+The worker and API must use matching capabilities and service addresses.
+
+For frontend development, leave the API running and use `npm --prefix frontend
+run dev`; Vite proxies API calls to port 8000. `VITE_API_BASE_URL` overrides the
+API address for deployments using a separate origin. `/health` reports whether
+research is configured; this is configuration status, not a live service probe.
+Use `web-tools check` to check the services.
+
+## Inspect what was actually used
+
+- In **Araştırma**, expand each tool call to inspect its arguments and full saved
+  result. Search hits that the model did not select are retained too.
+- Match `[S1]`, `[S2]`, etc. in the answer to **Kaynaklar** and open the original
+  publication. A citation match establishes provenance, not factual correctness.
+- Check **Eksik bilgiler**, errors and limitations. An unfinished run keeps its
+  evidence and is labelled partial or failed; it does not claim a completed answer.
+- Refresh the page, return to **Araştırma**, and select a saved question. The
+  database survives API restarts and **Yeni Sohbet**. Conversation working tables
+  remain in memory and are cleared by a new chat.
+
+Native extraction, OCR, vision and model calls retain their existing resource
+limits. The database stores everything returned by the tools, including extracted
+tables, page sections, snippets, metadata, timestamps, truncation flags and errors.
+It does not promise to download an entire website or every page of a bounded PDF.
+Research can consume the configured Kloudeks quota.
+
+## Database and API
+
+Evidence is automatically committed **before** a tool result reaches the model
+or is shortened for its context. The default is `data/research.duckdb`, with
+`research_runs` and `research_tool_results` tables. Every result links to a run,
+session, question, tool and arguments; the completed response links answers and
+citations back to those results. If saving fails, the request returns an error
+instead of reporting a successful ingestion. Already committed results survive.
+
+This DuckDB database sits alongside `data/lakehouse.duckdb`. On startup, completed
+legacy runs from `data/research.sqlite3` are copied idempotently; the original
+file remains intact. A configured `.sqlite3` path is redirected to its `.duckdb`
+sibling and migrated too. The lakehouse build does not erase research history.
+**Back up the research database**; unlike
+the lakehouse it cannot be rebuilt from committed inputs. Set `RESEARCH_DB_PATH`
+to store it elsewhere. All website `/ask` turns, including ordinary search,
+URL-reading and research turns, use the evidence store.
+Numeric series are NOT stored here: a URL's tables land in the lakehouse's
+external zone (`data/external/`, the `external_*` views) through
+`backend/ingestion/external` before the turn is planned, and the response's
+`landed_sources` names them. The API response includes `evidence` with the run
+id and the number of tool results logged. Unstructured pages are retained as
+JSON evidence, not invented numeric rows.
+Standalone Python/CLI callers opt in
+with `Agent(evidence_store=...)` or the research runner's `on_tool_result` callback.
+
+
+```text
+POST /ask
+  {"question":"Find and read an official report","session_id":"my-session","mode":"research"}
+
+GET /session/my-session/research
+GET /session/my-session/research/<run_id>
+```
+
+The response's `ingestion` contains `status`, `run_id` and the number of committed
+tool results. History endpoints scope results to the supplied session ID; this
+local demo API does not provide account authentication.
+
+To inspect a saved run directly without any network or model call:
+
+```bash
+.venv/bin/python - <<'PY'
+import duckdb
+with duckdb.connect('data/research.duckdb', read_only=True) as db:
+    for row in db.execute('''
+        SELECT r.question, r.status, t.tool, t.arguments_json, t.output_json
+        FROM research_runs r JOIN research_tool_results t ON t.run_id = r.id
+        ORDER BY t.id DESC LIMIT 5
+    ''').fetchall():
+        print(row)
+PY
+```
+
+## Verification
+
+`pytest -q tests/test_research_persistence.py` exercises the API and the real
+bounded research loop with deterministic model decisions and tool responses.
+It verifies restart/reset persistence, session isolation, context/evidence limits,
+failed model/tool calls, failed storage, ordinary URL reads, and concurrent writes.
+An ordinary (auto-mode) question with a URL does not use the research loop: the URL
+is landed in the external zone first (see `docs/mixed-source-tests.md`).
+These tests consume no model quota. Live result quality requires the running
+services and a real model; inspect official-source relevance and answer citations
+using the website steps above.
+
+### Linked PDF check: Borsa İstanbul
+
+In **Web araştırması** mode, submit:
+
+> Bu sayfayı URL aracıyla aç:
+> https://www.borsaistanbul.com/veriler/kiymetli-madenler-ve-kiymetli-taslar-piyasasi/piyasa-verileri
+> Sayfadaki “Altın İşlemleri” bağlantısını bul, bağlı PDF dosyasını indir ve oku.
+> 2026 yılı Ocak ve Şubat ayları için TL işlem hacmini (TL), TL işlem miktarını
+> (kg), TL işlem sayısını (adet) ve tüm para birimleri toplam işlem miktarını
+> (kg) tablo halinde göster. Hangi ayda toplam işlem miktarı daha yüksektir?
+> PDF bağlantısını, belge yılını ve sayfa numarasını belirt. Veriye erişemezsen
+> bunu açıkça söyle; değer tahmin etme.
+
+The live website check on 2026-09-21 followed `read_web_url` → `get_page_assets`
+→ `read_web_url` and saved all three results plus the answer. It read the
+[2026 gold trading PDF](https://www.borsaistanbul.com/dosyalar/kmtp/veriler/kmp_au.pdf),
+page 1, and returned these values (dots are thousands separators):
+
+| Month | TL volume (TL) | TL quantity (kg) | TL transactions | Total quantity (kg) |
+| --- | ---: | ---: | ---: | ---: |
+| January 2026 | 93.824.682.381 | 13.837 | 1.017 | 33.584 |
+| February 2026 | 90.534.914.196 | 12.649 | 839 | 32.719 |
+
+January has the higher total quantity. The publisher can update this PDF at
+the same URL, so check its year before comparing a later run with this example.
+The overall run may be marked partial when landing-page text or link discovery
+hits its extraction limits, even when the PDF read succeeds. Inspect each tool's
+status and the cited PDF evidence. A landing-page message such as “Hata! Dosya
+Bulunamadı!” does not establish that a linked PDF is unavailable; check whether
+the PDF was actually requested and what that request returned.

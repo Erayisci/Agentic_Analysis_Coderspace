@@ -1,4 +1,6 @@
-# Derived data - fully reproducible with: python -m backend.lakehouse.build
+# Derived data - reproducible with: python -m backend.lakehouse.build -- except
+# data/external/ (demo-day sources landed at runtime) and data/research.duckdb
+# (the log of web evidence): back those two up before deleting data/.
 data/
 
 # Spreadsheet lock files (created while a workbook is open)

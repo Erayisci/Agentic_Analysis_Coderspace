@@ -32,7 +32,8 @@ def get_team_tools(environ=None, *, vision=False):
                 "warnings": result.get("warnings", []), "fetched_at": result.get("fetched_at"),
                 "processing_errors": result.get("processing_errors", []),
                 "locations": [s.get("location") for s in result.get("sections", [])],
-                "source_trust": "untrusted_external", "ready_for_calculation": False}
+                "source_trust": "untrusted_external", "ready_for_calculation": False,
+                "evidence": result}
 
     def web_search(query):
         return checked(tools["search_web"](query, max_results=3))
