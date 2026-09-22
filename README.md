@@ -18,6 +18,15 @@ disabled by default (`WEB_TOOLS_ENABLED`) and do not change the pipeline setup b
 the API wires the extension's `search_web` in as the agent's web-search backend; the in-process
 `backend/tools/web_url.py` remains the URL reader either way.
 
+**JS-rendered pages.** A page whose numbers are filled in by client-side JavaScript after load (an index
+page like `borsaistanbul.com/endeks/xtumy`) publishes none of them in the HTML `read_url`'s plain HTTP
+fetch receives — the fields are there, just empty. `backend/tools/browser_render.py` renders the page in
+headless Chromium (Playwright) and hands the settled HTML back to the same extractor; `read_url` falls
+back to the plain fetch on its own if no browser is installed, so this degrades rather than breaking.
+**The browser binary is a separate, per-machine download that `pip install` does not do for you** —
+`playwright install chromium` once, after the pip install below, or this path silently falls back to the
+un-rendered page with no error.
+
 To try the web tools yourself, use the [Docker-to-results testing walkthrough](extensions/web_tools/TESTING.md).
 For developer onboarding without changing the baseline environment, start with
 the [developer guide](extensions/web_tools/DEVELOPER_GUIDE.md).
@@ -30,7 +39,9 @@ For several sources, explicit coverage and conflict reporting, see the
 
 ## Quick start
 
-Requires Python 3.10+. Nothing else — no network access, no database server.
+Requires Python 3.10+. Nothing else for the pipeline itself — no network access, no database server.
+(`playwright install chromium` below is the one step that does need network: it downloads the browser
+binary, not a Python package.)
 
 ```bash
 git clone <repo-url> && cd Agentic_Analysis_Coderspace
@@ -40,7 +51,9 @@ pip install -e ".[dev,ingest]"
 
 python -m backend.ingestion.bddk_bulletin --from-cache  # raw workbooks from the archived responses
 python -m backend.lakehouse.build                       # parse -> validate -> parquet + duckdb
-pytest -q                                               # 757 tests (17 skip without the web-tools containers, KKB_LIVE_TESTS or the OCR recording; 9 Docker/process-group tests fail on Windows)
+pytest -q                                               # ~775 tests (19 skip without the web-tools containers, KKB_LIVE_TESTS or the OCR recording; 9 Docker/process-group tests fail on Windows)
+
+playwright install chromium                             # one-time, per machine -- see "JS-rendered pages" below
 ```
 
 That produces `data/lakehouse.duckdb` and `data/analytics/schema_card.md`. The whole thing runs offline
@@ -113,7 +126,7 @@ The brief's target corpus is **2021-01 through 2026-06**.
 | BDDK Aylık Bülten — all 17 tables | ✅ built, 2021-01..2026-07, 135,513 observations |
 | TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency) |
 | BDDK Haftalık Bülten — all 9 tables | ✅ built, 2021-01-08..2026-09-04, 163,740 observations |
-| BDDK FinTürk (İllere Göre) | ❌ not acquired |
+| BDDK FinTürk (İllere Göre) — 7 tables | ✅ built, 2021-Q1..2026-Q2 (22 quarters), 905,620 observations across 82 provinces |
 | External (demo-day) sources | ✅ automatic: a URL in a question, `POST /sources` or `python -m backend.ingestion.external <url>` lands every table in it under `data/external/`, visible through the `external_*` views without a rebuild |
 | TBB Risk Merkezi sectoral | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
 
