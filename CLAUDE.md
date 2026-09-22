@@ -603,8 +603,11 @@ still at unit `bilinmiyor` or semantics `unknown`/`default`, one guided-decoding
 caption + three sample values, restricted to the lakehouse's unit vocabulary; marked
 `unit_source="model"` and still `unit_verified=false`, because a label is an opinion and a cross-check
 is evidence. The model never emits a number that reaches a table. The XTUMY index page renders its
-data with JavaScript; the in-process HTML reader sees only the static shell, so that page needs the
-container route (Crawl4AI) -- a known limitation, not a parser gap.
+data with JavaScript and the in-process HTML reader sees only the static shell; `tools/browser_render.py`
+(merged from `integrate/graphs`) closes that without the container, rendering the page headlessly and
+re-running `web_url._guard_url` on `page.url` after navigation so a post-load redirect toward a private
+address is still caught. It is injected into `read_url` the way `ocr` is, so a missing browser costs
+that one page rather than the reader.
 
 **History worth knowing:** this zone was built on 2026-09-19/20 in the `integrate/demo` working tree
 and never committed; its tracked half survived as `git stash@{0}`, its new files were reconstructed
