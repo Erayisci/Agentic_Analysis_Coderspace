@@ -145,7 +145,11 @@ def _extract_csv(content: bytes) -> dict:
 
 def _extract_html(content: bytes) -> dict:
     soup = BeautifulSoup(content, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
+    # nav/header/footer are chrome, not content -- and on a JS-rendered page
+    # they can run to thousands of characters (borsaistanbul.com's full site
+    # menu is ~4000 chars alone), pushing the actual figures a question
+    # asked for past the executor's fixed per-document character budget.
+    for tag in soup(["script", "style", "noscript", "nav", "header", "footer"]):
         tag.decompose()
     raw_text = " ".join(soup.get_text(separator=" ").split())
     title = soup.title.string.strip() if soup.title and soup.title.string else None
@@ -176,7 +180,8 @@ def _extract_image(content: bytes, ocr: Callable[[bytes], str]) -> dict:
     }
 
 
-def read_url(url: str, ocr: Optional[Callable[[bytes], str]] = None) -> dict:
+def read_url(url: str, ocr: Optional[Callable[[bytes], str]] = None,
+             render_html: Optional[Callable[[str], bytes]] = None) -> dict:
     """Fetch a URL and return its content as a JSON-serialisable dict.
 
     Supports PDF (pypdf), Excel and CSV (pandas/openpyxl), text/HTML and,
@@ -184,6 +189,14 @@ def read_url(url: str, ocr: Optional[Callable[[bytes], str]] = None) -> dict:
     RuntimeError for an image URL when no `ocr` is supplied, and ValueError
     for anything else (bad scheme, unresolvable host, non-public address,
     unrecognised content type, too many redirects).
+
+    `render_html`, if given, is a `url -> bytes` callable (see
+    `tools.browser_render.render`) tried for HTML pages instead of the
+    plain HTTP fetch, because a JS-rendered page's real content is not in
+    what the server sends back. A page that does not need it costs nothing
+    extra to read this way; one that fails to render (no browser installed,
+    timeout) falls back to the static fetch already in hand rather than
+    losing the page entirely -- `result["rendered"]` says which happened.
     """
     response = _fetch(url)
     kind = _detect_kind(response.headers.get("Content-Type", ""), url)
@@ -195,7 +208,16 @@ def read_url(url: str, ocr: Optional[Callable[[bytes], str]] = None) -> dict:
     elif kind == "csv":
         result = _extract_csv(response.content)
     elif kind == "html":
-        result = _extract_html(response.content)
+        html_content = response.content
+        rendered = False
+        if render_html is not None:
+            try:
+                html_content = render_html(url)
+                rendered = True
+            except Exception:
+                pass  # static content already in hand is the fallback
+        result = _extract_html(html_content)
+        result["rendered"] = rendered
     elif kind == "text":
         result = _extract_text(response.content, response.encoding)
     elif kind == "image":

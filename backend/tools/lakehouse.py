@@ -122,12 +122,24 @@ CURRENCY_TERMS = {
                      r"(tl|tp(?![\w.])|t[üu]rk\s+liras[ıi]|t[üu]rk\s+paras[ıi]|turkish[- ]lira)(?![\w])", re.I),
 }
 
+# "YP mevduatin TL karsiligi" names ONE slice (FX) and states how its value
+# is expressed, not a second slice -- but "TL" alone matches CURRENCY_TERMS
+# same as a real TL-slice request, so the pair looked like "both named" and
+# extract_currency bailed to None. Measured: that sent "Yabanci Para (YP)
+# mevduatlarin TL karsiligi ..." to an unrelated 14-month EVDS series
+# instead of the bulletin's own 67-month FX-currency deposit line. Stripping
+# "<currency word> karsiligi" before the ambiguity check removes only the
+# valuation phrase, not the slice it is naming.
+_KARSILIK = re.compile(
+    r"(yp|fx|yabanc[ıi]\s+para|d[öo]viz\w*|tl|tp|t[üu]rk\s+liras[ıi]|t[üu]rk\s+paras[ıi])"
+    r"\s+kar[şs][ıi]l[ıi][ğg]\w*", re.I)
+
 
 def extract_currency(text: str):
     """(currency, text without the currency words) -- (None, text) when the
     concept names no slice or names both, which the clause split normally
     prevents ("YP mevduat ve TL mevduat" arrives as two concepts)."""
-    text = text or ""
+    text = _KARSILIK.sub(" ", text or "")
     found = [currency for currency, pattern in CURRENCY_TERMS.items() if pattern.search(text)]
     if len(found) != 1:
         return None, text
@@ -309,6 +321,28 @@ def _connect():
 # derived-series bonus; the unit words in `core.search_text` cover the rest.
 RATIO_WORDS = re.compile(
     r"(?<!\w)(oran|orani|oranlari|oranini|rasyo|rasyosu|yuzde|payi|share|ratio|%)(?!\w)", re.I)
+
+# The mirror problem to RATIO_WORDS: a query naming an amount alongside a rate
+# ("faiz orani konut kredisi HACMINI ongormeye yardimci oluyor mu") matches
+# RATIO_WORDS on "orani" and its blanket +3%/-3TL bonus demotes the very TL
+# series the "hacmi" half of the question asked for -- discover() has no
+# per-word sense of which half of the query a candidate answers, only whether
+# ratio words appear anywhere in it. AMOUNT_WORDS does not change that scoring
+# (a blanket "amount seen -> demote every % candidate" would just as wrongly
+# demote the correct rate series sitting in the same query); it only marks a
+# query as "mixed" so discover() can additionally guarantee an amount-side
+# candidate reaches the pool the ratio-side ranking would otherwise keep out.
+AMOUNT_WORDS = re.compile(
+    # "hacim" drops its second vowel before a vowel-initial suffix (Turkish
+    # vowel elision: hacim + i -> hacmi, + ini -> hacmini), so "hacim\w*"
+    # alone misses every possessive/case form except the bare word.
+    # "tutar\w*" must not reach "tutarli"/"tutarsiz" ("consistent" /
+    # "inconsistent" -- COMPOSER_SYSTEM tells the model to write exactly this
+    # word pair for a decompose finding): those are a lexicalised adjective,
+    # unrelated to the noun "tutar" (amount) despite sharing its stem, and
+    # "faiz orani ... tutarli mi" is a plausible real question with no
+    # amount in it at all.
+    r"(?<!\w)(hac(?:im|m)\w*|tutar(?!li|siz)\w*|bakiye\w*|stok\w*|miktar\w*)(?!\w)", re.I)
 
 # The property type a sales question would have to name to mean commercial
 # premises. Absent these, TCMB's `K`-prefixed housing series is what was meant.
@@ -639,6 +673,17 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     contains two questions. Splitting on clause boundaries and searching each
     piece recovers both, which is what the planner needs to see.
     """
+    # A source word ("BDDK haftalık bültenine göre") stated once, before the
+    # question's own "ve"/"," splits it into clauses, only survives in the
+    # clause it textually sits in -- the other clause searches every corpus
+    # unrestricted and can rank an obscure cross-source match above the
+    # right answer in the corpus the question actually named. Measured:
+    # "...haftalık bültenine göre toplam mevduat ve toplam kredilerin..."
+    # split "toplam kredi" into its own clause with no source word left in
+    # it, and it matched a bulletin line instead of the weekly bulletin's
+    # own "Toplam Krediler (2+10)". Extracting once, over the whole
+    # question, and handing it to every clause is the fix.
+    named_sources, _ = extract_sources(question or "")
     chunks = [chunk.strip() for chunk in CLAUSE_SPLIT.split(question or "") if chunk.strip()]
     # Folded, as `_terms` folds: "grafiğini".lower() is not the ASCII
     # "grafigini" the stopword list holds, so an unfolded check let a
@@ -653,7 +698,17 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     # the same key twice, and both must survive the merge.
     merged, seen, by_concept = [], set(), []
     for chunk in chunks[:6]:
-        found = discover(chunk, limit=per_concept)["candidates"]
+        # The whole-question source only backfills a clause that has neither
+        # a source word nor a province of its own: a province names FinTurk
+        # (or leaves the source open) by itself, and a source stated for a
+        # DIFFERENT clause of an explicit comparison ("Istanbul'daki ... ile
+        # BDDK aylik bultenindeki ...yi karsilastir") must not be forced onto
+        # it, or the province-tagged FinTurk candidate never gets scored and
+        # a national bulletin row answers "for Istanbul" in its place.
+        chunk_sources, chunk_body = extract_sources(chunk)
+        chunk_province, _ = extract_province(chunk_body)
+        fallback_source = None if chunk_province else named_sources
+        found = discover(chunk, source=chunk_sources or fallback_source, limit=per_concept)["candidates"]
         by_concept.append([(c["source"], c["key"], c.get("currency")) for c in found])
         for candidate in found:
             identity = (candidate["source"], candidate["key"], candidate.get("currency"))
@@ -740,8 +795,14 @@ def discover(query: str, source=None, limit: int = 8):
     try:
         pooled = []
         # An explicit `source` argument is the caller's, and outranks the
-        # question's own wording.
-        wanted = {source} if source else (named_sources or set(ALL_SOURCES))
+        # question's own wording. `discover_concepts` passes a set here (a
+        # source word extracted from the whole question, not just this one
+        # clause); a single string from any other caller is still a plain
+        # restriction to that one corpus.
+        if source:
+            wanted = {source} if isinstance(source, str) else set(source)
+        else:
+            wanted = named_sources or set(ALL_SOURCES)
         # The pool is queried with both readings of the concept so that the
         # slice can be rejected below without a second round trip.
         words = list(dict.fromkeys([term for term, _ in terms] + [term for term, _ in plain_terms]))
@@ -884,6 +945,37 @@ def discover(query: str, source=None, limit: int = 8):
     # belongs to the merge across clauses, where the list the planner sees is
     # actually built, and not to the ranking of a single concept.
     ranked = scored[:limit]
+
+    # A query naming both a rate and an amount ("faiz orani konut kredisi
+    # hacmini") has RATIO_WORDS' blanket bonus pushing every % candidate up
+    # and every TL/stock candidate down in `scored` -- correct for the rate
+    # half, wrong for the amount half, and nothing in a single flat ranking
+    # can be right for both at once. Rather than reweight the shared ranking
+    # (which would just as easily demote the correct rate candidate), a
+    # second pass scores the same pool with that one bonus cancelled and
+    # reversed, and its top hit is guaranteed a seat -- the existing
+    # `discover_concepts` "every clause's own first choice gets a seat"
+    # guarantee, applied to a semantic role split within one clause instead
+    # of a punctuation split across clauses.
+    query_text_for_words = terms[0][0] if terms else ""
+    if RATIO_WORDS.search(query_text_for_words) and AMOUNT_WORDS.search(query_text_for_words):
+        # Not a handicap on the shared score -- the "ktf" alias alone puts a
+        # 15-20 point gap between a rate series and the correct amount one,
+        # so any fixed swing that still ranks them on the same scale leaves
+        # the rate series on top regardless. The amount half of a mixed query
+        # is answered by whichever monetary/stock candidate scored best on
+        # its own terms, full stop, not by whichever candidate wins after a
+        # bounded nudge.
+        amount_candidates = [
+            c for c in pooled if c.get("score", 0) > 0 and c.get("unit") != "%"
+            and (str(c.get("unit") or "").endswith("TL") or c.get("temporal_semantics") == "stock")]
+        if amount_candidates:
+            amount_top = max(amount_candidates, key=lambda c: c["score"])
+            already_kept = any(
+                c["source"] == amount_top["source"] and c["key"] == amount_top["key"]
+                and c.get("currency") == amount_top.get("currency") for c in ranked)
+            if not already_kept:
+                ranked = ranked[:max(0, limit - 1)] + [amount_top]
 
     return {"query": query, "terms_used": [t for t, _ in terms], "currency": currency,
             "province": province,

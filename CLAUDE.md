@@ -880,7 +880,7 @@ candidate at all*: those are different defects with different fixes, and debuggi
 how the ranking stayed a pile of anecdotes. `tests/test_discovery.py` pins the aggregate.
 
     before this work   54.1 / 62.4 / 72.9   89.4% in pool   (85 phrasings)
-    now                89.4 / 91.5 / 96.8    100% in pool   (94, with the two FinTürk families)
+    now                91.5 / 92.6 / 96.8    100% in pool   (94, with the two FinTürk families)
 
 Three families still miss on individual phrasings and are left failing on purpose, because the fix
 would be an alias for that exact wording: adding one would raise the number without improving the
@@ -964,8 +964,40 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the BDDK
 FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corpus (44 groups,
-2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables plus the 5 external-zone views, 761 tests (17 skip without the web-tools containers or the lost OCR recording; 9 of the
+2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables plus the 5 external-zone views, 775 tests (17 skip without the web-tools containers or the lost OCR recording; 9 of the
 web-tools extension's Docker and process-group tests fail on Windows).
+
+`integrate/graphs` (merged from `integrate/demo` + `idil/graphs`) closed five bugs measured live
+against a FinTurk province question ("Ankara'da toplam mevduat hacmi ne kadar?"), each independently
+capable of producing the wrong answer, which is why all five were fixed rather than stopping at the
+first one that explained the symptom:
+- `tools.lakehouse._score`: a stopped "toplam" left "Toplam Mevduat" and "Diğer Mevduat" a coin-flip
+  apart; fixed with a `diger` QUALIFIERS entry, not by un-stopping "toplam" (which fixes this case
+  and breaks "toplam konut kredilerinin dağılımı" the other way -- see the comment there).
+- `agent.executor._fetch`: a model-written `source`/`dataset` was trusted even when `province`
+  proved it wrong, and the `ValueError` fallback stayed confined to that same wrong source.
+  `FIELD_SOURCES`/`_resolve_source`/`_validate_series_matches_request` correct the source, restrict
+  the fallback search to sources compatible with the narrowing field, and refuse (rather than
+  silently degrade) when the resolved series still fails to carry it.
+- `tools.lakehouse.CLAUSE_SPLIT`: a bare `\bda\b`/`\bde\b` matched Turkish's locative suffix
+  ("Ankara**'da**") as the standalone conjunction "da", severing the province name into its own
+  clause before discovery ever saw it. `(?<!['’])\bda\b` fixes it without missing the real
+  conjunction.
+- `agent.executor._fetch`: two `fetch_series` steps in one plan that both left `as_name` unset (two
+  provinces of one FinTurk key) landed on the same auto-generated column name; `add_column`'s
+  replace-on-collision semantics silently dropped the first. Disambiguated by province, scoped to
+  the current turn's own columns only, so a fresh question's deliberate `as_name` still overwrites a
+  stale column from an earlier turn as designed.
+- `tools.external_series._parse_periods`: `dayfirst=True` (for "03.02.2021") also swapped day and
+  month inside unambiguous ISO dates ("2021-02-01" → 2021-01-02) under `format="mixed"`, collapsing
+  a monthly external series onto a handful of months with no error raised. ISO-shaped strings now
+  parse with `dayfirst=False`; everything else keeps `dayfirst=True`.
+
+A sixth, `agent.router.wanted_analyses`: `causality_strong` matched the bare word "nedensellik"
+regardless of context, so a question that forbade a causal claim ("...nedensellik iddia etme") still
+planned the test. `CAUSALITY_DISCLAIMED` is checked first and is deliberately narrow (a handful of
+explicit-prohibition phrasings, not a general negation scan) -- Turkish negation is not reliably
+keyword-local ("değil mi" asks for confirmation, it does not negate).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
 pipeline stages, and all six of the brief's tools -- Lakehouse (discovery, typed fetches, `footnotes`),
