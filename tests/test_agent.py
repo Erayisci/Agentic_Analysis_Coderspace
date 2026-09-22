@@ -623,9 +623,15 @@ def test_a_turn_shows_the_columns_it_touched_not_everything_the_session_holds():
     session.touch_column("konut_endeks")
     assert session.focus(keep_previous=True) == ["konut", "konut_endeks"]
 
-    # A turn that touches nothing keeps the table the user is looking at.
-    session.start_turn("bu veriler hangi kaynaktan geliyor?")
-    assert session.focus() == ["konut", "konut_endeks"]
+    # A follow-up that touches nothing keeps the table the user is looking
+    # at; a NEW question that touches nothing shows no table at all (its
+    # answer is not the previous question's numbers), but remembers the last
+    # table for the next follow-up.
+    session.start_turn("bu tabloyu bozmadan aynen goster")
+    assert session.focus(keep_previous=True) == ["konut", "konut_endeks"]
+    session.start_turn("altin fiyatlarini goster")
+    assert session.focus() == [] and session.view().is_empty()
+    assert session.visible_columns == ["konut", "konut_endeks"]
 
 
 def test_the_planner_is_shown_the_table_on_screen_not_the_whole_session(monkeypatch):
@@ -1909,3 +1915,329 @@ def test_a_province_question_runs_deterministically_against_the_bulletin_ratio()
     assert set(result["table"]["units"].values()) == {"%"}
     assert result["route"]["start"] == "2021-01-01" and result["route"]["end"] is None
     assert not any("mixed monetary units" in c for c in result["verification"]["caveats"])
+
+
+# --- presentation-only follow-ups: "bunun grafiğini çiz", "tablo yap" ---------
+#
+# Measured live (2026-09-21): a table question followed by "bunun grafiğini
+# çiz" produced no chart at all, and "bu tabloyu bozmadan grafiğini çiz"
+# fetched TP.HPBITABLO1.2 (M1 money supply -- the stem of "tabloyu" is a
+# substring of that code) and stretched the 60-row table to 67. Four rules
+# combined: the router did not read a suffixed "tablonun"/"tabloya" or a bare
+# "grafik çiz" as a follow-up, discovery searched the presentation words, the
+# deterministic fallback skipped the follow-up window, and
+# `apply_presentation` stripped the chart step because the plan fetched
+# nothing -- even when the model had returned exactly `[{"op": "chart"}]`.
+
+@pytest.mark.parametrize("question, presentation_only", [
+    ("bunun grafiğini çiz", True),
+    ("grafik çiz", True),
+    ("tablo yap", True),
+    ("yeni tablo yap", True),
+    ("bunu grafik olarak göster", True),
+    ("bu tablonun grafiğini çizer misin", True),
+    ("şimdi tablo halinde ver", True),
+    ("çubuk grafik yap", True),
+    ("konut kredilerini grafik olarak çiz", False),     # names a series: a real question
+    ("2021-2025 arası konut kredisi ve faiz oranını göster", False),
+    ("Enflasyon nasıl değişti", False),
+    ("tabloyu temizle", False),                         # not a presentation request
+])
+def test_the_router_reads_a_bare_presentation_request_as_a_followup(question, presentation_only):
+    from backend.agent.router import is_presentation_only
+    assert is_presentation_only(question) is presentation_only
+    with_table = route(question, has_artifact=True, client=None)
+    assert with_table.presentation_only is presentation_only
+    if presentation_only:
+        assert with_table.is_followup and with_table.intent == "followup"
+    # Without a table there is nothing to re-present: the ordinary path runs.
+    assert route(question, has_artifact=False, client=None).presentation_only is False
+
+
+@pytest.mark.parametrize("question", [
+    "aynı tabloya enflasyonu ekle", "bu tablonun grafiğini çiz", "mevcut tabloya KFE ekle",
+    "tablodaki konut sütununu enflasyondan arındır",
+])
+def test_followup_phrasing_survives_turkish_case_suffixes(question):
+    assert route(question, has_artifact=True, client=None).is_followup
+
+
+def test_listele_asks_for_a_table_not_for_metadata():
+    decided = route("konut kredilerini listele", client=None)
+    assert decided.intent == "series_analysis" and decided.wants_table
+
+
+def test_a_chart_over_an_existing_table_survives_apply_presentation():
+    """The gate stops a chart nobody asked for -- not one the user just asked
+    for by name over the table on screen. The model's own step, with the
+    columns it named, is the one kept."""
+    from backend.agent.pipeline import apply_presentation
+
+    session = Session()
+    session.artifact = synthetic("konut")
+    asked = route("bunun grafiğini çiz", has_artifact=True, client=None)
+    plan = apply_presentation(Plan(intent="followup", steps=[Step(op="chart", columns=["konut"])]),
+                              asked, "q", session)
+    assert [s.op for s in plan.steps] == ["chart"] and plan.steps[0].columns == ["konut"]
+
+    # A chart-less plan over the same table gains one...
+    plan = apply_presentation(Plan(intent="followup", steps=[]), asked, "q", session)
+    assert [s.op for s in plan.steps] == ["chart"]
+    # ...but a clear_table has nothing left to draw, and an empty session neither.
+    plan = apply_presentation(Plan(intent="followup", steps=[Step(op="clear_table")]), asked, "q", session)
+    assert [s.op for s in plan.steps] == ["clear_table"]
+    plan = apply_presentation(Plan(intent="followup", steps=[]), asked, "q", Session())
+    assert plan.steps == []
+
+
+def test_a_followup_plan_may_be_empty():
+    """'tablo yap' over a table runs no step and re-presents it."""
+    assert Plan(intent="followup", steps=[]).steps == []
+    with pytest.raises(ValueError):
+        Plan(intent="series_analysis", steps=[])
+
+
+def test_a_bare_chart_request_charts_the_table_on_screen_and_nothing_else():
+    """End to end, no model: the second turn draws the first turn's columns
+    over the first turn's window, and fetches nothing."""
+    from backend.agent.pipeline import run_turn
+    needs_lakehouse()
+    session = Session()
+    first = run_turn("2021-2025 arası konut kredisi ve faiz oranını göster", session,
+                     client=None, compose_answer=False)
+    assert first["figure"] is None and len(first["table"]["rows"]) == 60
+    shown = first["table"]["columns"]
+
+    second = run_turn("bunun grafiğini çiz", session, client=None, compose_answer=False)
+    assert second["route"]["is_followup"] and second["presentation"]["chart"]
+    assert [s["op"] for s in second["plan"]["steps"]] == ["chart"]
+    assert session.artifact.column_names() == shown            # nothing fetched
+    assert len(second["table"]["rows"]) == 60                  # window kept
+    figure = second["figure"]
+    assert figure is not None and len(figure["data"]) == len(shown)
+    assert all(trace["x"][0] == "2021-01-01" and trace["x"][-1] == "2025-12-01" for trace in figure["data"])
+
+    third = run_turn("tablo yap", session, client=None, compose_answer=False)
+    assert third["plan"]["steps"] == [] and third["table"]["columns"] == shown
+    assert third["presentation"] == {"table": True, "chart": False}
+
+
+def test_discovery_never_matches_a_presentation_word():
+    """'tabloyu' must not reach TP.HPBITABLO1 through its five-letter stem."""
+    from backend.tools.lakehouse import discover_concepts
+    needs_lakehouse()
+    for question in ("bu tabloyu bozmadan grafiğini çiz", "tablo yap", "grafiğini çizer misin"):
+        assert discover_concepts(question)["candidates"] == [], question
+
+
+def test_an_inflected_alias_still_fires():
+    """The demo's turn 2 says 'enflasyonDAN' and its deflator must be a candidate."""
+    from backend.tools.lakehouse import discover_concepts
+    needs_lakehouse()
+    keys = [c["key"] for c in discover_concepts(
+        "Konut kredisi ve faiz oranları tablosunu bozmadan sadece konut kredisi tutarlarını "
+        "enflasyondan arındırır mısın?", limit=12)["candidates"]]
+    assert "TP.GENENDEKS.T1" in keys
+    assert discover_concepts("enflasyondan arındır")["candidates"][0]["key"] == "TP.GENENDEKS.T1"
+
+
+def test_a_fresh_question_that_finds_nothing_does_not_chart_the_old_table():
+    from backend.agent.pipeline import apply_presentation
+    session = Session()
+    session.artifact = synthetic("konut")
+    fresh = route("zzzqqq serisinin grafiğini çiz", has_artifact=True, client=None)
+    assert fresh.wants_chart and not fresh.is_followup
+    plan = apply_presentation(template_plan("metadata", "q"), fresh, "q", session)
+    assert [s.op for s in plan.steps] == ["discover"]
+
+
+def _three_unit_session(third_unit="endeks", third_semantics="index"):
+    session = Session()
+    session.artifact = synthetic("konut", unit="milyon TL")
+    faiz = synthetic("faiz", unit="%", semantics="rate")
+    session.artifact.add_column("faiz", faiz.frame["faiz"], faiz.lineage["faiz"])
+    session.start_turn("kfe ekle ve grafigini ciz")
+    kfe = synthetic("kfe", unit=third_unit, semantics=third_semantics)
+    session.artifact.add_column("kfe", kfe.frame["kfe"], kfe.lineage["kfe"])
+    session.touch_column("kfe")
+    session.facts["is_followup"] = True
+    session.visible_columns = ["konut", "faiz"]
+    return session
+
+
+def test_a_third_unit_is_rebased_to_100_so_every_column_stays_on_the_chart():
+    """TL + % + index is the demo's turn 3. The deck's own chart shows it by
+    re-basing the non-percentage series to first month = 100: nothing is
+    dropped, the table keeps its units, the answer says what was re-based."""
+    session = _three_unit_session()
+    Executor(session).run(Plan(intent="followup", steps=[Step(op="chart")]))
+    chart, figure = session.facts["chart"], session.facts["figure"]
+    assert set(chart["columns"]) == {"konut", "faiz", "kfe"} and not chart.get("dropped")
+    by_name = {t["name"]: t for t in figure["data"]}
+    assert by_name["Konut (2021-01=100)"]["y"][0] == 100 and by_name["Kfe (2021-01=100)"]["y"][0] == 100
+    assert by_name["Konut (2021-01=100)"].get("yaxis", "y") == "y"        # index left, % right
+    assert by_name["Faiz"]["yaxis"] == "y2" and by_name["Faiz"]["y"][0] == 100.0  # untouched
+    assert figure["layout"]["yaxis"]["title"]["text"] == "endeks (2021-01=100)"
+    assert session.artifact.lineage["konut"].unit == "milyon TL"          # the table is not re-based
+    session.focus(keep_previous=True)
+    assert any("2021-01=100 bazina" in c for c in verify(session)["caveats"])
+
+
+def test_when_rebasing_cannot_reach_two_units_the_turns_own_column_is_kept_and_the_rest_named():
+    """% beside puan beside TL: the two percentage-like units cannot be
+    re-based and cannot share an axis, so one still has to go -- the column
+    this turn added stays, and what fell off is a caveat."""
+    session = _three_unit_session(third_unit="puan", third_semantics="rate")
+    Executor(session).run(Plan(intent="followup", steps=[Step(op="chart")]))
+    chart = session.facts["chart"]
+    assert "kfe" in chart["columns"] and chart["dropped"]
+    session.focus(keep_previous=True)
+    assert any("Grafikte gosterilmeyen" in c for c in verify(session)["caveats"])
+
+
+def test_cubuk_grafik_draws_bars():
+    session = Session()
+    session.artifact = synthetic("konut")
+    session.start_turn("bunu çubuk grafik olarak çiz")
+    Executor(session).run(Plan(intent="followup", steps=[Step(op="chart")]))
+    assert all(trace["type"] == "bar" for trace in session.facts["figure"]["data"])
+    assert session.facts["chart"]["kind"] == "bar"
+
+
+# --- pie charts, explicit clears, and a fresh question that finds nothing ----
+
+def _two_stocks(unit="milyon TL", second_unit=None, n=24):
+    session = Session()
+    session.artifact = synthetic("tl", n=n, start=300, step=10, unit=unit)
+    fx = synthetic("fx", n=n, start=100, step=2, unit=second_unit or unit)
+    session.artifact.add_column("fx", fx.frame["fx"], fx.lineage["fx"])
+    return session
+
+
+def _run_chart(session, question, base_period=None):
+    session.start_turn(question)
+    session.facts["is_followup"] = True
+    session.visible_columns = session.artifact.column_names()
+    Executor(session).run(Plan(intent="followup", steps=[Step(op="chart", base_period=base_period)]))
+    return session.facts["figure"], session.facts["chart"]
+
+
+def test_a_pie_is_a_snapshot_at_the_last_complete_period_with_shares_computed_in_python():
+    figure, chart = _run_chart(_two_stocks(), "bunun pasta grafiğini çiz")
+    assert figure["data"][0]["type"] == "pie" and chart["kind"] == "pie"
+    assert chart["period"] == "2022-12"                      # 24 months from 2021-01
+    tl, fx = 300 + 10 * 23, 100 + 2 * 23
+    assert chart["shares"] == {"Tl": f"%{100 * tl / (tl + fx):.1f}".replace(".", ","),
+                               "Fx": f"%{100 * fx / (tl + fx):.1f}".replace(".", ",")}
+
+
+def test_a_pie_at_a_named_month_and_a_month_the_table_lacks():
+    figure, chart = _run_chart(_two_stocks(), "2021 Haziran için pasta", base_period="2021-06-01")
+    assert figure["data"][0]["type"] == "pie" and chart["period"] == "2021-06"
+    figure, chart = _run_chart(_two_stocks(), "pasta", base_period="2030-01-01")
+    assert figure["data"][0]["type"] == "scatter" and chart["kind"] == "line"
+    assert "2030-01" in chart["note"]
+
+
+@pytest.mark.parametrize("session, why", [
+    (_two_stocks(second_unit="%"), "ayni birimde"),           # mixed units
+    (_two_stocks(unit="%"), "oran/endeks"),                   # rates are not parts of a whole
+])
+def test_a_pie_that_would_lie_becomes_a_line_chart_with_the_reason_as_a_caveat(session, why):
+    figure, chart = _run_chart(session, "bunun pasta grafiğini çiz")
+    assert figure["data"][0]["type"] == "scatter" and chart["kind"] == "line"
+    assert why in chart["note"]
+    session.focus(keep_previous=True)
+    assert any("Pasta grafigi cizilemedi" in c for c in verify(session)["caveats"])
+
+
+def test_a_pie_needs_two_columns_and_no_negative_values():
+    from backend.tools.charts import PieError, build_chart
+    one = synthetic("x")
+    with pytest.raises(PieError, match="iki sutun"):
+        build_chart(one, kind="pie")
+    session = _two_stocks()
+    session.artifact.frame.loc[session.artifact.frame.index[-1], "fx"] = -5.0
+    with pytest.raises(PieError, match="negatif"):
+        build_chart(session.artifact, kind="pie")
+    # A NaN in the last month moves the snapshot back to the last complete one.
+    session = _two_stocks()
+    session.artifact.frame.loc[session.artifact.frame.index[-1], "fx"] = float("nan")
+    figure, chart = _run_chart(session, "pasta")
+    assert chart["period"] == "2022-11"
+
+
+@pytest.mark.parametrize("question, month", [
+    ("2024-06 için pasta grafiği yap", "2024-06-01"),
+    ("2024 Haziran için pasta grafiği yap", "2024-06-01"),
+    ("Haziran 2024 pastası", "2024-06-01"),
+    ("2021-2025 arası konut kredisi", None),          # two dates: not a single month
+    ("pasta grafiği çiz", None),
+])
+def test_a_single_named_month_is_read_for_a_snapshot(question, month):
+    from backend.agent.router import extract_single_month, is_presentation_only
+    assert extract_single_month(question) == month
+    if month:
+        assert is_presentation_only(question)
+
+
+def test_pasta_is_a_chart_word_only_as_a_chart():
+    assert route("bunun pasta grafiğini çiz", client=None).wants_chart
+    assert route("2024 Haziran için pasta yap", client=None).wants_chart
+    assert not route("kredi pastasından en büyük payı hangi sektör aldı", client=None).wants_chart
+
+
+@pytest.mark.parametrize("question, clear, only", [
+    ("tabloyu temizle", True, True),
+    ("baştan başla", True, True),
+    ("her şeyi sil", True, True),
+    ("tabloyu temizle ve toplam mevduatı göster", True, False),
+    ("npl sütununu sil", False, False),
+    ("tablodaki npl sütununu sil", False, False),
+])
+def test_an_explicit_clear_is_deterministic_and_narrow(question, clear, only):
+    from backend.agent.pipeline import make_plan
+    decided = route(question, has_artifact=True, client=None)
+    assert decided.wants_clear is clear
+    session = Session()
+    session.artifact = synthetic("konut")
+    plan = make_plan(question, session, decided, client=None)
+    ops = [s.op for s in plan.steps]
+    if clear:
+        assert ops[0] == "clear_table"
+        assert (ops == ["clear_table"]) is only
+    else:
+        assert "clear_table" not in ops
+
+
+def test_a_cleared_table_is_reported_as_cleared_not_as_missing_data():
+    from backend.agent.composer import deterministic_summary
+    session = Session()
+    session.artifact = synthetic("konut")
+    session.start_turn("tabloyu temizle")
+    Executor(session).run(Plan(intent="followup", steps=[Step(op="clear_table")]))
+    session.focus(keep_previous=True)
+    assert verify(session)["passed"]
+    assert deterministic_summary(session, "tabloyu temizle").startswith("Tablo temizlendi")
+
+
+def test_a_fresh_question_that_produces_nothing_shows_no_table_but_keeps_it_for_the_next_followup():
+    session = Session()
+    session.artifact = synthetic("konut")
+    session.visible_columns = ["konut"]
+    session.start_turn("zzz serisini göster")
+    assert session.focus(keep_previous=False) == []
+    assert session.view().is_empty() and session.shown_empty
+    assert session.visible_columns == ["konut"]              # remembered, not shown
+    session.start_turn("bunun grafiğini çiz")
+    assert session.focus(keep_previous=True) == ["konut"]
+    assert not session.view().is_empty()
+
+
+def test_a_fresh_question_that_produces_nothing_does_not_window_the_shared_table():
+    session = Session()
+    session.artifact = synthetic("konut", n=60)
+    session.start_turn("2024 zzz serisini göster")
+    Executor(session).run(Plan(intent="series_analysis", start="2024-01-01", end="2024-12-01",
+                               steps=[Step(op="discover", query="zzz")]))
+    assert len(session.artifact.frame) == 60

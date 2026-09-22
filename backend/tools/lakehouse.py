@@ -373,6 +373,24 @@ STOPWORDS = {
     # question names. "ortalama" is left alone: it is the subject in
     # "Ortalama Toplam Aktifler".
     "agirlikli", "ağırlıklı",
+    # Presentation verbs and the case-inflected table/chart nouns. "tablo" and
+    # "grafik" were already here, but the five-character stemmer below is
+    # applied to the *inflected* word ("tabloyu" -> "tablo") and used to skip
+    # this list, and `%tablo%` is a substring of the EVDS money-supply code
+    # TP.HPBITABLO1: "bu tabloyu bozmadan grafigini ciz" fetched M1. Folded
+    # (ASCII) forms, because `_terms` folds before it looks here.
+    "tabloyu", "tablonun", "tabloya", "tablodaki", "tablodan", "tablosu", "tablosunu",
+    "grafigi", "grafigini", "grafige", "grafigin", "grafikle", "grafikte", "grafikler",
+    "cizin", "cizer", "cizdir", "cizebilir", "cizsene", "cizelim", "cizilsin",
+    "bozmadan", "bozmaksizin", "gosterin", "gosterir", "gosterebilir", "gostersene",
+    "listeleyin", "listeler", "olustur", "olusturun", "hazirla", "duzenle",
+    "halinde", "seklinde", "bunun", "bunlarin", "sunu", "onun",
+    # The demo's own verbs and amount words. "arindirir" stems to "arind",
+    # a substring of "kredi_kartlarindan": the deflation clause of the
+    # reference scenario ranked credit-card debt first. "tutar" is the same
+    # kind of word as "miktari" above -- it says "amount", names nothing.
+    "arindir", "arindirir", "arindirin", "arindirilmis", "arind",
+    "tutar", "tutari", "tutarini", "tutarlari", "tutarlarini", "tutarlarinin",
 }
 
 
@@ -401,7 +419,16 @@ def _terms(query: str):
 
     consumed = []
     for phrase in sorted(ALIASES, key=len, reverse=True):
-        match = re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", lowered)
+        # A Turkish noun carries its case: the demo's own turn 2 says
+        # "enflasyonDAN arindir", and an alias that fires only on the bare
+        # word "enflasyon" never reached TUFE for it. A short suffix is
+        # allowed after any alias of four letters or more -- four letters, a case
+        # ending, not a whole derivation: "satislarinin" must not fire "konut
+        # satis" or the count outranks the mortgage share. The two- and
+        # three-letter ones ("npl", "gdp", "usd", "kkm") stay exact, because
+        # "usd" + a suffix is how an abbreviation gets inside another word.
+        suffix = r"\w{0,4}" if len(phrase) >= 4 else ""
+        match = re.search(rf"(?<!\w){re.escape(phrase)}{suffix}(?!\w)", lowered)
         if not match:
             continue
         if any(match.start() < end and start < match.end() for start, end in consumed):
@@ -409,7 +436,12 @@ def _terms(query: str):
         consumed.append(match.span())
         for expansion in ALIASES[phrase]:
             key = expansion.lower()
-            if key == phrase.lower():
+            # ...and so does an expansion that is one of the phrase's own
+            # words: "faiz orani" -> "faiz" tripled the weight of "faiz" and
+            # ranked a bulletin ratio whose name says it twice above the
+            # loan rate the question named. Only the vocabulary the phrase
+            # does NOT already contain ("KTF") is worth adding.
+            if key == phrase.lower() or key in phrase.lower().split():
                 # A self-map ("faiz" -> "faiz") adds no vocabulary; it only
                 # triples the weight of a word the question already used, which
                 # is how one incidental "faiz" buried the loan series the
@@ -425,7 +457,10 @@ def _terms(query: str):
             # neither in a key spelled "tuketici_kredileri_konut". A five-character
             # prefix is a crude stemmer, but it costs nothing and recovers the
             # match that matters.
-            if len(word) > 6:
+            # The stem must clear the stopword list too: "tabloyu" is not a
+            # stopword, its stem "tablo" is, and a stem that skips the check
+            # is a stopword back in the query with the same substring reach.
+            if len(word) > 6 and word[:5] not in STOPWORDS:
                 weighted.setdefault(word[:5], 0.8)
     return sorted(weighted.items(), key=lambda pair: -pair[1])[:18]
 
@@ -575,12 +610,17 @@ def _score(candidate, terms, province_named: bool = False) -> float:
 # "Ankara'" and "toplam mevduat hacmi ne kadar" -- severing the province name
 # from the question that named it, so no finturk candidate downstream ever saw
 # it named a province and the national bulletin total answered in its place.
+# "bozmadan" / "sadece" open a new clause too: the demo's turn 2 -- "...faiz
+# oranlari tablosunu bozmadan sadece konut kredisi tutarlarini enflasyondan
+# arindirir misin" -- was one clause whose top three were all loan-rate
+# series, and TUFE never reached the planner's candidate list.
 CLAUSE_SPLIT = re.compile(
     r"[.,;?!]|\bbuna ek olarak\b|\bayrica\b|\bayrıca\b|\bve\b|\bile\b|"
-    r"(?<!['’])\bda\b|(?<!['’])\bde\b", re.I)
+    r"(?<!['’])\bda\b|(?<!['’])\bde\b|"
+    r"\bbozmadan\b|\bbozmaks[ıi]z[ıi]n\b|\bsadece\b|\byaln[ıi]zca\b", re.I)
 
 
-def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
+def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     """Discovery over a whole question, by splitting it into concepts first.
 
     A demo question is a paragraph -- "...konut kredilerinin dagilimini aylik
@@ -591,8 +631,11 @@ def discover_concepts(question: str, per_concept: int = 3, limit: int = 8):
     piece recovers both, which is what the planner needs to see.
     """
     chunks = [chunk.strip() for chunk in CLAUSE_SPLIT.split(question or "") if chunk.strip()]
+    # Folded, as `_terms` folds: "grafiğini".lower() is not the ASCII
+    # "grafigini" the stopword list holds, so an unfolded check let a
+    # clause made only of presentation words through to the search.
     chunks = [chunk for chunk in chunks
-              if any(len(word) > 3 and word.lower() not in STOPWORDS
+              if any(len(word) > 3 and fold(word) not in STOPWORDS and fold(word)[:5] not in STOPWORDS
                      for word in re.split(r"[^\w\u00c0-\u024f]+", chunk))]
     if not chunks:
         chunks = [question]

@@ -24,7 +24,7 @@ from ..tools.lakehouse import discover_concepts
 from .composer import compose
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
-from .router import Route, route
+from .router import Route, extract_single_month, route
 from .state import Session
 from .verifier import verify
 
@@ -488,18 +488,45 @@ def apply_analysis(plan: Plan, route_result: Route, session: Session) -> Plan:
 DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external")
 
 
-def apply_presentation(plan: Plan, route_result: Route, question: str) -> Plan:
+def apply_presentation(plan: Plan, route_result: Route, question: str,
+                       session: Optional[Session] = None) -> Plan:
     """A chart step exists in the plan iff the question asked for a chart.
 
     Enforced here, after planning, so it holds for every plan source alike --
     the model (which the prompt also tells, but a prompt is a request and this
     is a guarantee), the deterministic series plan and the templates. When a
     chart *was* asked for and no step draws one, one is appended over whatever
-    the plan fetched.
+    the plan fetched -- or, when the plan fetches nothing but the session
+    already holds a table, over that table. Measured before this took the
+    session into account: "bunun grafiğini çiz" after a table question had
+    `wants_chart=True`, the model returned exactly `[{"op": "chart"}]`, this
+    function stripped it, found no fetch to hang a chart on, and the turn
+    ended with an empty plan and `figure: None`. The gate exists to stop a
+    chart nobody asked for, not one the user just asked for by name.
     """
+    named = [step for step in plan.steps if step.op == "chart"]
     plan.steps = [step for step in plan.steps if step.op != "chart"]
-    if route_result.wants_chart and any(step.op in DATA_PRODUCING_OPS for step in plan.steps):
-        plan.steps.append(Step(op="chart", title=question[:80]))
+    if not route_result.wants_chart:
+        return plan
+    has_data = any(step.op in DATA_PRODUCING_OPS for step in plan.steps)
+    # Only a FOLLOW-UP may chart the table it extends: a fresh question whose
+    # series was not found must not come back with a chart of whatever the
+    # previous question left on screen, dressed up as its answer.
+    has_table = (session is not None and session.has_artifact() and route_result.is_followup
+                 and not any(step.op == "clear_table" for step in plan.steps))
+    if has_data or has_table:
+        # Keep the columns/title the model named, if it named any.
+        chart = named[0] if named else Step(op="chart")
+        # No title from the question: "bunun grafigini ciz" says nothing
+        # about what is drawn. Left empty, the executor titles the chart
+        # from the series it actually holds and the period it covers.
+        # A single month named in a follow-up ("2024 Haziran pastasi"): the
+        # pie's snapshot period, carried on the step rather than as a plan
+        # window that would cut the table down to one row.
+        month = extract_single_month(question)
+        if month and not chart.base_period:
+            chart.base_period = month
+        plan.steps.append(chart)
     return plan
 
 
@@ -512,38 +539,69 @@ def make_plan(question: str, session: Session, route_result: Route,
     cannot disagree about which candidates carry which currency slice.
     """
     series_intent = route_result.intent in ("series_analysis", "followup")
+
+    # "bunun grafiğini çiz" / "tablo yap" over an existing table: there is
+    # nothing to plan. No discovery (its words name no series -- and the
+    # stem of "tabloyu" matched the EVDS money-supply code TP.HPBITABLO1,
+    # which is how a chart request once fetched M1), no model round trip.
+    # `apply_presentation` adds the chart step when one was asked for; an
+    # empty follow-up plan re-presents the table as it stands.
+    if route_result.presentation_only and session.has_artifact():
+        return Plan(intent="followup", steps=[],
+                    reasoning="presentation-only follow-up: re-present the current table")
+
+    # "tabloyu temizle" / "bastan basla" is an op with exactly one meaning,
+    # so it does not wait for a model: the same words empty the table in
+    # both modes. With a new question attached, the clear runs first and
+    # the rest is planned below; alone, it is the whole plan.
+    if route_result.wants_clear and route_result.is_followup:
+        return Plan(intent="followup", steps=[Step(op="clear_table")],
+                    reasoning="deterministic: explicit clear request")
+
     found = (discover_concepts(question, limit=MAX_CANDIDATES_IN_CONTEXT)
              if client is not None or series_intent else {"candidates": [], "by_concept": []})
-    if client is None:
-        if series_intent:
-            return apply_dimensions(deterministic_series_plan(question, route_result, discovery=found), found)
-        return template_plan(route_result.intent, question, route_result.urls,
-                             route_result.start, route_result.end)
-    try:
-        plan = client.structured(
-            planner_messages(question, build_context(question, session, route_result, discovery=found)),
-            Plan, max_tokens=1400)
-    except LLMError:
+
+    def fallback() -> Plan:
         if series_intent:
             return apply_dimensions(deterministic_series_plan(question, route_result, discovery=found), found)
         return template_plan(route_result.intent, question, route_result.urls,
                              route_result.start, route_result.end)
 
-    # A plan that only discovers is a *valid* plan but a dead end -- measured
-    # live, a model handed a fresh question sometimes emits just `discover`
-    # and stops rather than committing to the fetch it just found candidates
-    # for. Rule 1 in the prompt ("don't invent a key") makes this the *safe*
-    # failure, but a safe non-answer is still not an answer: the deterministic
-    # plan used for an unreachable model recovers a real table here too. A
-    # follow-up over an existing table is not a dead end and is left alone --
-    # but a table a *previous* question built does not rescue a fresh one.
-    extends_table = session.has_artifact() and (route_result.is_followup or plan.intent == "followup")
-    if (series_intent and not extends_table
-            and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
-        plan = deterministic_series_plan(question, route_result, discovery=found)
-        plan.reasoning = f"{plan.reasoning} [model plan produced no data; replaced]"
-    plan = apply_dimensions(plan, found)
-    plan = apply_scope(plan, route_result, session, found)
+    plan: Optional[Plan] = None
+    if client is not None:
+        try:
+            plan = client.structured(
+                planner_messages(question, build_context(question, session, route_result, discovery=found)),
+                Plan, max_tokens=1400)
+        except LLMError:
+            plan = None
+    if plan is None:
+        # The deterministic plan goes through the SAME tail as a model plan
+        # below. It used to `return` here, which skipped the follow-up window
+        # inheritance: in modelless mode "bu tabloyu bozmadan ..." fetched the
+        # new column unwindowed (67 months) and the outer join stretched the
+        # 60-row table it was told not to disturb.
+        plan = fallback()
+    else:
+        # A plan that only discovers is a *valid* plan but a dead end -- measured
+        # live, a model handed a fresh question sometimes emits just `discover`
+        # and stops rather than committing to the fetch it just found candidates
+        # for. Rule 1 in the prompt ("don't invent a key") makes this the *safe*
+        # failure, but a safe non-answer is still not an answer: the deterministic
+        # plan used for an unreachable model recovers a real table here too. A
+        # follow-up over an existing table is not a dead end and is left alone --
+        # but a table a *previous* question built does not rescue a fresh one.
+        extends_table = session.has_artifact() and (route_result.is_followup or plan.intent == "followup")
+        if (series_intent and not extends_table
+                and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
+            plan = deterministic_series_plan(question, route_result, discovery=found)
+            plan.reasoning = f"{plan.reasoning} [model plan produced no data; replaced]"
+        plan = apply_dimensions(plan, found)
+        plan = apply_scope(plan, route_result, session, found)
+
+    if route_result.wants_clear and not any(step.op == "clear_table" for step in plan.steps):
+        plan.steps.insert(0, Step(op="clear_table"))
+        plan.reasoning = f"{plan.reasoning or ''} [clear_table prepended: explicit clear request]".strip()
 
     # The router's regex read of the date range beats the model's: it is exact,
     # and a plan that silently drops the window returns 67 months for a
@@ -602,7 +660,7 @@ def run_turn(question: str, session: Optional[Session] = None,
         plan = make_plan(question, session, route_result, client)
         plan = apply_valuation_guard(plan, session, is_followup=route_result.is_followup)
         plan = apply_analysis(plan, route_result, session)
-        plan = apply_presentation(plan, route_result, question)
+        plan = apply_presentation(plan, route_result, question, session)
     logger.info("plan -> %s", [step.op + (f":{step.method}" if step.method else "") for step in plan.steps])
     session.facts["intent"] = plan.intent
     session.facts["wants_analysis"] = list(route_result.wants_analysis)

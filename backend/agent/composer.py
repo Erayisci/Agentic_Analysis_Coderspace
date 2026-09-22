@@ -111,6 +111,8 @@ def deterministic_summary(session: Session, question: str) -> str:
     """
     artifact = session.view()
     if artifact.is_empty():
+        if any(a.op == "clear_table" and a.ok for a in session.audit) and session.artifact.is_empty():
+            return "Tablo temizlendi. Yeni bir soru sorabilirsiniz."
         failures = "; ".join(a.detail for a in session.audit if not a.ok)
         return f"Tablo olusturulamadi. {failures or 'Veri bulunamadi.'}"
 
@@ -146,6 +148,10 @@ def deterministic_summary(session: Session, question: str) -> str:
         tag = f" [{result['kaynak']}]" if result.get("kaynak") else ""
         lines += ["", (result.get("description") or f"{method} analizi: {column}") + tag]
 
+    chart = session.facts.get("chart") or {}
+    if chart.get("kind") == "pie":
+        lines += ["", f"Pasta grafigi ({chart['period']}): "
+                  + ", ".join(f"{label} {share}" for label, share in chart["shares"].items())]
     caveats = session.facts.get("verification", {}).get("caveats", [])
     if caveats:
         lines += ["", "Uyarilar: " + "; ".join(caveats[:3])]

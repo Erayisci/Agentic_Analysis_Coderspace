@@ -202,7 +202,10 @@ class Plan(BaseModel):
 
     @model_validator(mode="after")
     def _not_empty(self) -> "Plan":
-        if self.intent != "unsupported" and not self.steps:
+        # A follow-up that only re-presents the table ("tablo yap" over an
+        # existing table) legitimately runs no step: the executor has nothing
+        # to do and `Session.focus` shows the previous turn's columns.
+        if self.intent not in ("unsupported", "followup") and not self.steps:
             raise ValueError("a plan must have at least one step unless intent is 'unsupported'")
         return self
 
@@ -242,8 +245,9 @@ Adimlar:
   ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
   sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
   bulunur. Bu ekleme SADECE bu oturum icindir, kalici veritabanina hicbir sey yazilmaz.
-- clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. Kullanici "tabloyu temizle",
-  "sil", "bastan basla", "yeni tablo yap" gibi bir sey isterse kullan. Bu adim SADECE bu
+- clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. SADECE kullanici acikca "tabloyu
+  temizle", "sil", "bastan basla" derse kullan. "tablo yap" / "yeni tablo" / "tablo olustur"
+  bir SUNUM istegidir, silme istegi DEGILDIR -- bunlarda clear_table KULLANMA. Bu adim SADECE bu
   oturumun bellekteki calisma tablosunu bosaltir -- lakehouse.duckdb'ye HICBIR ETKISI YOKTUR,
   onu silme/degistirme imkani yoktur ve olmayacaktir.
 
@@ -255,6 +259,10 @@ Kurallar:
 3. Tarih araligini start/end alanlarina yaz (YYYY-MM-DD).
 4. chart adimini SADECE kullanici acikca grafik/gorsel istediyse ("grafik", "ciz", "gorsellestir")
    ekle ve son adim olsun. Istenmediyse chart EKLEME -- cevap duz metin olacak.
+   Kullanici SADECE sunum istiyorsa ("bunun grafigini ciz", "tablo yap", "grafik olarak goster")
+   ve MEVCUT TABLO doluysa: HICBIR SEY fetch ETME. Grafik icin tek adim {"op":"chart"} yaz
+   (columns bos birak: mevcut tablonun sutunlari cizilir); tablo icin steps=[] ile intent
+   "followup" dondur. Mevcut tabloyu sunmak icin yeni seri arama/uydurma.
 5. BIRIME DIKKAT ET. Kredi/mevduat TUTARI istendiginde birimi "milyon TL" veya "bin TL"
    olan seriyi sec. Birimi "adet" olan seri bir SAYIDIR (ornegin konut SATIS adedi),
    kredi tutari degildir. Birimi "%" olan seri bir orandir.
