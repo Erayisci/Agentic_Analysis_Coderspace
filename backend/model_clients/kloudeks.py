@@ -14,7 +14,11 @@ class ModelFailure(Exception):
 
 
 class KloudeksClient:
-    def __init__(self, base_url, api_key, proxy, timeout=60, connection_factory=None):
+    def __init__(self, base_url, api_key, proxy=None, timeout=60, connection_factory=None):
+        """`proxy` is the egress proxy the isolated worker tunnels through. None
+        connects to MIA directly -- the in-process ingestion route
+        (backend/ingestion/external) runs inside the API process, which has no
+        proxy; the hostname allowlist below applies either way."""
         self.base_url, self.api_key, self.proxy = base_url, api_key, proxy
         self.timeout = timeout
         self.connection_factory = connection_factory or http.client.HTTPSConnection
@@ -53,13 +57,18 @@ class KloudeksClient:
     def _complete(self, payload):
         if not self.api_key:
             raise ModelFailure("model_not_configured")
-        target, proxy = urlsplit(self.base_url), urlsplit(self.proxy)
+        target = urlsplit(self.base_url)
         if (target.scheme != "https" or not target.hostname or not target.hostname.endswith(".kloudeks.com")
                 or target.port not in {None, 443} or target.username or target.password or target.query or target.fragment):
             raise ModelFailure("model_not_configured")
-        connection = self.connection_factory(proxy.hostname, proxy.port or 80, timeout=self.timeout)
+        if self.proxy:
+            proxy = urlsplit(self.proxy)
+            connection = self.connection_factory(proxy.hostname, proxy.port or 80, timeout=self.timeout)
+        else:
+            connection = self.connection_factory(target.hostname, 443, timeout=self.timeout)
         try:
-            connection.set_tunnel(target.hostname, 443)
+            if self.proxy:
+                connection.set_tunnel(target.hostname, 443)
             connection.request("POST", target.path.rstrip("/") + "/chat/completions",
                                body=json.dumps(payload).encode(), headers={
                                    "Authorization": "Bearer " + self.api_key,

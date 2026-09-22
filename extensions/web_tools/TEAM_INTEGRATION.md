@@ -130,3 +130,18 @@ not pages or independent publishers. Preserve `coverage`, `conflicts`,
 `missing_information` and `stop_reason` in the main agent's final response.
 `sources` includes uncited evidence; `citations` identifies the answer's references.
 See [MULTISOURCE.md](MULTISOURCE.md) for the full output/limit contract and demo.
+
+## In-process use by the lakehouse's external zone
+
+`backend/ingestion/external/documents.py` reuses this extension's extractor as
+the document layer of demo-day source ingestion. When `WEB_TOOLS_ENABLED=true`
+it calls `read_web_url` / `get_page_assets` through the registry (the isolated
+worker, service limits, egress proxy). Otherwise it runs the same
+`asset_extract.extract()` inside the API process on bytes fetched through the
+team's `backend.tools.web_url._fetch` guard, with the parser packages from
+`pip install -e ".[ingest]"` and `backend.model_clients.kloudeks.KloudeksClient`
+connecting directly (`proxy=None`). Both routes yield the same `sections[].rows`
+grid, which `backend/ingestion/external/tables.py` turns into time series. The
+extractor's caps still apply (`asset_max_rows` ceiling 2000 per sheet/table,
+`asset_max_chars` 50000); a truncated table lands as `status="partial"`.
+`WEB_ASSET_CACHE_DIR` defaults to `data/external/_cache` on the host.

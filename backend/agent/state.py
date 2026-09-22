@@ -35,11 +35,17 @@ class ColumnLineage:
     transform: Optional[str] = None            # e.g. "index_to_base(2021-01)"
     derived_from: List[str] = field(default_factory=list)
     citation: Dict[str, Any] = field(default_factory=dict)
+    # The grain the series is PUBLISHED at, not the grain of the table it was
+    # resampled onto. Both columns of a ratio can sit on a monthly index and
+    # still be incomparable: the weekly bulletin's latest observation is weeks
+    # ahead of the monthly one's, and the two measure different scopes. The
+    # verifier refuses to let those be divided; see `verifier.verify`.
+    grain: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {"column": self.column, "label": self.label, "source": self.source,
                 "unit": self.unit, "temporal_semantics": self.temporal_semantics,
-                "key": self.key, "transform": self.transform,
+                "key": self.key, "transform": self.transform, "grain": self.grain,
                 "derived_from": self.derived_from, "citation": self.citation}
 
 

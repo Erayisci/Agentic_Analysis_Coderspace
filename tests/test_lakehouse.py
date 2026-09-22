@@ -281,10 +281,10 @@ def schema_card_queries():
 
 def test_schema_card_documents_the_query_patterns():
     queries = schema_card_queries()
-    assert len(queries) == 8, f"expected 8 worked examples, card has {len(queries)}"
+    assert len(queries) == 9, f"expected 9 worked examples, card has {len(queries)}"
 
 
-@pytest.mark.parametrize("n", range(8))
+@pytest.mark.parametrize("n", range(9))
 def test_every_schema_card_query_runs_and_returns_rows(connection, n):
     sql = schema_card_queries()[n]
     frame = connection.execute(sql).df()
@@ -325,3 +325,31 @@ def test_entity_keys_are_ascii_so_turkish_search_is_case_safe(connection):
         "SELECT entity_key FROM bulletin_entities WHERE NOT regexp_matches(entity_key, '^[a-z0-9_/]+$')"
     ).df()
     assert non_ascii.empty, non_ascii.entity_key.tolist()
+
+
+# --------------------------------------------------------------------- #
+# The external zone
+# --------------------------------------------------------------------- #
+
+def test_the_external_zone_views_exist_and_bind(connection):
+    """The build creates five views over data/external/*/; the seed files make
+    every glob match, so the views bind even when nothing has landed yet."""
+    from backend.lakehouse.external_store import VIEWS
+    for view in VIEWS:
+        assert connection.execute(f"SELECT count(*) FROM {view}").fetchone()[0] >= 0
+    kinds = dict(connection.execute(
+        "SELECT table_name, table_type FROM information_schema.tables WHERE table_name LIKE 'external_%'"
+    ).fetchall())
+    assert set(kinds) == set(VIEWS) and set(kinds.values()) == {"VIEW"}
+
+
+def test_the_external_index_uses_the_shared_vocabulary(connection):
+    """A fifth series index, same words: a synonym here would be a filter that
+    reaches the base corpora and silently misses a landed source."""
+    semantics = connection.execute("SELECT DISTINCT temporal_semantics FROM external_series").df().iloc[:, 0]
+    assert set(semantics) <= {"stock", "flow", "rate", "index", "ratio", "cumulative_ytd", "unknown"}
+    rules = connection.execute("SELECT DISTINCT monthly_rule FROM external_series").df().iloc[:, 0]
+    assert set(rules) <= {"last", "avg", "sum"}
+    non_ascii = connection.execute(
+        "SELECT series_key FROM external_series WHERE NOT regexp_matches(series_key, '^[a-z0-9_/]+$')").df()
+    assert non_ascii.empty, non_ascii.series_key.tolist()

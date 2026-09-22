@@ -109,7 +109,7 @@ def change(artifact: AnalysisArtifact, column: str, periods: int = 1,
                         ColumnLineage(
                             column=name, label=f"{lineage.label} ({kind}, %{periods} donem)",
                             source=DERIVED, unit="%", temporal_semantics="rate", key=lineage.key,
-                            transform=f"change({column}, periods={periods})",
+                            transform=f"change({column}, periods={periods})", grain=lineage.grain,
                             derived_from=[column], citation=dict(lineage.citation)))
     return name
 
@@ -122,12 +122,24 @@ def ratio(artifact: AnalysisArtifact, numerator: str, denominator: str,
         raise ValueError(
             f"cannot divide {numerator!r} ({top.unit}) by {denominator!r} ({bottom.unit}): "
             "the units differ, so the ratio would be off by their scale factor")
+    # Same argument, one axis over: two series resampled onto the same monthly
+    # index are still incomparable when they are published at different grains.
+    # The weekly bulletin runs weeks ahead of the monthly one and measures a
+    # different scope, so dividing one by the other produces a plausible number
+    # that means nothing. Caught here as well as in the verifier because this
+    # one is cheap and exact -- the verifier catches what reaches the table by
+    # another route.
+    if top.grain and bottom.grain and top.grain != bottom.grain:
+        raise ValueError(
+            f"cannot divide {numerator!r} ({top.grain}) by {denominator!r} ({bottom.grain}): "
+            "the series are published at different grains, so the ratio pairs observations "
+            "that were never measured over the same period")
     name = as_name or f"{numerator}_over_{denominator}"
     values = artifact.frame[numerator] / artifact.frame[denominator]
     artifact.add_column(name, 100 * values if as_percent else values, ColumnLineage(
         column=name, label=f"{top.label} / {bottom.label}", source=DERIVED,
         unit="%" if as_percent else "oran", temporal_semantics="ratio",
-        transform=f"ratio({numerator}, {denominator})",
+        transform=f"ratio({numerator}, {denominator})", grain=top.grain,
         derived_from=[numerator, denominator], citation={}))
     return name
 

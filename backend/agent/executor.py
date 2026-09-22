@@ -34,21 +34,26 @@ BAR_CHART_WORDS = re.compile(r"(çubuk|cubuk|s[üu]tun\s+grafi|bar\s*(chart|grap
 # so here "pasta" alone is enough. Not "pastasindan": `\b` after the optional
 # possessive rejects the idiom's longer suffix.
 PIE_CHART_WORDS = re.compile(r"(\bpasta(s[ıi]|y[ıi]|n[ıi])?\b|\bpie\b)", re.I)
+from ..ingestion.external import ingest_url
 from ..tools.external_series import ingest_external_series
-from ..tools.lakehouse import discover, fetch_series, footnotes
+from ..tools.lakehouse import candidate_grain, discover, fetch_series, footnotes
 from ..tools.series import SeriesResult, load_series
 from .planner import Plan, Step
 from .state import AnalysisArtifact, AuditStep, ColumnLineage, Session
 
 MAX_URL_CHARS = 6000
 
-LAKEHOUSE_SOURCES = ("bulletin", "weekly", "macro", "finturk")
+# "external" is the lakehouse's external zone (backend.ingestion.external): a
+# source landed at runtime has a real row behind it in the external_* views,
+# so it is re-readable like any other lakehouse series.
+LAKEHOUSE_SOURCES = ("bulletin", "weekly", "macro", "finturk", "external")
 # Sources whose fact table keys a series by (dataset, key) rather than by the
 # key alone, so `dataset` has to travel with the key on every fetch.
 DATASET_SOURCES = ("bulletin", "finturk")
 # Sources with no currency dimension: an EVDS series is one number a month,
-# and FinTurk publishes a province split instead of a TL/FX one.
-NO_CURRENCY_SOURCES = ("macro", "finturk")
+# FinTurk publishes a province split instead of a TL/FX one, and an external
+# file publishes whatever it publishes -- one column, one series.
+NO_CURRENCY_SOURCES = ("macro", "finturk", "external")
 
 # `Step` fields that only mean something for a subset of sources, because they
 # select a dimension that source's own fact table actually publishes. Naming
@@ -147,6 +152,10 @@ def _normalise_key(key: str) -> str:
     key = key.strip()
     if "/" not in key:
         return key
+    if key.split("/")[0] == "external":
+        # An external series_key is '<source_id>/<location>/<name>' and keeps
+        # its slashes; only a copied 'external/' prefix is removed.
+        return key.split("/", 1)[1]
     head, _, tail = key.rpartition("/")
     if head.split("/")[0] in LAKEHOUSE_SOURCES:
         return tail
@@ -245,10 +254,29 @@ class Executor:
             "discover": self._discover, "fetch_series": self._fetch, "transform": self._transform,
             "analyze": self._analyze, "find_periods": self._find_periods,
             "read_url": self._read_url_step, "search": self._search_step, "chart": self._chart,
-            "ingest_external": self._ingest_external, "clear_table": self._clear_table,
-            "footnotes": self._footnotes,
+            "ingest_source": self._ingest_source, "ingest_external": self._ingest_external,
+            "clear_table": self._clear_table, "footnotes": self._footnotes,
         }[step.op]
         return handler(step, plan)
+
+    def _ingest_source(self, step: Step, plan: Plan) -> str:
+        """Land a URL in the lakehouse's external zone (see
+        backend.ingestion.external). Writes Parquet under data/external/, never
+        touches lakehouse.duckdb; the series then fetch with source='external'.
+        The explicit op runs heuristics plus the lakehouse cross-check; the
+        model labelling happens on the pre-planning path, which has the client."""
+        question = self.session.turns[-1]["question"] if self.session.turns else ""
+        result = ingest_url(step.url, hint=step.hint or step.query or question)
+        # `facts["sources"]` is the citation legend (`verifier.source_map`);
+        # what the URLs produced lives beside it under its own name.
+        self.session.facts.setdefault("landed_sources", []).append(result.to_dict())
+        if result.status != "error":
+            self.session.cite({"source": "external", "table": "external_sources", "source_id": result.source_id,
+                               "url": result.url, "status": result.status, "n_series": result.n_series})
+        keys = result.all_series_keys()
+        return (f"{result.status}: {len(keys)} series landed from {step.url}"
+                + (" (cache hit)" if result.cache_hit else "")
+                + (": " + ", ".join(keys[:5]) if keys else ""))
 
     def _footnotes(self, step: Step, plan: Plan) -> str:
         """BDDK's methodology notes for the named table, or for every
@@ -338,7 +366,10 @@ class Executor:
             transform = f"resample_to_monthly({rule})"
 
         citation = series.citation()
-        name = _column_name(step, re.sub(r"[^\w]+", "_", key))
+        # An external series_key is '<source_id>/<location>/<name>'; the name
+        # segment is the readable column, the rest is its address.
+        default = key.rsplit("/", 1)[-1] if series.source == "external" else key
+        name = _column_name(step, re.sub(r"[^\w]+", "_", default))
         # `AnalysisArtifact.add_column` replaces a same-named column outright
         # (see its own docstring) -- correct when a plan deliberately names a
         # column (`as_name`, e.g. `pipeline.apply_scope` repairing a stale
@@ -370,6 +401,11 @@ class Executor:
             transform=transform,
             column=name, label=label, source=series.source, unit=series.unit,
             temporal_semantics=series.temporal_semantics, key=series.key,
+            # The published grain, recorded before any resampling: a weekly
+            # series lands on the monthly index but stays a weekly series, and
+            # the verifier needs to know that before it is divided by one.
+            grain=candidate_grain({"source": series.source,
+                                   "native_frequency": (series.extra or {}).get("native_frequency")}),
             citation=citation))
         self.session.cite(citation)
         return (f"{name}: {len(values)} points, {series.unit}, "
@@ -410,7 +446,13 @@ class Executor:
         """
         lineage = self.session.artifact.lineage[column]
         filters = lineage.citation.get("filters") or {}
-        if lineage.source in LAKEHOUSE_SOURCES and lineage.key:
+        # Only a column with a lakehouse row behind it is re-fetched: the old
+        # session-scoped `ingest_external` path also says source="external",
+        # but its citation table is "external" (a URL), not a view.
+        fetchable = lineage.citation.get("table") in (
+            "bulletin_observations", "weekly_observations", "macro_observations",
+            "finturk_observations", "external_observations")
+        if lineage.source in LAKEHOUSE_SOURCES and lineage.key and fetchable:
             # A FinTurk column's citation names its province, or none for the
             # national sum; the re-read keeps the same slice. (Quarterly, so
             # a `window=12` there is twelve quarters -- stated by the tool's

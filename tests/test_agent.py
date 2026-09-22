@@ -2241,3 +2241,74 @@ def test_a_fresh_question_that_produces_nothing_does_not_window_the_shared_table
     Executor(session).run(Plan(intent="series_analysis", start="2024-01-01", end="2024-12-01",
                                steps=[Step(op="discover", query="zzz")]))
     assert len(session.artifact.frame) == 60
+
+# --- the external zone: a URL in the prompt becomes lakehouse series ---------
+
+@pytest.fixture
+def in_process_ingestion(monkeypatch, tmp_path):
+    """Force the in-process extraction route and keep the extractor's SQLite
+    counter out of data/. The zone itself is the real one: the lakehouse's
+    external_* views point there, and the test removes what it lands."""
+    from backend.ingestion.external import documents
+
+    monkeypatch.setenv("WEB_ASSET_CACHE_DIR", str(tmp_path / "cache"))
+    documents.configure_tools({})
+    yield
+    documents.configure_tools(None)
+    documents._TOOLS_RESOLVED = False
+
+
+def test_ingest_source_needs_only_a_url_and_external_keys_keep_their_slashes():
+    step = Step(op="ingest_source", url="https://example.com/x.xlsx")
+    assert step.arguments()["url"] == "https://example.com/x.xlsx"
+    with pytest.raises(ValueError):
+        Step(op="ingest_source")
+    assert _normalise_key("external/abc123/sheet1/konut") == "abc123/sheet1/konut"
+    assert _normalise_key("abc123/sheet1/konut") == "abc123/sheet1/konut"
+    assert _normalise_key("bulletin/tuketici_kredileri/tuketici_kredileri_konut") == "tuketici_kredileri_konut"
+    assert "external_series" in ALLOWED_TABLES and "external_observations" in ALLOWED_TABLES
+
+
+def test_a_url_in_the_question_lands_in_the_lakehouse_and_reaches_the_table(monkeypatch, in_process_ingestion):
+    """The demo-day requirement, end to end and with no model: a URL in the
+    prompt is landed BEFORE planning, the no-model plan fetches its series as
+    source='external', and the citation names the lakehouse view it came from.
+    A second turn on the same URL is a cache hit."""
+    needs_lakehouse()
+    from backend.agent.pipeline import run_turn
+    from backend.lakehouse import external_store as store
+
+    url = "https://example.org/demo-tuketici.xlsx"
+    frame = pd.DataFrame({
+        "Dönem": ["Ocak 2021", "Şubat 2021", "Mart 2021", "Nisan 2021", "Mayıs 2021", "Haziran 2021"],
+        "Konut Kredileri (Milyon TL)": [1000.0, 1010.0, 1020.0, 1030.0, 1040.0, 1050.0],
+    })
+    _mock_excel_fetch(monkeypatch, frame)
+    source_id = store.source_id_for(url)
+    try:
+        result = run_turn(f"Şu dosyadaki konut kredisi serisini TP.KTF12 ile karşılaştır: {url}",
+                          client=None, compose_answer=False)
+        session = result["session"]
+
+        pre = [a for a in session.audit if a.op == "ingest_source"]
+        assert pre and pre[0].ok, [a.detail for a in pre]
+        landed = result["landed_sources"]
+        assert landed[0]["source_id"] == source_id and landed[0]["n_series"] == 1
+        external_columns = [c for c, line in session.artifact.lineage.items() if line.source == "external"]
+        assert external_columns, result["plan"]
+        lineage = session.artifact.lineage[external_columns[0]]
+        assert lineage.citation["table"] == "external_observations"
+        assert lineage.citation["unit_verified"] is False and lineage.unit == "milyon TL"
+        assert session.artifact.frame[external_columns[0]].dropna().iloc[0] == 1000.0
+        assert any(c.get("table") == "external_sources" for c in session.citations)
+        assert any("dogrulanmadi" in caveat for caveat in result["verification"]["caveats"])
+        # The [K] legend reproduces the column from the view, as it does for any series.
+        from backend.agent.verifier import source_map
+        legend = [s for s in source_map(session).values() if s.get("column") == external_columns[0]]
+        assert legend and "external_observations" in (legend[0].get("sql") or "")
+        assert "series_key" in legend[0]["sql"] and "dataset" not in legend[0]["sql"]
+
+        again = run_turn(f"Ayni dosya: {url}", client=None, compose_answer=False)
+        assert again["landed_sources"][0]["cache_hit"] is True
+    finally:
+        store.remove_source(source_id)

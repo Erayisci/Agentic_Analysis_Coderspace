@@ -108,3 +108,52 @@ def test_reset_session_clears_its_table(client):
 def test_reset_on_a_session_that_never_existed_is_not_an_error(client):
     response = client.delete("/session/never-asked-anything")
     assert response.status_code == 200
+
+
+def test_sources_round_trip_lands_and_removes_an_external_source(client, monkeypatch, tmp_path):
+    """POST /sources is the same ingest a URL in /ask triggers, exposed for the
+    frontend; the zone is the real one, so the test removes what it lands."""
+    import pandas as pd
+
+    from backend.ingestion.external import documents
+    from backend.lakehouse import external_store as store
+    from tests.test_agent import _mock_excel_fetch
+
+    monkeypatch.setenv("WEB_ASSET_CACHE_DIR", str(tmp_path / "cache"))
+    documents.configure_tools({})
+    # Before the fetch is mocked: the SSRF guard must refuse a private address.
+    assert client.post("/sources", json={"url": "http://127.0.0.1/x.xlsx"}).status_code == 422
+    url = "https://example.org/api-demo.xlsx"
+    _mock_excel_fetch(monkeypatch, pd.DataFrame({
+        "Tarih": pd.date_range("2021-01-01", periods=6, freq="MS"),
+        "Faiz (%)": [17.0, 17.5, 18.0, 18.5, 19.0, 19.5]}))
+    try:
+        health = client.get("/health").json()
+        assert health["extraction_route"] == "in_process" and "n_external_sources" in health
+
+        landed = client.post("/sources", json={"url": url, "hint": "faiz"})
+        assert landed.status_code == 200, landed.text
+        body = landed.json()
+        assert body["status"] == "ok" and body["n_series"] == 1 and body["extraction_route"] == "in_process"
+        source_id = body["source_id"]
+
+        listed = client.get("/sources").json()
+        assert source_id in [s["source_id"] for s in listed["sources"]]
+        detail = client.get(f"/sources/{source_id}").json()
+        assert detail["series"][0]["unit"] == "%" and detail["series"][0]["unit_verified"] is False
+
+        # The sources panel's "tabloya ekle": one landed series into the session's table.
+        key = detail["series"][0]["series_key"]
+        added = client.post("/session/panel-test/columns", json={"series_key": key, "as_name": "faiz"})
+        assert added.status_code == 200, added.text
+        assert added.json()["table"]["columns"] == ["faiz"] and len(added.json()["table"]["rows"]) == 6
+        assert added.json()["citations"][0]["table"] == "external_observations"
+        missing = client.post("/session/panel-test/columns", json={"series_key": "nope/nope/nope"})
+        assert missing.status_code == 422
+
+        assert client.delete(f"/sources/{source_id}").json()["status"] == "removed"
+        assert client.get(f"/sources/{source_id}").status_code == 404
+    finally:
+        store.remove_source(store.source_id_for(url))
+        documents.configure_tools(None)
+        documents._TOOLS_RESOLVED = False

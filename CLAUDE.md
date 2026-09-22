@@ -7,7 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The virtualenv lives at the repo root: `.venv` (Python 3.10), gitignored.
 
 ```bash
-.venv/bin/pip install -e ".[dev]"           # once; makes `backend` importable
+.venv/bin/pip install -e ".[dev,ingest]"    # once; makes `backend` importable (ingest = in-process PDF/XLS/image parsers)
+.venv/bin/python -m backend.ingestion.external <url> --hint "konut kredisi"   # land a demo-day source now
+.venv/bin/python -m backend.ingestion.external --list                         # what has landed
+.venv/bin/python -m backend.tools.vector_store --build    # embed the catalogue for hybrid discovery (needs KLOUDEKS_API_KEY)
+KKB_DATA_DIR=/somewhere/else .venv/bin/python -m backend.lakehouse.build      # build into another data dir
 .venv/bin/python -m backend.ingestion.bddk_bulletin --from-cache  # render workbooks, no network
 .venv/bin/python -m backend.lakehouse.build # full build: parse -> validate -> parquet + duckdb
 .venv/bin/pytest -q                         # all tests, incl. extensions/web_tools/tests (build must have run first)
@@ -93,8 +97,10 @@ Consequence worth keeping: a clone builds and tests with **no network at all**, 
 regulators' servers.
 
 A DuckDB lock held by an editor extension will fail the build's write step — close the database in the
-IDE before running the build. Everything that only reads (`scripts/lakehouse_query.py`, every test
-fixture) opens the file `read_only=True`, so those never take the lock.
+IDE before running the build (or build and test elsewhere with `KKB_DATA_DIR`). Everything that only
+reads (`scripts/lakehouse_query.py`, every test fixture) opens the file `read_only=True`, so those
+never take the lock. **Runtime ingestion never takes it either**: a demo-day source lands as Parquet
+under `data/external/` and reaches every reader through views — see "The external zone" below.
 
 ## Hard constraints (from the KKB hackathon brief)
 
@@ -122,14 +128,15 @@ backend/
 │                 lifecycles, formula overrides, weekly↔monthly pairs), canonical (sector graph),
 │                 evds_series (EVDS data-group registry + temporal declarations)
 ├── ingestion/    bddk_bulletin, bddk_weekly, riskmerkezi, evds  — runnable CLIs, fetch only
+│                 external/ — demo-day URLs -> every table in them -> data/external/ (runtime, automatic)
 ├── parsing/      bddk_sectoral, bddk_bulletin, bddk_weekly, tbb, evds — raw files -> long frames
 ├── validation/   identities, continuity, weekly, macro  — abort the build on failure
 ├── transform/    analytics, bulletin, macro        — growth, ratios, reconciliation, de-cumulation,
 │                 the bulletin metric catalogue, monthly alignment
-├── lakehouse/    build (orchestrator), schema_card
+├── lakehouse/    build (orchestrator), schema_card, external_store (the external zone's single writer)
 ├── llm/          client — the ONLY module that talks to a model (Kloudeks/MIA, httpx, no SDK)
-├── tools/        lakehouse (discover/fetch_series/run_sql), series (the shared loader),
-│                 transforms, charts, anomaly, web_url — pure functions, no model calls
+├── tools/        lakehouse (hybrid discover/fetch_series/run_sql), vector_store (LanceDB dense index +
+│                 RRF), series (the shared loader), transforms, charts, anomaly, web_url — pure functions
 ├── agent/        state (AnalysisArtifact + lineage), router, planner (the plan DSL),
 │                 executor, verifier, composer, pipeline (wires the five stages)
 └── eval/         scenarios.yaml + run_eval — benchmark the model against SQL-computed golds
@@ -180,6 +187,7 @@ DuckDB table of the same name. Adding a table means adding one entry there:
 | `sectors`, `metrics`, `sector_crosswalk` | dimensions and the cross-source mapping |
 | `growth`, `ratios` | MoM/YoY changes and derived ratios |
 | `reconciliation_monitor` | BDDK vs TBB divergence, mean ± 3σ band per series |
+| `external_sources`, `external_series`, `external_observations`, `external_observations_native`, `external_quality_report` | **views, not tables**, over `data/external/*/<file>.parquet`: sources landed at runtime, same column shapes as the macro path (see "The external zone") |
 | `macro_series` | series index for TCMB EVDS: names, unit, native frequency, `temporal_semantics`, `monthly_rule` |
 | `macro_observations` | EVDS at the monthly grain: `value` per rule plus `value_avg` / `value_last`, `n_native_obs` |
 | `macro_observations_native` | the same series at their own daily/weekly/monthly/quarterly frequency |
@@ -237,6 +245,7 @@ The brief's required corpus is **2021-01 through 2026-06**, and it is wider than
 | BDDK Haftalık Bülten — all 9 tables | **built** (2021-01-08..2026-09-04), 163,740 observations |
 | BDDK FinTürk (İllere Göre) | **built** (2021-Q1..2026-Q2, 22 quarters), 905,620 observations |
 | TBB Risk Merkezi sectoral | built (2022-01..2026-06) — **supplementary, not required by the brief** |
+| External (demo-day) sources | **automatic**: a URL in a question, `POST /sources` or `python -m backend.ingestion.external <url>` lands every table in it under `data/external/`, visible through the `external_*` views without a rebuild |
 
 ### BDDK FinTürk (il-bazlı / geographic distribution)
 
@@ -504,9 +513,9 @@ The model appears at exactly three points: classifying intent, emitting a typed 
 prose over numbers it did not compute. Everything else is Python. `agent/pipeline.py:run_turn` is
 the single entry point and returns the API payload; `Agent` holds one `Session` per conversation.
 
-**The plan DSL is the only language the model speaks.** Eleven ops (`discover`, `fetch_series`,
-`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_external`,
-`clear_table`, `footnotes`) over a flat pydantic `Step` with `extra="forbid"`. Flat rather than a discriminated union on purpose:
+**The plan DSL is the only language the model speaks.** Twelve ops (`discover`, `fetch_series`,
+`transform`, `analyze`, `find_periods`, `read_url`, `search`, `chart`, `ingest_source`,
+`ingest_external`, `clear_table`, `footnotes`) over a flat pydantic `Step` with `extra="forbid"`. Flat rather than a discriminated union on purpose:
 guided-decoding backends vary in `$ref`/`anyOf` support, and a schema a deployment silently
 mishandles fails with no error message.
 
@@ -517,18 +526,78 @@ anywhere else in the codebase, that can reach `data/lakehouse.duckdb` with anyth
 database. The planner is told to reach for this only on an explicit ask ("temizle", "sil", "baştan
 başla") -- never as a side effect of a normal follow-up.
 
-**`ingest_external` adds a column; `read_url` only ever reads.** `read_url` extracts a document's
-text/preview into `session.facts["documents"]` for the composer to read and cite -- it cannot become
-a series, so nothing downstream (`transform`, `analyze`, `chart`) can touch it. `ingest_external`
-resolves one column of an external Excel/CSV URL into a real, unit-labelled column on the current
-turn's `AnalysisArtifact`, through `tools.external_series` (which shares `tools.web_url`'s fetch and
-SSRF guard rather than forking a second one). It is **session-scoped by construction**: nothing here
-writes to `data/lakehouse.duckdb`, which has exactly one writer (`backend.lakehouse.build`) and every
-other reader open `read_only=True` -- a live turn writing an unseen, demo-day file into the shared
-database on every question would risk corrupting or locking it for every other session. The column
-disappears when the session does, exactly like a `transform`-derived one. Its unit and temporal
-semantics are best-effort (an external file publishes neither the way the lakehouse's own sources do)
-and the citation says so with `unit_verified: false`.
+**The external zone: a URL in the prompt lands in the lakehouse before the plan is written.** The
+mentor's demo-day rule (2026-09-22) is that additional URL/webpage sources must be fetched, processed
+and landed in the lakehouse by the system itself, with no manual step. `agent/pipeline.py:pre_ingest`
+runs `ingestion.external.ingest_url` on every URL the router finds, *before* `make_plan`, so the
+planner's context already lists the new series (`YENI YUKLENEN KAYNAKLAR`) and the no-model fallback
+fetches them with `source="external"` like any BDDK or EVDS series. `ingest_source` is the explicit op
+for a URL not in the prompt; `POST /sources` and `python -m backend.ingestion.external <url>` are the
+same landing outside a turn, and the frontend's **Kaynaklar** panel (`SourcesPanel.jsx`) lists what
+landed and adds one series to the table through `POST /session/{id}/columns`. The pipeline is
+`documents.read_document` (the web-tools extension's extractor, in its container when
+`WEB_TOOLS_ENABLED=true`, else the same `asset_extract.extract()` in-process on bytes fetched through
+`tools.web_url._fetch`) → `tables.series_from_table` (header detection, periods-across transposition,
+per-column Turkish/English number convention, every numeric column a series) → `labels` (unit from
+header/caption, semantics by vocabulary, `monthly_rule` from semantics) → `align.to_monthly` (the macro
+path's `transform.macro.aggregate_monthly`) → `quality` rows → `lakehouse.external_store.write_source`.
+
+**The DuckDB file still has exactly one writer, the build.** `data/external/` has exactly one writer,
+`external_store` (atomic `os.replace`, manifest written last, one lock per source). The build creates
+the five `external_*` VIEWS over `data/external/*/<file>.parquet` and seeds zero-row files so the globs
+bind; measured on DuckDB 1.5.5, a `read_only=True` connection sees a Parquet file added after the view
+was created on its next query. The build never materialises these as tables -- that would freeze the
+zone at build time. The same bytes under the same URL are a cache hit that writes nothing; a landing
+page (HTML linking to files) also lands its top-3 file links one level deep, `parent_source_id` set.
+`series_key` is `<source_id>/<location>/<name>` and stays ASCII. Unit and semantics are **inferred**
+(`unit_source`, `semantics_source`, `unit_verified=false`); the verifier turns that into the
+`external_units_are_verified` caveat and `external_quality_report` holds what the ingester could not
+establish. **CSV and XLSX are read whole in-process** (`documents._read_csv_native` /
+`_read_xlsx_native`, 100k rows): the extractor's 2,000-row cap keeps the *oldest* rows, which turned a
+FRED daily series starting in 1962 into eight years of the sixties. PDF, XLS, DOCX and images stay with
+the extractor and its caps; a truncated table lands as `status="partial"` with the warning recorded.
+
+**Typeset PDF tables are read from word positions.** Regulators' PDFs are unruled: pdfplumber's
+line-based `extract_table` returned a 13x1 fragment of Borsa İstanbul's gold trading report (the PDF
+the brief names, committed as `tests/fixtures/external/bist_kmp_au_2026.pdf`). `ingestion/external/
+pdf_words.py` builds the grid from each word's x-range instead: the line with the most numeric tokens
+sets the column anchors, every other data line assigns its numbers to the nearest anchor, and a
+column's label is every header word overlapping it ("Hacim/Volume (TL)", "Miktar/Amount (KG)"). Three
+rules that PDF taught: the **year lives in the title** ("Ocak / January" rows + "(2026)" in the
+caption), the **decimal convention is decided per table when a column is ambiguous** ("1.008" beside
+"825" is 1,008 in a table that prints 93.824.682.381), and a **trailing parenthesised unit beats a
+group heading** ("TL Miktar/Amount (KG)" is kilograms). Images and scanned pages read through
+`Unlimited-OCR`, whose answer is HTML with `rowspan`/`colspan`; `ingestion/external/ocr.py` expands
+the spans into a rectangular grid. The recorded OCR answer for the BIST PNG
+(`tests/fixtures/external/bist_kmp_au_2026.ocr.json`) was lost with the 2026-09-21 working tree and
+its test skips until it is re-recorded (`KKB_LIVE_TESTS=1` runs the PNG through the real model).
+
+**The lakehouse vouches for what it can; the model labels the rest; the citation says which.**
+`ingestion/external/verify.py` runs at landing time. `cross_check`: discovery finds base-corpus series
+with a similar name; on six or more overlapping months a median absolute difference within 1% means
+the external series *is* that series, so its unit and semantics become the lakehouse's
+(`unit_source="verified"`, `unit_verified=true`, `matched_lakehouse_key`, `match_agreement_pct`) -- a
+copy of TP.KTF12 pasted into a CSV verifies; a copy times 1000 is recorded as
+`scale_mismatch_with_lakehouse_series` (bin/milyon TL), never rescaled. `model_labels`: for series
+still at unit `bilinmiyor` or semantics `unknown`/`default`, one guided-decoding call over header +
+caption + three sample values, restricted to the lakehouse's unit vocabulary; marked
+`unit_source="model"` and still `unit_verified=false`, because a label is an opinion and a cross-check
+is evidence. The model never emits a number that reaches a table. The XTUMY index page renders its
+data with JavaScript; the in-process HTML reader sees only the static shell, so that page needs the
+container route (Crawl4AI) -- a known limitation, not a parser gap.
+
+**History worth knowing:** this zone was built on 2026-09-19/20 in the `integrate/demo` working tree
+and never committed; its tracked half survived as `git stash@{0}`, its new files were reconstructed
+from session transcripts (branch `recover/external-zone`) and ported onto `integrate/graphs` here.
+The ranking tweaks made at the same time (abbreviation aliases, product qualifiers, more stopwords)
+were **not** ported: this branch has its own benchmarked ranking (`backend/eval/discovery_cases.yaml`).
+
+**`ingest_external` (older) adds one named column; `read_url` only ever reads.** `read_url` extracts a
+document's text/preview into `session.facts["documents"]` for the composer to cite -- a URL that yields
+no series still gets one (`make_plan` adds the read step only for URLs that landed nothing).
+`ingest_external` is the session-scoped predecessor (`tools.external_series`, one column of one sheet,
+`value_column` required); it is kept for the case where a user names a single column, and its column
+disappears with the session, exactly like a `transform`-derived one.
 
 **MIA supports `response_format: json_schema`, and that changes the design.** Generation is
 constrained to the schema token by token, so a syntactically invalid plan is unreachable — plan
@@ -585,6 +654,28 @@ cost real debugging, each now a comment in `tools/lakehouse.py`:
   rule. "milyon TL" is a unit and "TP." a code prefix; neither is a slice.
 - ".TRY." is the lira, not a province: the province demotion is `TR/KTR` + `[0-9A-C]`, or every TL
   deposit rate (`TP.TRY.MT06`) drops out of the ranking.
+- **Temporal grain is a first-class field on every candidate, and it gates the ranking.** Asked for
+  *monthly* consumer credit, discovery once returned weekly item 5688 beside monthly bulletin rows and
+  the planner divided one by the other -- two grains, two vintages, two scopes. `candidate_grain`
+  reads the grain off the catalogue (`native_frequency`, or the source), `query_grain` reads an
+  explicit request (`aylık`, `haftalık`, `günlük`, `çeyreklik`) and `_apply_grain_policy` demotes
+  every other grain by 10 points. A penalty, not a filter: silence is not a request for monthly.
+  `ColumnLineage.grain` carries the *published* grain onto the table, `transforms.ratio` refuses to
+  divide across grains, and `verify()` records `derived_columns_share_one_grain` (error) and
+  `columns_share_one_grain` (warning).
+- **Discovery is hybrid: the lexical ranking fused with dense retrieval by Reciprocal Rank Fusion.**
+  `tools/vector_store.py` indexes each series by `name + dataset + source + grain:<grain>`, embedded
+  through `KloudeksClient.embed`; LanceDB is the backend when installed (the brief names it), else a
+  NumPy matrix under `data/vectors/`. `DENSE_WEIGHT` is 0.0 by measurement: every positive value cost
+  pinned rankings and bought none back, so the dense half contributes *recall* (rows the lexical SQL
+  pool never saw) and never *order*, and a candidate the lexical gates disqualified is never
+  resurrected on cosine. Every failure -- no index, no key, a model outage -- degrades to pure
+  lexical ranking. The index is built with `python -m backend.tools.vector_store --build`, never by
+  `lakehouse.build`, which must run offline on a bare clone.
+- **The external zone is the fifth corpus.** `discover` pools `external_series` beside the four base
+  indexes, folding `name + location + url` in Python because a runtime source has no build-time
+  `search_fold`; an external `series_key`'s slashes and hash prefix are its address, so only the name
+  segment is judged for length. `tests/test_hybrid_discovery.py` pins all three.
 
 **A chart or a table is produced only when the question asks for one.** `router.route` reads
 `wants_chart` / `wants_table` from the question (`grafik`, `çiz`, `plot` / `tablo`, `sütun`, a
@@ -840,8 +931,8 @@ refresh, and treat an unexpected failure as a data problem first, not a test pro
 The lakehouse and schema card are implemented and validated for the full BDDK monthly bulletin (17
 tables, 2021-01..2026-07), the BDDK weekly bulletin (9 tables, 2021-01-08..2026-09-04), the BDDK
 FinTürk il-bazlı corpus (7 tables, 2021-Q1..2026-Q2), the TCMB EVDS macro corpus (44 groups,
-2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables, 622 tests (15 of the
-web-tools extension's skip without its containers).
+2021-01..2026-07) and the TBB sectoral corpus — 21 lakehouse tables plus the 5 external-zone views, 757 tests (17 skip without the web-tools containers or the lost OCR recording; 9 of the
+web-tools extension's Docker and process-group tests fail on Windows).
 
 The agent layer is implemented end to end against Kloudeks/MIA: `llm/client`, the plan DSL, the five
 pipeline stages, and all six of the brief's tools -- Lakehouse (discovery, typed fetches, `footnotes`),
@@ -851,9 +942,12 @@ to `KloudeksClient.ocr` / the `Unlimited-OCR` model in `backend/api/main.py`, im
 key the image path raises a `RuntimeError` naming the missing callable) -- plus charts,
 `find_periods`, `decompose` (nominal = price × real) and the FastAPI service (`backend/api/main.py`)
 with a React frontend under `frontend/`. Web search is the optional `extensions/web_tools` SearXNG
-backend (off unless `WEB_TOOLS_ENABLED=true`). A ninth op, `ingest_external`, adds a column from an
-external Excel/CSV URL to the current session's table only (see "The agent layer" above) -- a
-team-added capability, not one of the brief's six named tools. Not yet written: Docker and deployment.
+backend (off unless `WEB_TOOLS_ENABLED=true`). **Demo-day sources are automatic**: a URL in the
+question is landed in the lakehouse's external zone before planning (see "The external zone"), also
+reachable as `POST /sources`, `python -m backend.ingestion.external` and the frontend's Kaynaklar
+panel; landed series are cross-checked against the base corpus or labelled by the model at landing
+time. `ingest_external` remains the older session-only single-column path. Not yet written: Docker
+and deployment.
 `backend/eval/scenarios.yaml` holds twelve scenarios, four of them analysis questions with golds
 measured on the real lakehouse (anomaly 2023-03, changepoint 2023-07, the differenced correlation
 −0.30, the −80% real decomposition); the deterministic floor runs every one of them because

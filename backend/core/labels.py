@@ -116,6 +116,21 @@ def strip_decorations(label: str) -> tuple:
     return text, formula or "", footnote or "", unit
 
 
+def ascii_fold(text: str) -> str:
+    """Lowercase ASCII, punctuation and spacing preserved.
+
+    `slugify` collapses everything to underscores, which is right for a key and
+    wrong for search: discovery scores substrings against a published *name*
+    ('Takipteki Tüketici Krd.') and needs it folded the same way the query is,
+    without losing the word boundaries. Turkish is why this cannot be
+    `str.lower()` -- 'İ'.lower() is not 'i', so a name carrying one silently
+    fails to match an ASCII query term. The transliteration runs before the
+    lowercase for the same reason.
+    """
+    folded = str(text or "").translate(TURKISH_TO_ASCII).lower()
+    return unicodedata.normalize("NFKD", folded).encode("ascii", "ignore").decode("ascii")
+
+
 def slugify(name: str) -> str:
     """Stable ASCII key, e.g. 'Otel ve Restoranlar (Turizm)' -> 'otel_ve_restoranlar_turizm'."""
     text = str(name).strip().translate(TURKISH_TO_ASCII).lower()

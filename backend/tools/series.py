@@ -31,8 +31,15 @@ from ..core.config import DUCKDB_PATH
 from ..core.labels import slugify
 from ..domain.weekly_tables import BY_SLUG as WEEKLY_TABLES
 
-SOURCES = ("bulletin", "weekly", "macro", "finturk")
+# "external" is the lakehouse's external zone: sources landed at runtime by
+# backend.ingestion.external (a URL in a question), read through the
+# external_* views. Same vocabulary for unit / temporal_semantics /
+# monthly_rule as the other four; key = external_series.series_key.
+SOURCES = ("bulletin", "weekly", "macro", "finturk", "external")
 CUMULATIVE = "cumulative_ytd"
+FACT_TABLE = {"bulletin": "bulletin_observations", "weekly": "weekly_observations",
+              "macro": "macro_observations", "finturk": "finturk_observations",
+              "external": "external_observations"}
 
 # FinTurk's taraf (bank-group) dimension is not exposed as a caller filter,
 # the same way the monthly bulletin pins taraf=10001 without letting a caller
@@ -61,6 +68,10 @@ class SeriesResult(NamedTuple):
     currency: Optional[str] = None
     metric: Optional[str] = None
     province: Optional[str] = None      # finturk only -- None means summed across provinces
+    # External series only: url, location, unit_verified, unit_source,
+    # semantics_source -- what an external file does NOT publish the way the
+    # base corpora do, stated in the citation so the composer hedges.
+    extra: Optional[dict] = None
 
     @property
     def period_start(self) -> str:
@@ -72,8 +83,17 @@ class SeriesResult(NamedTuple):
 
     def citation(self) -> dict:
         """Provenance for one series, for the trust layer to quote verbatim."""
-        table = {"bulletin": "bulletin_observations", "weekly": "weekly_observations",
-                 "macro": "macro_observations", "finturk": "finturk_observations"}[self.source]
+        table = FACT_TABLE[self.source]
+        if self.source == "external":
+            # series_key is the whole address; the view has no dataset column,
+            # so the reproduction SQL filters on the key alone.
+            return {
+                "table": table, "filters": {"series_key": self.key},
+                "value_column": self.value_column, "unit": self.unit,
+                "temporal_semantics": self.temporal_semantics,
+                "period_start": self.period_start, "period_end": self.period_end,
+                "n_points": int(len(self.values)), **(self.extra or {}),
+            }
         if self.source == "macro":
             key_field, filters = "series_code", {"currency": self.currency, "metric": self.metric}
         elif self.source == "finturk":
@@ -105,7 +125,7 @@ class SeriesResult(NamedTuple):
                 "dataset": self.dataset, "currency": self.currency, "metric": self.metric,
                 "province": self.province,
                 "period_start": self.period_start, "period_end": self.period_end,
-                "n_points": int(len(self.values))}
+                "n_points": int(len(self.values)), **(self.extra or {})}
 
 
 def _connect():
@@ -239,6 +259,33 @@ def _macro(con, key, start, end, column):
                        monthly_rule=meta.monthly_rule, native_frequency=meta.native_frequency)
 
 
+def _external(con, key, start, end, column):
+    """A series from the external zone (views over data/external/). The index
+    row carries what the ingester could and could not establish: the unit and
+    semantics are heuristics unless a cross-check verified them, and the
+    citation says so."""
+    meta = con.execute(
+        "SELECT name, name_clean, unit, unit_source, unit_verified, temporal_semantics, semantics_source, "
+        "monthly_rule, native_frequency, url, location, source_id FROM external_series WHERE series_key = ?", [key]
+    ).df()
+    if meta.empty:
+        raise ValueError(f"no external series with series_key={key!r}; search external_series first")
+    meta = meta.iloc[0]
+    if column not in ("value", "value_avg", "value_last", "value_sum"):
+        raise ValueError(f"unknown external column {column!r}")
+
+    sql = f"SELECT period, {column} AS value FROM external_observations WHERE series_key = ?"
+    sql, params = _window(sql, [key], start, end)
+    frame = con.execute(sql + " ORDER BY period", params).df()
+    name = f"{meta.name_clean or meta.name} ({meta.location})"
+    return frame, dict(name=name, unit=meta.unit, semantics=meta.temporal_semantics,
+                       value_column=column, dataset=meta.source_id, currency=None, metric=None,
+                       monthly_rule=meta.monthly_rule, native_frequency=meta.native_frequency,
+                       extra={"url": meta.url, "location": meta.location,
+                              "unit_verified": bool(meta.unit_verified), "unit_source": meta.unit_source,
+                              "semantics_source": meta.semantics_source})
+
+
 def _finturk(con, key, dataset, province, start, end):
     if not dataset:
         matches = con.execute(
@@ -321,7 +368,8 @@ def load_series(
             `metric` for finturk.
         source: which corpus -- "bulletin" (monthly BDDK), "weekly" (BDDK weekly
             bulletin, observed on Fridays), "macro" (TCMB EVDS, monthly grain),
-            or "finturk" (BDDK il-bazli, quarterly).
+            "finturk" (BDDK il-bazli, quarterly), or "external" (a source landed
+            at runtime from a URL, monthly grain; key = series_key).
         dataset: required only when a key is ambiguous across tables of the same
             source; inferred from the source's own index table otherwise.
         currency: "total" (TL+FX) by default. Pass None for tables that publish
@@ -352,6 +400,8 @@ def load_series(
             frame, meta = _weekly(con, key, currency, metric, start, end, include_retired)
         elif source == "finturk":
             frame, meta = _finturk(con, key, dataset, province, start, end)
+        elif source == "external":
+            frame, meta = _external(con, key, start, end, column)
         else:
             frame, meta = _macro(con, key, start, end, column)
     finally:
@@ -371,5 +421,5 @@ def load_series(
         values=values, source=source, key=key, name=meta["name"], unit=meta["unit"],
         temporal_semantics=meta["semantics"], value_column=meta["value_column"],
         dataset=meta["dataset"], currency=meta["currency"], metric=meta["metric"],
-        province=meta.get("province"),
+        province=meta.get("province"), extra=meta.get("extra"),
     )

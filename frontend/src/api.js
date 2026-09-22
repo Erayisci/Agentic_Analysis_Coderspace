@@ -34,10 +34,34 @@ export function resetSession(sessionId) {
   return request(`/session/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
-// Bypasses the planner: ingest_external needs a real model to preview a file
-// and decide value_column, which the deterministic fallback cannot do. This
-// exercises the same executor code directly, for demo/dev without a
-// Kloudeks key. See backend/api/main.py's debug_ingest_external docstring.
+// The external zone: demo-day sources landed in the lakehouse. A URL in a
+// question lands automatically; these let the panel do it explicitly, list
+// what has landed, and add one landed series to the session's table.
+export function listSources() {
+  return request("/sources");
+}
+
+export function addSource(payload) {
+  return request("/sources", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function getSource(sourceId) {
+  return request(`/sources/${encodeURIComponent(sourceId)}`);
+}
+
+export function deleteSource(sourceId) {
+  return request(`/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+}
+
+export function addExternalColumn(sessionId, seriesKey, asName) {
+  return request(`/session/${encodeURIComponent(sessionId)}/columns`, {
+    method: "POST",
+    body: JSON.stringify({ series_key: seriesKey, session_id: sessionId, as_name: asName || undefined }),
+  });
+}
+
+// Deprecated: the session-scoped, single-column path. Kept for the one case
+// where a user names one exact column; see backend/api/main.py.
 export function debugIngestExternal(payload) {
   return request("/debug/ingest_external", {
     method: "POST",

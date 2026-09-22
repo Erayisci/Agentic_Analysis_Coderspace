@@ -40,6 +40,9 @@ from ..agent.pipeline import Agent
 from ..agent.planner import Plan, Step
 from ..agent.verifier import verify
 from ..core.config import kloudeks_api_key
+from ..ingestion.external import ingest_url
+from ..ingestion.external.documents import extraction_route
+from ..lakehouse import external_store
 from ..llm import KloudeksClient
 from ..tools.web_url import read_url
 
@@ -127,9 +130,90 @@ def _agent() -> Agent:
     return app.state.agent
 
 
+class SourceRequest(BaseModel):
+    url: str = Field(min_length=1, description="an Excel/CSV/PDF/HTML/image URL, or a page linking to such files")
+    hint: Optional[str] = Field(None, description="what the source should answer; ranks linked documents")
+    force: bool = Field(False, description="re-land even when the bytes are unchanged")
+    follow_links: bool = Field(True, description="also land the best-matching documents a page links to")
+
+
+def _records(frame) -> list:
+    return frame.astype(object).where(frame.notna(), None).to_dict("records")
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "model_configured": _agent().client is not None}
+    return {"status": "ok", "model_configured": _agent().client is not None,
+            "extraction_route": extraction_route(),
+            "n_external_sources": int(len(external_store.list_sources()))}
+
+
+@app.post("/sources")
+def add_source(request: SourceRequest) -> Dict[str, Any]:
+    """Land a URL in the lakehouse's external zone now, outside any turn --
+    the same `ingest_url` a URL in an /ask question triggers automatically.
+    Writes Parquet under data/external/; the DuckDB file is never written."""
+    try:
+        result = ingest_url(request.url, request.hint, force=request.force, follow_links=request.follow_links,
+                            client=_agent().client)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return result.to_dict()
+
+
+@app.get("/sources")
+def list_sources() -> Dict[str, Any]:
+    sources = external_store.list_sources()
+    return {"n_sources": int(len(sources)), "sources": _records(sources)}
+
+
+@app.get("/sources/{source_id}")
+def get_source(source_id: str) -> Dict[str, Any]:
+    manifest = external_store.read_manifest(source_id)
+    if manifest is None:
+        raise HTTPException(404, f"no external source {source_id!r}")
+    parts = external_store.read_source(source_id)
+    return {"manifest": manifest, "series": _records(parts["series"]), "quality": _records(parts["quality"])}
+
+
+@app.delete("/sources/{source_id}")
+def delete_source(source_id: str) -> Dict[str, str]:
+    try:
+        removed = external_store.remove_source(source_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if not removed:
+        raise HTTPException(404, f"no external source {source_id!r}")
+    return {"status": "removed", "source_id": source_id}
+
+
+class AddColumnRequest(BaseModel):
+    series_key: str = Field(min_length=1, description="an external_series.series_key")
+    session_id: str = "default"
+    as_name: Optional[str] = None
+
+
+@app.post("/session/{session_id}/columns")
+def add_external_column(session_id: str, request: AddColumnRequest) -> Dict[str, Any]:
+    """Add one landed series to a session's table, deterministically -- the
+    frontend's 'tabloya ekle' on the sources panel. Runs the same executor
+    step a plan would (`fetch_series`, source='external'), so the column
+    carries its citation and the verifier sees it like any other."""
+    session = _agent().session(session_id)
+    session.start_turn(f"[sources] add {request.series_key}")
+    plan = Plan(intent="followup", steps=[
+        Step(op="fetch_series", key=request.series_key, source="external", as_name=request.as_name)])
+    Executor(session, url_reader=_agent().url_reader, web_search=_agent().web_search).run(plan)
+    verification = verify(session)
+    failed = [a for a in session.audit if not a.ok]
+    if failed:
+        raise HTTPException(422, failed[0].detail)
+    return {
+        "table": {"columns": session.artifact.column_names(), "units": session.artifact.units(),
+                  "rows": session.artifact.to_records()},
+        "citations": session.citations, "verification": verification,
+        "audit": [a.to_dict() for a in session.audit],
+    }
 
 
 @app.post("/ask")
@@ -150,6 +234,11 @@ def ask(request: AskRequest) -> Dict[str, Any]:
 @app.post("/debug/ingest_external")
 def debug_ingest_external(request: IngestExternalRequest) -> Dict[str, Any]:
     """Run one ingest_external step directly, bypassing the planner.
+
+    DEPRECATED in favour of `POST /sources` (and of simply putting the URL in
+    an /ask question): those land every table in the file in the lakehouse's
+    external zone with no column name needed. Kept for the one case where a
+    user names a single column to add to this session only.
 
     ingest_external needs to see a file's columns before it can name
     value_column -- normally the model previews the file with read_url first,

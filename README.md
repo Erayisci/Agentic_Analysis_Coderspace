@@ -8,7 +8,7 @@ Submission for the **KKB Hackathon 2026 — Lakehouse Agent Builder and Data Ana
 Current state: the ingestion, validation and lakehouse layers are implemented and tested, and the
 agent layer runs end to end against the Kloudeks/MIA open-weight endpoint — a typed plan DSL, the
 brief's tools, a verifier and a cited answer — behind a FastAPI service with a React frontend
-(`backend/api/`, `frontend/`). Docker packaging and deployment are still to come.
+(`backend/api/`, `frontend/`). Demo-day URLs (Excel, CSV, PDF, images, pages linking to them) are landed in the lakehouse automatically. Docker packaging and deployment are still to come.
 
 An optional [SearXNG + Crawl4AI web-tools extension](extensions/web_tools/README.md) provides
 `search_web`, HTML `read_url`, and automatic `read_web_url` callables, with separately optional
@@ -36,11 +36,11 @@ Requires Python 3.10+. Nothing else — no network access, no database server.
 git clone <repo-url> && cd Agentic_Analysis_Coderspace
 
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[dev,ingest]"
 
 python -m backend.ingestion.bddk_bulletin --from-cache  # raw workbooks from the archived responses
 python -m backend.lakehouse.build                       # parse -> validate -> parquet + duckdb
-pytest -q                                               # 397 tests (382 run, 15 skip without the web-tools containers)
+pytest -q                                               # 757 tests (17 skip without the web-tools containers, KKB_LIVE_TESTS or the OCR recording; 9 Docker/process-group tests fail on Windows)
 ```
 
 That produces `data/lakehouse.duckdb` and `data/analytics/schema_card.md`. The whole thing runs offline
@@ -114,6 +114,7 @@ The brief's target corpus is **2021-01 through 2026-06**.
 | TCMB EVDS — 44 data groups, 1,515 series | ✅ built, 2021-01..2026-07, 89,680 monthly rows (+ native frequency) |
 | BDDK Haftalık Bülten — all 9 tables | ✅ built, 2021-01-08..2026-09-04, 163,740 observations |
 | BDDK FinTürk (İllere Göre) | ❌ not acquired |
+| External (demo-day) sources | ✅ automatic: a URL in a question, `POST /sources` or `python -m backend.ingestion.external <url>` lands every table in it under `data/external/`, visible through the `external_*` views without a rebuild |
 | TBB Risk Merkezi sectoral | ✅ built, 2022-01..2026-06 — supplementary, not required by the brief |
 
 ### Raw data

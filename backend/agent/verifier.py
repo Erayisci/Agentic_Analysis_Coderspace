@@ -135,6 +135,44 @@ def verify(session: Session) -> Dict[str, Any]:
            f"mixed monetary units in one table: {monetary}" if len(distinct) > 1
            else f"monetary unit: {distinct or 'none'}")
 
+    # A column from an external file carries a unit and semantics the ingester
+    # inferred from a header or caption, not ones the publisher declared. Say
+    # so, every time, until a cross-check against the base corpus verifies it.
+    unverified = {c: line.unit for c, line in artifact.lineage.items()
+                  if c in artifact.frame.columns and line.citation.get("unit_verified") is False}
+    record("external_units_are_verified", not unverified,
+           (f"birim ve zaman anlami dosyadan okundu, dogrulanmadi: {unverified}" if unverified
+            else "no unverified external columns"), severity="warning")
+
+    # Two series can share a unit, sit on the same monthly index, and still be
+    # incomparable: the weekly bulletin publishes on Fridays and runs weeks
+    # ahead of the monthly one, so a ratio built from one of each pairs
+    # observations that were never measured over the same period -- and it
+    # returns a confident, plausible, meaningless number.
+    cross_grain = {}
+    for column, line in artifact.lineage.items():
+        if column not in artifact.frame.columns or not line.derived_from:
+            continue
+        grains = {artifact.lineage[parent].grain
+                  for parent in line.derived_from
+                  if parent in artifact.lineage and artifact.lineage[parent].grain}
+        if len(grains) > 1:
+            cross_grain[column] = sorted(grains)
+    record("derived_columns_share_one_grain", not cross_grain,
+           (f"farkli yayin sikliklarindaki seriler birlestirildi: {cross_grain} -- "
+            "bu seriler ayni donemleri olcmedigi icin oran/degisim gecersizdir"
+            if cross_grain else "no cross-grain derivation"))
+
+    # The same mismatch one step earlier: columns of different grains sitting
+    # in one table are not yet wrong, but any comparison drawn between them
+    # would be, so the narrative has to say which is which.
+    grains_present = {c: artifact.lineage[c].grain for c in artifact.frame.columns
+                      if artifact.lineage.get(c) and artifact.lineage[c].grain}
+    distinct_grains = set(grains_present.values())
+    record("columns_share_one_grain", len(distinct_grains) <= 1,
+           (f"tabloda farkli yayin sikliklari var: {grains_present}" if len(distinct_grains) > 1
+            else f"grain: {distinct_grains or 'none'}"), severity="warning")
+
     # A stock differenced and described as "new lending" is a domain error no
     # arithmetic check would catch, so the semantics are surfaced explicitly.
     record("temporal_semantics_declared",
@@ -164,7 +202,8 @@ def _summarise(checks: List[Dict[str, Any]], session: Session) -> Dict[str, Any]
     return report
 
 
-FACT_TABLES = ("bulletin_observations", "weekly_observations", "macro_observations", "finturk_observations")
+FACT_TABLES = ("bulletin_observations", "weekly_observations", "macro_observations", "finturk_observations",
+               "external_observations")
 
 # Tags the narrative cites: K = kaynak (a lakehouse series or an external
 # file), H = hesaplama (a transform, find_periods or analyze result over K's),
@@ -186,8 +225,9 @@ def _sql_for(citation: Dict[str, Any]) -> Optional[str]:
     if citation.get("period_start") and citation.get("period_end"):
         where += f" AND period BETWEEN '{citation['period_start']}' AND '{citation['period_end']}'"
     value = citation.get("value_column") or "value"
-    # macro_observations carries no unit column; the unit lives in macro_series.
-    unit = ", unit" if table != "macro_observations" else ""
+    # macro_observations and external_observations carry no unit column; the
+    # unit lives in macro_series / external_series.
+    unit = ", unit" if table not in ("macro_observations", "external_observations") else ""
     if citation.get("aggregate"):
         # A FinTurk national figure is a sum over provinces -- there is no
         # published Türkiye row -- so the reproduction groups by period.
@@ -227,6 +267,12 @@ def source_map(session: Session) -> Dict[str, Dict[str, Any]]:
                       f"{line.unit}, {line.temporal_semantics} · "
                       f"{str(cit.get('period_start'))[:7]}..{str(cit.get('period_end'))[:7]} "
                       f"({cit.get('n_points')} nokta)")
+            if cit.get("table") == "external_observations":
+                # A landed source: say where the file came from and whether
+                # the unit is the lakehouse's word or the ingester's guess.
+                verified = cit.get("unit_verified") is True
+                detail += (f" · dış kaynak {cit.get('url')} ({cit.get('location')}) · birim "
+                           + ("lakehouse ile doğrulandı" if verified else f"doğrulanmadı ({cit.get('unit_source')})"))
         else:  # ingest_external
             detail = (f"dış dosya {cit.get('url')} · sütun={cit.get('value_column')} · "
                       f"{line.unit} (birim doğrulanmadı) · "
@@ -406,6 +452,12 @@ def quotable_numbers(session: Session) -> Dict[str, Any]:
             for doc in session.facts["documents"]]
     if session.facts.get("search"):
         allowed["search"] = session.facts["search"]
+    if session.facts.get("landed_sources"):
+        # What the prompt's own URLs produced: status and series, so the
+        # composer can say "the file held three series" without inventing it.
+        allowed["landed_sources"] = [
+            {k: v for k, v in source.items() if k in ("url", "status", "kind", "n_series", "series_keys", "error")}
+            for source in session.facts["landed_sources"]]
     if session.facts.get("discovery"):
         # The span and currencies are what a "hangi seriler var / hangi
         # donemler" question is actually asking; discovery already has them.

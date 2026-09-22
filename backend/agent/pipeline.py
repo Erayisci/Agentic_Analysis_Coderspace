@@ -1,6 +1,13 @@
 """Wires the five stages into one turn, and holds sessions across turns.
 
-    route -> plan -> execute -> verify -> compose
+    route -> (pre-ingest URLs) -> plan -> execute -> verify -> compose
+
+A URL in the prompt is landed in the lakehouse's external zone BEFORE the
+planner runs (`pre_ingest`). That is what makes demo-day sources automatic:
+by the time a plan is written, the file's series are real lakehouse keys the
+planner sees in its context, and the no-model fallback fetches them just as
+it fetches a BDDK or EVDS series. A URL that yields no series (a prose
+document) is still read for the composer through `read_url`.
 
 Written as plain functions rather than a LangGraph graph because the control
 flow genuinely is a line with one bounded repair edge. A graph framework buys
@@ -19,21 +26,80 @@ from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
 
 from ..core.labels import fold
+from ..ingestion.external import IngestResult, ingest_url
+from ..lakehouse import external_store
 from ..llm import KloudeksClient, LLMError
-from ..tools.lakehouse import discover_concepts
+from ..tools.lakehouse import _terms, discover_concepts
 from .composer import compose
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
 from .router import Route, extract_single_month, route
-from .state import Session
+from .state import AuditStep, Session
 from .verifier import verify
 
 # Six was too few: a question with several interest-rate clauses filled every
 # slot with rate series and the planner never saw the loan series it was asked
 # about. Twelve costs ~200 prompt tokens and gives each corpus four seats.
 MAX_CANDIDATES_IN_CONTEXT = 12
+MAX_LANDED_IN_CONTEXT = 12
 
 logger = logging.getLogger("kkb.agent")
+
+
+def pre_ingest(question: str, session: Session, route_result: Route, client=None) -> List[IngestResult]:
+    """Land every URL the router found, before planning. One failure costs an
+    audit row and a caveat, never the turn; a URL landed on an earlier turn
+    (or by another session) is a cache hit that costs nothing."""
+    results: List[IngestResult] = []
+    for url in route_result.urls:
+        started = time.perf_counter()
+        try:
+            result = ingest_url(url, hint=question, client=client)
+        except Exception as exc:                                       # noqa: BLE001 -- one URL, not the turn
+            result = IngestResult(source_id=external_store.source_id_for(url), url=url,
+                                  status="error", error=f"{type(exc).__name__}: {exc}")
+        results.append(result)
+        keys = result.all_series_keys()
+        detail = result.error or (f"{result.status}: {len(keys)} series in the external zone"
+                                  + (" (cache hit)" if result.cache_hit else ""))
+        session.audit.append(AuditStep(index=0, op="ingest_source", arguments={"url": url},
+                                       ok=result.status != "error", detail=detail[:500],
+                                       seconds=time.perf_counter() - started))
+        logger.info("  pre-ingest %s -> %s", url, detail[:120])
+        if result.status != "error":
+            session.cite({"source": "external", "table": "external_sources", "source_id": result.source_id,
+                          "url": result.url, "status": result.status, "n_series": result.n_series})
+    session.facts["landed_sources"] = [r.to_dict() for r in results]
+    return results
+
+
+def landed_series(results: List[IngestResult], question: str,
+                  limit: int = MAX_LANDED_IN_CONTEXT) -> List[Dict[str, Any]]:
+    """The series the pre-ingested URLs produced, as discovery-shaped
+    candidates, the ones matching the question first."""
+    rows: List[Dict[str, Any]] = []
+    for result in results:
+        for landed in [result] + list(result.children):
+            if landed.status == "error" or not landed.series_keys:
+                continue
+            series = external_store.read_source(landed.source_id)["series"]
+            for row in series.itertuples():
+                rows.append({"key": row.series_key, "source": "external", "dataset": row.source_id,
+                             "name": row.name_clean or row.name, "unit": row.unit,
+                             "temporal_semantics": row.temporal_semantics, "location": row.location,
+                             "unit_verified": bool(row.unit_verified), "url": landed.url})
+    if len(rows) > limit:
+        terms = _terms(question)
+        for row in rows:
+            haystack = fold(f"{row['key']} {row['name']}")
+            row["score"] = sum(weight for term, weight in terms if term in haystack)
+        rows.sort(key=lambda row: -row["score"])
+    return rows[:limit]
+
+
+def _landed_column_name(key: str) -> str:
+    """The readable column for an external series_key '<source_id>/<location>/<name>'."""
+    return re.sub(r"[^\w]+", "_", key.rsplit("/", 1)[-1]).strip("_") or "dis_kaynak"
 
 
 @contextmanager
@@ -54,7 +120,8 @@ def _timed(timings: Dict[str, float], stage: str) -> Generator[None, None, None]
 
 
 def build_context(question: str, session: Session, route_result: Route,
-                  discovery: Optional[Dict[str, Any]] = None) -> str:
+                  discovery: Optional[Dict[str, Any]] = None,
+                  landed: Optional[List[Dict[str, Any]]] = None) -> str:
     """What the planner needs to know before it can name a key.
 
     Discovery runs first, deterministically, for exactly this reason: the plan
@@ -96,6 +163,14 @@ def build_context(question: str, session: Session, route_result: Route,
     else:
         blocks.append("MEVCUT TABLO: bos.")
 
+    if landed:
+        lines = "\n".join(
+            f"  - key={c['key']} | source=external | {c['name']} | {c['unit']}"
+            f"{'' if c.get('unit_verified') else ' (tahmin)'} | {c['temporal_semantics']}"
+            for c in landed)
+        blocks.append("YENI YUKLENEN KAYNAKLAR (prompt'taki URL'den lakehouse'a alindi; fetch_series ile "
+                      "source=external ve key AYNEN, dataset/currency BOS):\n" + lines)
+
     found = discovery if discovery is not None else discover_concepts(question, limit=MAX_CANDIDATES_IN_CONTEXT)
     if found["candidates"]:
         # Currencies and the period span come from discovery already; showing
@@ -129,7 +204,8 @@ def build_context(question: str, session: Session, route_result: Route,
 
 
 def deterministic_series_plan(question: str, route_result: Route, limit: int = 3,
-                              discovery: Optional[Dict[str, Any]] = None) -> Plan:
+                              discovery: Optional[Dict[str, Any]] = None,
+                              landed: Optional[List[Dict[str, Any]]] = None) -> Plan:
     """A real plan with no model: fetch what discovery ranked highest.
 
     The bare template (`discover` alone) produces an empty table, which is a
@@ -137,7 +213,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
     fetches the top candidate plus the best from each other corpus, which is
     usually the shape of the question anyway: one BDDK series and one macro
     series that contextualises it. A chart is added by `apply_presentation`
-    only when the question asked for one.
+    only when the question asked for one. Series the prompt's own URLs
+    produced come first: they are what the question is about.
     """
     # The same clause-splitting discovery the planner is shown: plain
     # `discover` on a thirty-word question diluted the one content word that
@@ -145,6 +222,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
     found = discovery if discovery is not None else discover_concepts(question, limit=MAX_CANDIDATES_IN_CONTEXT)
     by_identity = {(c["source"], c["key"], c.get("currency")): c for c in found["candidates"]}
     chosen, taken = [], set()
+    if landed:
+        limit += 1          # two landed series plus two from the base corpus
 
     def take(candidate) -> None:
         identity = (candidate["source"], candidate["key"], candidate.get("currency"))
@@ -152,6 +231,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
             taken.add(identity)
             chosen.append(candidate)
 
+    for candidate in (landed or [])[:2]:
+        take(candidate)
     # Each clause's first choice first ("konut kredileri" -> the loan book,
     # "faiz oranlari" -> the rate), then the best of any corpus not yet seen.
     for ranked in found.get("by_concept") or []:
@@ -159,6 +240,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
             if identity in by_identity:
                 take(by_identity[identity])
     for candidate in found["candidates"]:
+        if candidate["source"] == "external" and landed:
+            continue                    # the landed list already chose the file's series
         if candidate["source"] not in {c["source"] for c in chosen}:
             take(candidate)
     if not chosen:
@@ -167,7 +250,8 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
     steps = [Step(op="fetch_series", key=c["key"], source=c["source"],
                   dataset=c["dataset"] if c["source"] in DATASET_SOURCES else None,
                   currency=c.get("currency"), province=c.get("province"),
-                  as_name=_slice_name(c["key"], c["currency"]) if c.get("currency") else None)
+                  as_name=(_slice_name(c["key"], c["currency"]) if c.get("currency")
+                           else _landed_column_name(c["key"]) if c["source"] == "external" else None))
              for c in chosen]
     return Plan(intent="series_analysis", start=route_result.start, end=route_result.end,
                 steps=steps, reasoning="deterministic: top-ranked discovery candidates")
@@ -485,7 +569,7 @@ def apply_analysis(plan: Plan, route_result: Route, session: Session) -> Plan:
     return plan
 
 
-DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external")
+DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external", "ingest_source")
 
 
 def apply_presentation(plan: Plan, route_result: Route, question: str,
@@ -531,14 +615,19 @@ def apply_presentation(plan: Plan, route_result: Route, question: str,
 
 
 def make_plan(question: str, session: Session, route_result: Route,
-              client: Optional[KloudeksClient]) -> Plan:
+              client: Optional[KloudeksClient],
+              ingested: Optional[List[IngestResult]] = None) -> Plan:
     """A validated plan: from the model when possible, from a template otherwise.
 
     Discovery runs once here and feeds three consumers -- the planner's
     context, the deterministic fallback and `apply_dimensions` -- so they
     cannot disagree about which candidates carry which currency slice.
+    `ingested` is what `pre_ingest` landed from the prompt's URLs: a question
+    whose file produced series is a series question, whatever the router
+    called it, and the plan must reach those series.
     """
-    series_intent = route_result.intent in ("series_analysis", "followup")
+    landed = landed_series(ingested or [], question)
+    series_intent = route_result.intent in ("series_analysis", "followup") or bool(landed)
 
     # "bunun grafiğini çiz" / "tablo yap" over an existing table: there is
     # nothing to plan. No discovery (its words name no series -- and the
@@ -563,7 +652,8 @@ def make_plan(question: str, session: Session, route_result: Route,
 
     def fallback() -> Plan:
         if series_intent:
-            return apply_dimensions(deterministic_series_plan(question, route_result, discovery=found), found)
+            return apply_dimensions(
+                deterministic_series_plan(question, route_result, discovery=found, landed=landed), found)
         return template_plan(route_result.intent, question, route_result.urls,
                              route_result.start, route_result.end)
 
@@ -571,7 +661,8 @@ def make_plan(question: str, session: Session, route_result: Route,
     if client is not None:
         try:
             plan = client.structured(
-                planner_messages(question, build_context(question, session, route_result, discovery=found)),
+                planner_messages(question, build_context(question, session, route_result,
+                                                         discovery=found, landed=landed)),
                 Plan, max_tokens=1400)
         except LLMError:
             plan = None
@@ -594,7 +685,7 @@ def make_plan(question: str, session: Session, route_result: Route,
         extends_table = session.has_artifact() and (route_result.is_followup or plan.intent == "followup")
         if (series_intent and not extends_table
                 and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
-            plan = deterministic_series_plan(question, route_result, discovery=found)
+            plan = deterministic_series_plan(question, route_result, discovery=found, landed=landed)
             plan.reasoning = f"{plan.reasoning} [model plan produced no data; replaced]"
         plan = apply_dimensions(plan, found)
         plan = apply_scope(plan, route_result, session, found)
@@ -622,8 +713,14 @@ def make_plan(question: str, session: Session, route_result: Route,
         if len(index):
             plan.start = plan.start or index.min().strftime("%Y-%m-%d")
             plan.end = plan.end or index.max().strftime("%Y-%m-%d")
-    if route_result.urls and not any(step.op == "read_url" for step in plan.steps):
-        plan.steps = template_plan("url_analysis", question, route_result.urls).steps + plan.steps
+    # A URL that produced no series is a document to read, not a table to
+    # join: give the composer its text. A URL that did produce series is
+    # already in the plan's reach as external keys and needs no read step.
+    landed_urls = {r.url for r in (ingested or []) if r.all_series_keys()}
+    prose_urls = [url for url in route_result.urls
+                  if external_store.canonical_url(url) not in landed_urls]
+    if prose_urls and not any(step.op == "read_url" for step in plan.steps):
+        plan.steps = template_plan("url_analysis", question, prose_urls).steps + plan.steps
     return plan
 
 
@@ -654,10 +751,17 @@ def run_turn(question: str, session: Optional[Session] = None,
     logger.info("route -> %s (%s) chart=%s table=%s", route_result.intent,
                 route_result.decided_by, route_result.wants_chart, route_result.wants_table)
 
+    # A URL in the question lands in the lakehouse's external zone first, so
+    # the planner chooses among real keys -- the demo-day rule (see module doc).
+    ingested: List[IngestResult] = []
+    if route_result.urls:
+        with _timed(timings, "ingest"):
+            ingested = pre_ingest(question, session, route_result, client)
+
     # `plan` includes discovery (`build_context`) and the planner's model call;
     # `KloudeksClient` logs each call separately, so the two are separable.
     with _timed(timings, "plan"):
-        plan = make_plan(question, session, route_result, client)
+        plan = make_plan(question, session, route_result, client, ingested)
         plan = apply_valuation_guard(plan, session, is_followup=route_result.is_followup)
         plan = apply_analysis(plan, route_result, session)
         plan = apply_presentation(plan, route_result, question, session)
@@ -710,6 +814,7 @@ def run_turn(question: str, session: Optional[Session] = None,
         "figure": session.facts.get("figure") if presentation["chart"] else None,
         "analysis": session.facts.get("analysis"),
         "find_periods": session.facts.get("find_periods"),
+        "landed_sources": session.facts.get("landed_sources"),
         "citations": session.turn_citations(),
         "verification": verification,
         "audit": [step.to_dict() for step in session.audit],

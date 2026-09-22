@@ -608,3 +608,18 @@
   word-break: break-all;
   user-select: all;
 }
+/* --- Kaynaklar (dış veri) paneli ---------------------------------------- */
+.source-list { list-style: none; margin: 0.75rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.source-card { border: 1px solid var(--border, #e3e6ea); border-radius: 8px; background: var(--surface, #fff); }
+.source-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 0.75rem; background: none; border: none; cursor: pointer; text-align: left; font: inherit; }
+.source-toggle > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-body { padding: 0 0.75rem 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.source-facts { display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.8rem; color: var(--muted, #667); word-break: break-all; }
+.source-series-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.source-series { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.4rem 0.5rem; border-radius: 6px; background: var(--surface-2, #f6f7f9); }
+.source-series-main { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.source-series-name { font-weight: 600; }
+.source-series-meta, .source-series-match { font-size: 0.78rem; color: var(--muted, #667); }
+.btn-small { padding: 0.25rem 0.6rem; font-size: 0.8rem; align-self: flex-start; }
+.btn-danger { color: #b3261e; }

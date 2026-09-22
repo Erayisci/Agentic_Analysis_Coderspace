@@ -5,6 +5,39 @@ The query rules here are the agent's only defence against the traps documented
 in CLAUDE.md, so they must stay in sync with `backend.domain.canonical`.
 """
 from ..core.config import SCHEMA_CARD_PATH
+from . import external_store
+
+
+def _external_section() -> list:
+    """The external zone, as it stands at build time. The list grows at
+    runtime; the views are the way to see the current state."""
+    landed = external_store.list_sources()
+    lines = [
+        "",
+        "## External sources (source='external'): views over data/external/",
+        "- Sources handed over at runtime (a URL in a question, POST /sources, or",
+        "  `python -m backend.ingestion.external <url>`) land here as Parquet and are",
+        "  visible through these views IMMEDIATELY, without a rebuild:",
+        "  external_sources (one row per landed URL), external_series (the index: one row",
+        "  per series with unit, temporal_semantics, monthly_rule, native_frequency, url,",
+        "  location), external_observations (monthly grain, same columns as",
+        "  macro_observations), external_observations_native, external_quality_report.",
+        "- series_key is '<source_id>/<location>/<name>' (ASCII). Search external_series",
+        "  by name or name_clean, then query external_observations by series_key.",
+        "- unit and temporal_semantics were INFERRED from the file's header/caption",
+        "  (unit_source, semantics_source say from where); unit_verified=false until a",
+        "  cross-check against the base corpus confirms them. State that in any answer,",
+        "  and never sum an external amount with a lakehouse amount unless the units match.",
+        "- external_quality_report lists what the ingester could not establish",
+        "  (date parse rate, duplicates, extractor warnings) -- quotable evidence.",
+    ]
+    if landed.empty:
+        lines.append("- Currently landed: none (the views exist and return zero rows).")
+    else:
+        lines.append(f"- Currently landed ({len(landed)}):")
+        for row in landed.head(20).itertuples():
+            lines.append(f"  * {row.source_id} | {row.status} | {row.n_series} series | {row.url}")
+    return lines
 
 
 def write_schema_card(tables: dict, tbb_footnotes: list) -> None:
@@ -137,6 +170,13 @@ def write_schema_card(tables: dict, tbb_footnotes: list) -> None:
         "  AND period=(SELECT max(period) FROM finturk_observations)",
         "ORDER BY value DESC LIMIT 10;",
         "",
+        "-- 9. WHAT HAS LANDED from runtime URLs (the external zone; see the section below).",
+        "--    To read one landed series: SELECT o.period, o.value, s.unit, s.unit_verified",
+        "--      FROM external_observations o JOIN external_series s USING (series_key)",
+        "--      WHERE s.series_key = '<key from external_series>' ORDER BY o.period;",
+        "SELECT count(*) AS n_sources, coalesce(sum(n_series), 0) AS n_series,",
+        "  coalesce(sum(n_observations), 0) AS n_monthly_rows FROM external_sources;",
+        "",
         "## BDDK weekly bulletin (weekly_observations, weekly_items)",
         "- A SEPARATE release from the monthly bulletin, not a finer grain of it: 9 tables,",
         "  201 items, observed on FRIDAYS (the last business day when Friday is a holiday).",
@@ -213,8 +253,8 @@ def write_schema_card(tables: dict, tbb_footnotes: list) -> None:
         "  bulletin_observations (dataset='tuketici_kredileri', entity_key='tuketici_kredileri_konut').",
         "- Real terms: divide a TL amount by TP.GENENDEKS.T1 and rescale; index 2021-01=100 by",
         "  dividing by the 2021-01 value. Do both in SQL, never in prose.",
-        "",
-        "## TBB methodology footnotes (primary source, June 2026 report)",
     ]
+    lines += _external_section()
+    lines += ["", "## TBB methodology footnotes (primary source, June 2026 report)"]
     lines += [f"> {note}" for note in tbb_footnotes]
     SCHEMA_CARD_PATH.write_text("\n".join(lines), encoding="utf-8")

@@ -31,6 +31,25 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "flake8>=6.0.0"]
+# The in-process route of demo-day source ingestion (backend/ingestion/external)
+# runs the web-tools extension's extractor inside the API process; these are
+# the same parser packages extensions/web_tools/requirements-assets.in installs
+# in its container. Without them the API still starts and the container route
+# still works; only in-process PDF/XLS/image extraction is unavailable.
+# Dense retrieval for discovery (backend/tools/vector_store.py). The brief
+# names LanceDB, so it is the backend when installed; without it the store
+# falls back to a NumPy matrix plus a JSON sidecar under data/vectors/, and
+# without an index at all discovery uses lexical ranking only. Nothing here is
+# needed to build the lakehouse or run the agent.
+vector = ["lancedb>=0.13.0"]
+ingest = [
+    "pdfplumber>=0.11.0",
+    "xlrd>=2.0.0",
+    "pypdfium2>=4.0.0",
+    "Pillow>=10.0.0",
+    "defusedxml>=0.7.0",
+    "lxml>=5.0.0",
+]
 
 [project.scripts]
 kkb-build = "backend.lakehouse.build:main"

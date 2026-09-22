@@ -23,12 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Intent = Literal["series_analysis", "followup", "url_analysis", "search", "metadata", "unsupported"]
 Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
-             "read_url", "search", "chart", "ingest_external", "clear_table", "footnotes"]
+             "read_url", "search", "chart", "ingest_source", "ingest_external", "clear_table", "footnotes"]
 Operation = Literal["index_to_base", "deflate", "change", "ratio", "in_usd"]
 Method = Literal["anomaly", "changepoint", "causality", "decompose"]
 Kind = Literal["auto", "level", "trend", "volatility"]          # changepoint: what kind of change
 Sensitivity = Literal["low", "medium", "high"]                  # changepoint: how eager to cut
-Source = Literal["bulletin", "weekly", "macro", "finturk"]
+Source = Literal["bulletin", "weekly", "macro", "finturk", "external"]
 MonthlyRule = Literal["last", "avg", "sum"]
 
 # Which fields each op actually needs. Checked after parsing, because guided
@@ -45,6 +45,7 @@ REQUIRED: dict = {
     "read_url": ("url",),
     "search": ("query",),
     "chart": (),
+    "ingest_source": ("url",),
     "ingest_external": ("url", "value_column"),
     "clear_table": (),
     "footnotes": (),
@@ -67,7 +68,8 @@ class Step(BaseModel):
 
     # fetch_series / discover
     key: Optional[str] = Field(
-        None, description="entity_key (bulletin, weekly), series_code (macro), or metric (finturk)")
+        None, description="entity_key (bulletin, weekly), series_code (macro), metric (finturk), "
+                          "or series_key (external, copied exactly)")
     source: Optional[Source] = Field(None, description="which corpus the key belongs to")
     dataset: Optional[str] = Field(None, description="bulletin/finturk table slug, when the key is ambiguous")
     currency: Optional[str] = Field(None, description="'total' (TL+FX), 'TL' or 'FX'")
@@ -94,12 +96,17 @@ class Step(BaseModel):
     against_direction: Optional[Literal["up", "down"]] = None
     window: Optional[int] = Field(None, description="anomaly only: baseline length in months (default 12)")
 
-    # read_url / search / ingest_external
+    # read_url / search / ingest_source / ingest_external
     url: Optional[str] = None
     query: Optional[str] = None
 
-    # ingest_external only -- adds a column from an external file to the
-    # CURRENT SESSION'S table only; nothing is written to the lakehouse.
+    # ingest_source: lands EVERY table in the URL (or the documents a page
+    # links to) in the lakehouse's external zone; the series then fetch with
+    # source="external". `hint` ranks which linked document to follow.
+    hint: Optional[str] = Field(None, description="what the source should answer; ranks linked documents")
+
+    # ingest_external only -- adds ONE named column from an external file to
+    # the CURRENT SESSION'S table; nothing is written to the lakehouse.
     value_column: Optional[str] = Field(None, description="column in the external file holding the numbers")
     period_column: Optional[str] = Field(None, description="column holding the dates; auto-detected if omitted")
     sheet: Optional[str] = Field(None, description="Excel sheet name; ignored for CSV")
@@ -241,10 +248,14 @@ Adimlar:
   dataset verilmezse tablodaki serilerin tablolari kullanilir.
 - read_url / search: prompt'ta URL varsa veya disaridan bilgi gerekiyorsa. read_url sadece OKUR
   (metin/onizleme dondurur), tabloya sutun EKLEMEZ.
-- ingest_external: bir URL'deki Excel/CSV dosyasindan bir sutunu SAYISAL SERI olarak tabloya
-  ekler -- boylece uzerinde transform/analyze/chart calisabilir. value_column ZORUNLU (hangi
-  sutunun sayi oldugunu once read_url ile onizleyip ogren). period_column verilmezse otomatik
-  bulunur. Bu ekleme SADECE bu oturum icindir, kalici veritabanina hicbir sey yazilmaz.
+- ingest_source: bir URL'deki (Excel/CSV/PDF/HTML/gorsel) TUM tablolari zaman serisi olarak
+  lakehouse'un dis kaynak bolgesine alir; sayfa dosyalara link veriyorsa en uygun dosyalari da
+  alir. Prompt'taki URL'ler plan yapilmadan ONCE otomatik alinir ve serileri "YENI YUKLENEN
+  KAYNAKLAR" listesinde gorursun -- onlari fetch_series ile (source=external, key=listeden
+  AYNEN, dataset ve currency BOS) tabloya ekle. ingest_source'u sadece listede olmayan yeni
+  bir URL icin kullan.
+- ingest_external: eski yol -- kullanici dosyadaki TEK bir sutunu ADIYLA sectiyse. value_column
+  ZORUNLU. Sadece bu oturum icindir; normalde ingest_source + fetch_series tercih et.
 - clear_table: mevcut tabloyu (tum sutunlari) tamamen bosaltir. SADECE kullanici acikca "tabloyu
   temizle", "sil", "bastan basla" derse kullan. "tablo yap" / "yeni tablo" / "tablo olustur"
   bir SUNUM istegidir, silme istegi DEGILDIR -- bunlarda clear_table KULLANMA. Bu adim SADECE bu
@@ -274,7 +285,10 @@ Kurallar:
    against_direction; analyze icin method, column (+against). unit/columns/title/window yazma
    (title sadece chart icin). KISA yaz: fazla alan = yavas cevap.
 7. Kullanici disaridan bir dosya/URL'deki veriyi mevcut tabloyla KARSILASTIRMAK veya
-   BIRLESTIRMEK istiyorsa ingest_external kullan; sadece OZETLEMESINI istiyorsa read_url yeter.
+   BIRLESTIRMEK istiyorsa "YENI YUKLENEN KAYNAKLAR" listesindeki seriyi fetch_series
+   (source=external) ile ekle; sadece OZETLEMESINI istiyorsa read_url yeter. Dis kaynaktan
+   gelen bir serinin birimi ve zaman anlami dosyadan TAHMIN edilmistir (unit_verified=false);
+   tutar karsilastirmasinda birimlerin ayni oldugundan emin ol.
 8. "X dustugu donemlerde Y nasil degisti / X dustugu halde Y yukselmedigi donem var mi" gibi
    sorular find_periods ile cevaplanir: column=X, direction=down, against=Y,
    against_direction=down (Y'nin YUKSELMEDIGI aylar). analyze/transform ile DEGIL.

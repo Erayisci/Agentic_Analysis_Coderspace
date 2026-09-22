@@ -14,6 +14,7 @@ ILIKE on a name containing 'İ' misses. A small alias table bridges the other
 gap -- a question in English, or using a word the regulator does not ("mortgage",
 "NPL", "enflasyon") -- because the corpus is published in Turkish only.
 """
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,7 @@ import duckdb
 from ..core.config import DUCKDB_PATH
 from ..core.labels import fold, slugify
 from .series import SeriesResult, load_series
+from .vector_store import default_store, reciprocal_rank_fusion
 
 # Read-only surface the agent is allowed to query. `observations` and the TBB
 # tables are omitted on purpose: they are a second vocabulary for the same BDDK
@@ -35,6 +37,9 @@ ALLOWED_TABLES = {
     "macro_observations_native", "data_quality_report", "reconciliation_monitor",
     "bulletin_lifecycle_report", "weekly_lifecycle_report",
     "finturk_observations", "finturk_metrics",
+    # The external zone: views over data/external/, sources landed at runtime.
+    "external_sources", "external_series", "external_observations",
+    "external_observations_native", "external_quality_report",
 }
 
 FORBIDDEN_SQL = re.compile(
@@ -168,7 +173,7 @@ SOURCE_TERMS = (
     ("bddk", re.compile(r"(?<!\w)bddk" + _SUFFIX, re.I), {"bulletin", "weekly"}),
 )
 
-ALL_SOURCES = {"bulletin", "macro", "weekly", "finturk"}
+ALL_SOURCES = {"bulletin", "macro", "weekly", "finturk", "external"}
 
 # Words that say a question is about the province grain -- the only reason
 # to prefer a quarterly, province-summed FinTurk row over the monthly
@@ -551,8 +556,12 @@ def _score(candidate, terms, province_named: bool = False) -> float:
     if candidate.get("unit") == "adet" and re.search(r"\bkredi|\bloan|\btutar|\bbakiye|\bstok", query_text):
         score -= 4.0
 
-    score -= 1.5 * key.count("/")                       # a child row, not the line itself
-    score -= min(len(key), 90) / 45.0                   # prefer the canonical short key
+    # An external series_key is '<source_id>/<location>/<name>': the slashes
+    # and the hash prefix are its address, not a sign of being a child row, so
+    # only the name segment is judged for length.
+    key_body = key.rsplit("/", 1)[-1] if candidate.get("source") == "external" else key
+    score -= 1.5 * key_body.count("/")                  # a child row, not the line itself
+    score -= min(len(key_body), 90) / 45.0              # prefer the canonical short key
 
     # FinTurk publishes many of the bulletin's concepts again, quarterly and
     # by province. Its rows answer a question that names a province or the
@@ -756,8 +765,30 @@ def discover(query: str, source=None, limit: int = 8):
             pooled += con.execute(
                 "SELECT 'macro' AS source, datagroup AS dataset, series_code AS key, name_tr AS name, unit, "
                 "temporal_semantics, NULL AS currencies, monthly_rule AS metrics, tier, NULL AS n_periods, "
-                "search_fold, published_start AS first_period, published_end AS last_period "
+                "search_fold, native_frequency, published_start AS first_period, published_end AS last_period "
                 f"FROM macro_series WHERE {where}", params).df().to_dict("records")
+
+        if "external" in wanted:
+            # The external zone has no build-time `search_fold`: a source lands
+            # at runtime, so the fold is computed here from the same fields the
+            # other indexes fold at build time (name, location, url).
+            where = " OR ".join(["series_key ILIKE ? OR name ILIKE ? OR coalesce(name_clean, '') ILIKE ?"]
+                                * len(words))
+            params = [p for term in words for p in (f"%{term}%",) * 3]
+            try:
+                external = con.execute(
+                    "SELECT 'external' AS source, source_id AS dataset, series_key AS key, "
+                    "coalesce(name_clean, name) AS name, name AS raw_name, location, url, unit, unit_verified, "
+                    "temporal_semantics, NULL AS currencies, monthly_rule AS metrics, NULL AS tier, n_periods, "
+                    "native_frequency, published_start::VARCHAR AS first_period, "
+                    "published_end::VARCHAR AS last_period "
+                    f"FROM external_series WHERE {where}", params).df().to_dict("records")
+            except duckdb.CatalogException:
+                external = []                       # a database built before the external zone existed
+            for row in external:
+                row["search_fold"] = fold(f"{row.get('raw_name') or ''} {row.get('location') or ''} "
+                                          f"{row.get('url') or ''} dis kaynak external")
+            pooled += external
 
         if "weekly" in wanted:
             where = " OR ".join(["search_fold ILIKE ?"] * len(words))
@@ -792,9 +823,16 @@ def discover(query: str, source=None, limit: int = 8):
     # "il bazında" is both a source filter and the reason a FinTurk row ranks.
     province_named = wanted == {"finturk"} or names_a_province(query)
     for candidate in pooled:
+        candidate["grain"] = candidate_grain(candidate)
         candidate["score"] = _score(candidate, terms, province_named)
 
-    scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
+    # An explicit grain in the question ("aylık", "haftalık") demotes every
+    # other grain before anything is ranked; silence keeps every corpus in play.
+    wanted_grain = query_grain(query)
+    _apply_grain_policy(pooled, wanted_grain)
+
+    lexical = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
+    scored, fusion = _fuse_with_vectors(query, lexical, pooled, limit)
 
     # The slice is a filter, not a score: when the concept named a currency,
     # only series that publish that slice can answer it, and each carries the
@@ -850,7 +888,267 @@ def discover(query: str, source=None, limit: int = 8):
     return {"query": query, "terms_used": [t for t, _ in terms], "currency": currency,
             "province": province,
             "sources": sorted(named_sources) if named_sources else None,
+            "requested_grain": wanted_grain, "retrieval": fusion,
             "n_candidates": len(ranked), "candidates": ranked}
+
+
+# --------------------------------------------------------------------------
+# Temporal grain
+#
+# Discovery used to be grain-blind, and that produced a worse failure than a
+# bad ranking. Asked for monthly consumer credit, it returned weekly item 5688
+# (`Tüketici Kredileri ve Bireysel Kredi Kartları`, whose latest observation is
+# 2026-09-04) alongside monthly bulletin rows that end 2026-07 -- and the
+# planner divided one by the other. Two different grains, two different
+# vintages, two different scopes: a ratio computed from them is not a number
+# with a large error bar, it is not a number at all.
+#
+# Grain is therefore a first-class field on every candidate, derived from the
+# catalogue rather than guessed, and it gates the ranking before the planner
+# ever sees the list.
+
+GRAIN_BY_SOURCE = {"bulletin": "monthly", "weekly": "weekly", "finturk": "quarterly"}
+
+# EVDS spells its frequencies out; these are the values `native_frequency`
+# actually takes across the 44 registered groups, plus the external zone's.
+FREQUENCY_TO_GRAIN = {
+    "daily": "daily", "business_daily": "daily", "isgunu": "daily", "gunluk": "daily",
+    "weekly": "weekly", "haftalik": "weekly",
+    "monthly": "monthly", "aylik": "monthly",
+    "quarterly": "quarterly", "ceyreklik": "quarterly",
+    "semiannual": "semiannual", "annual": "annual", "yillik": "annual",
+}
+
+QUERY_GRAIN_WORDS = {
+    "monthly": ("aylik", "aylık", "monthly", "ay bazinda", "ay bazında", "her ay"),
+    "weekly": ("haftalik", "haftalık", "weekly", "hafta bazinda", "hafta bazında"),
+    "daily": ("gunluk", "günlük", "daily", "gun bazinda", "gün bazında"),
+    "quarterly": ("ceyrek", "çeyrek", "quarterly", "ceyreklik", "çeyreklik"),
+    "annual": ("yillik", "yıllık", "annual", "yearly", "yil bazinda"),
+}
+
+# What a monthly question may still be answered with. A weekly series is a
+# legitimate *answer* to a monthly question only after resampling, which the
+# executor does on the way in -- but it must never outrank the monthly series
+# that was actually asked for, and it must never be silently paired with one.
+GRAIN_PENALTY = -10.0
+
+
+def candidate_grain(candidate: Dict[str, Any]) -> str:
+    """The observation grain of one candidate, from the catalogue."""
+    source = str(candidate.get("source") or "")
+    fixed = GRAIN_BY_SOURCE.get(source)
+    if fixed:
+        return fixed
+    frequency = str(candidate.get("native_frequency") or "").strip().lower()
+    return FREQUENCY_TO_GRAIN.get(frequency, "monthly" if frequency in ("", "none", "nan") else frequency)
+
+
+def query_grain(query: str) -> Optional[str]:
+    """The grain a question explicitly asks for, or None when it does not say.
+
+    Explicit only: silence is not a request for monthly. A question that never
+    mentions a period should keep every corpus in play, which is what lets
+    "en guncel toplam kredi buyuklugu" reach the weekly bulletin at all.
+    """
+    text = fold(query or "")
+    for grain, words in QUERY_GRAIN_WORDS.items():
+        for word in words:
+            if re.search(rf"(?<!\w){re.escape(fold(word))}(?!\w)", text):
+                return grain
+    return None
+
+
+def _apply_grain_policy(candidates: List[Dict[str, Any]], wanted: Optional[str]) -> None:
+    """Demote candidates whose grain contradicts an explicit request.
+
+    A penalty rather than a filter: the weekly bulletin leads the monthly one
+    by weeks, so a demoted series is still worth showing the planner when
+    nothing better exists. It just cannot win a seat it was not asked for.
+    """
+    if not wanted:
+        return
+    for candidate in candidates:
+        grain = candidate.get("grain") or candidate_grain(candidate)
+        candidate["grain"] = grain
+        if grain != wanted:
+            candidate["score"] = round(candidate.get("score", 0.0) + GRAIN_PENALTY, 3)
+            candidate["grain_mismatch"] = f"{grain} != requested {wanted}"
+
+
+# --------------------------------------------------------------------------
+# Hybrid retrieval: dense recall over the lexical ranking, fused by rank.
+#
+# `DENSE_OVERSAMPLE` and `MAX_DENSE_PER_DATASET` are measured, not chosen:
+# `bie_akonutsat2` held 93 of the dense top-120 for the reference demo question
+# (EVDS repeats one series per province), so without a per-dataset cap the
+# housing-loan rate never reached the fused list; a cap below 8 lost the
+# consumer-NPL row instead. The dense weight is 0.0 by measurement too: every
+# positive value cost pinned rankings and bought none back, because this
+# lexical ranker encodes tested domain knowledge (aliases, tiers, qualifier
+# penalties, the unit traps) that a generic embedding cannot see. So dense
+# retrieval contributes RECALL -- rows the lexical SQL pool never saw -- and
+# never ORDER. Raising the weight is a deliberate act: re-run the discovery
+# eval first.
+DENSE_OVERSAMPLE = 4
+LEXICAL_WEIGHT = 1.0
+DENSE_WEIGHT = 0.0
+MAX_DENSE_PER_DATASET = 8
+# Opt-in, because the dense half embeds every query through the model
+# endpoint: measured on this machine, `discover` went from milliseconds to
+# ~4.5 s with the index on disk and a key configured, and `discover_concepts`
+# runs it once per clause. With DENSE_WEIGHT at 0.0 the half buys recall only,
+# so it is off unless a deployment asks for it.
+HYBRID_ENV = "KKB_HYBRID_DISCOVERY"
+
+
+def hybrid_enabled() -> bool:
+    return os.environ.get(HYBRID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _diversify(hits, depth: int):
+    """Cap how many dense hits one dataset contributes, keeping rank order."""
+    kept, per_dataset = [], {}
+    for hit in hits:
+        dataset = str(hit.dataset)
+        count = per_dataset.get(dataset, 0)
+        if count >= MAX_DENSE_PER_DATASET:
+            continue
+        per_dataset[dataset] = count + 1
+        kept.append(hit)
+        if len(kept) >= depth:
+            break
+    return kept
+
+
+def _identity(candidate: Dict[str, Any]):
+    """What makes a candidate one row: `key` alone is not unique across datasets."""
+    return (str(candidate.get("source")), str(candidate.get("dataset")), str(candidate.get("key")))
+
+
+def _rank_key(candidate: Dict[str, Any]):
+    """Order by fused score when the dense half ran, by lexical score otherwise."""
+    return (-candidate.get("rrf_score", 0.0), -candidate.get("score", 0.0))
+
+
+def _fuse_with_vectors(query: str, lexical: List[Dict[str, Any]], pooled: List[Dict[str, Any]],
+                       limit: int, depth: int = 30):
+    """Dense recall over a lexically-ordered list.
+
+    Degrades to pure lexical ranking whenever the dense side cannot run -- no
+    index built, no embedder configured, a model outage, a stale index from a
+    different embedding model. Discovery is load-bearing for every question the
+    agent answers, so none of those may turn into an error. The lexical layer
+    holds a veto: a candidate its gates disqualified (a grain the question did
+    not ask for, a qualifier it never mentioned) is not resurrected on cosine.
+    """
+    report: Dict[str, Any] = {"lexical": len(lexical), "vector": 0, "mode": "lexical"}
+    if not hybrid_enabled():
+        report["dense"] = f"disabled (set {HYBRID_ENV}=1)"
+        return lexical, report
+    try:
+        store = default_store()
+        if not store.available():
+            return lexical, report
+        hits = _diversify(store.search(query, limit=depth * DENSE_OVERSAMPLE), depth)
+    except Exception:                                        # noqa: BLE001 -- never break discovery
+        return lexical, report
+    if not hits:
+        return lexical, report
+
+    by_identity = {}
+    for candidate in pooled:
+        by_identity.setdefault(_identity(candidate), candidate)
+
+    dense: List[Dict[str, Any]] = []
+    dense_only: List[Any] = []
+    for hit in hits:
+        candidate = by_identity.get(hit.identity())
+        if candidate is None:
+            dense_only.append(hit)              # a row the lexical SQL pool never saw
+            continue
+        if candidate.get("score", 0.0) <= 0:
+            continue                            # the lexical veto
+        candidate["similarity"] = round(hit.similarity, 6)
+        dense.append(candidate)
+
+    fused = reciprocal_rank_fusion([lexical[:depth], dense], key=_identity,
+                                   weights=[LEXICAL_WEIGHT, DENSE_WEIGHT])
+    pool = {_identity(c): c for c in lexical[:depth]}
+    pool.update({_identity(c): c for c in dense})
+    for identity, score in fused.items():
+        if identity in pool:
+            pool[identity]["rrf_score"] = round(score, 8)
+    merged = sorted(pool.values(), key=_rank_key)
+
+    # The recall tail: only when the lexical pass came up short.
+    if len(merged) < limit and dense_only:
+        merged += _dense_only_candidates(dense_only, limit - len(merged))
+
+    report.update({"vector": len(dense), "dense_only": len(dense_only),
+                   "mode": "hybrid_rrf", "backend": store.backend(), "fused": len(merged)})
+    return merged[:max(depth, limit)], report
+
+
+_CATALOGUE_BY_IDENTITY: Optional[Dict[Any, Dict[str, Any]]] = None
+
+
+def _dense_only_candidates(hits, room: int) -> List[Dict[str, Any]]:
+    """Full catalogue rows for dense hits the lexical pool missed; `score`
+    stays 0.0 so these always sort behind everything the lexical layer judged."""
+    global _CATALOGUE_BY_IDENTITY
+    if _CATALOGUE_BY_IDENTITY is None:
+        try:
+            _CATALOGUE_BY_IDENTITY = {_identity(row): row for row in catalogue_candidates()}
+        except Exception:                                    # noqa: BLE001 -- recall is optional
+            _CATALOGUE_BY_IDENTITY = {}
+    admitted = []
+    for hit in hits[:room]:
+        row = _CATALOGUE_BY_IDENTITY.get(hit.identity())
+        if row is None:
+            continue
+        admitted.append(dict(row, score=0.0, similarity=round(hit.similarity, 6), found_by="vector_only"))
+    return admitted
+
+
+def catalogue_candidates() -> List[Dict[str, Any]]:
+    """Every indexable series, in the shape `discover` scores. The vector
+    index is built from this, so the text an index holds is built from exactly
+    the fields discovery would have scored."""
+    con = _connect()
+    try:
+        rows = con.execute(
+            "SELECT 'bulletin' AS source, dataset, entity_key AS key, entity_name AS name, unit, "
+            "temporal_semantics, 'monthly' AS native_frequency FROM bulletin_entities").df().to_dict("records")
+        rows += con.execute(
+            "SELECT 'macro' AS source, datagroup AS dataset, series_code AS key, name_tr AS name, unit, "
+            "temporal_semantics, native_frequency FROM macro_series").df().to_dict("records")
+        rows += con.execute(
+            "SELECT 'weekly' AS source, dataset, entity_key AS key, entity_name AS name, "
+            "'milyon TL' AS unit, 'stock' AS temporal_semantics, 'weekly' AS native_frequency "
+            "FROM weekly_items WHERE retired_on IS NULL").df().to_dict("records")
+        rows += con.execute(
+            "SELECT 'finturk' AS source, dataset, metric AS key, metric_name AS name, unit, "
+            "temporal_semantics, 'quarterly' AS native_frequency FROM finturk_metrics").df().to_dict("records")
+        try:
+            rows += con.execute(
+                "SELECT 'external' AS source, source_id AS dataset, series_key AS key, "
+                "coalesce(name_clean, name) AS name, unit, temporal_semantics, native_frequency "
+                "FROM external_series").df().to_dict("records")
+        except duckdb.CatalogException:
+            pass
+    finally:
+        con.close()
+
+    for row in rows:
+        for field_name, value in list(row.items()):
+            if hasattr(value, "item"):
+                row[field_name] = value.item()
+            elif value is not None and str(value) == "nan":
+                row[field_name] = None
+        row["key"] = str(row.get("key"))
+        row["grain"] = candidate_grain(row)
+    return rows
 
 
 def fetch_series(

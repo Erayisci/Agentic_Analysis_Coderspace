@@ -57,11 +57,29 @@ EVDS_SERIELIST_DIR = EVDS_CATALOG_DIR / "serielist"
 EVDS_FETCH_START = "2021-01-01"
 EVDS_FETCH_END = "2026-07-31"
 
-DATA_DIR = ROOT / "data"
+# KKB_DATA_DIR relocates every derived artifact (Docker mounts a volume there).
+# The external-zone views bake an absolute glob into the database at build
+# time, so the build and the API must agree on this directory.
+DATA_DIR = Path(os.environ.get("KKB_DATA_DIR") or ROOT / "data").resolve()
 PROCESSED_DIR = DATA_DIR / "processed"
 ANALYTICS_DIR = DATA_DIR / "analytics"
 DUCKDB_PATH = DATA_DIR / "lakehouse.duckdb"
 SCHEMA_CARD_PATH = ANALYTICS_DIR / "schema_card.md"
+
+# The external zone: sources handed over at runtime (demo-day URLs) land here
+# as Parquet, one directory per source, and the DuckDB file exposes them
+# through views over globs -- so a live API process adds to the lakehouse
+# without ever taking the single-writer lock on lakehouse.duckdb. See
+# backend/lakehouse/external_store.py for the write protocol.
+EXTERNAL_DIR = DATA_DIR / "external"
+EXTERNAL_RAW_DIR = EXTERNAL_DIR / "_raw"
+EXTERNAL_SEED_DIR = EXTERNAL_DIR / "_seed"
+# The web-tools extension's result cache and hourly model-call counter (a
+# SQLite file) default to a container path; the in-process route points them here.
+EXTERNAL_CACHE_DIR = EXTERNAL_DIR / "_cache"
+# One download may not exceed this; the extension's own asset_max_bytes ceiling
+# is 50 MB and the sources the brief names are all well under it.
+EXTERNAL_MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 # Spelled exactly as `bulletin_observations.unit` spells it. The sectoral path
 # and the generic bulletin path read the same BDDK table, so a query filtering

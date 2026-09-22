@@ -42,6 +42,7 @@ from ..parsing.tbb import parse_tbb_directory
 from ..validation.continuity import run_bulletin_validations
 from ..validation.macro import check_macro_coverage, check_unit_resolution
 from ..validation.weekly import check_weekly_against_monthly, run_weekly_validations
+from . import external_store
 from .schema_card import write_schema_card
 
 
@@ -269,12 +270,26 @@ def main() -> int:
                        "macro_series", "macro_observations",
                        "macro_observations_native"}
     connection = duckdb.connect(str(DUCKDB_PATH))
-    for name, frame in tables.items():
-        target_dir = PROCESSED_DIR if name in processed_names else ANALYTICS_DIR
-        parquet_path = target_dir / f"{name}.parquet"
-        frame.to_parquet(parquet_path, index=False)
-        connection.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{parquet_path.as_posix()}')")
-    connection.close()
+    try:
+        for name, frame in tables.items():
+            target_dir = PROCESSED_DIR if name in processed_names else ANALYTICS_DIR
+            parquet_path = target_dir / f"{name}.parquet"
+            frame.to_parquet(parquet_path, index=False)
+            connection.execute(
+                f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{parquet_path.as_posix()}')")
+
+        # The external zone is views, not tables: sources landed at runtime
+        # under data/external/ must stay visible without a rebuild, and a
+        # table would freeze whatever had landed by now. Seeding writes the
+        # zero-row files the globs need in order to bind.
+        print("Creating the external-zone views...")
+        external_store.seed()
+        external_store.create_views(connection)
+        landed = external_store.list_sources()
+        print(f"  {len(external_store.VIEWS)} views over {external_store.EXTERNAL_DIR}, "
+              f"{len(landed)} source(s) currently landed")
+    finally:
+        connection.close()
 
     write_schema_card(tables, tbb_footnotes)
     print(f"Done. DuckDB at {DUCKDB_PATH}, schema card at {SCHEMA_CARD_PATH}")

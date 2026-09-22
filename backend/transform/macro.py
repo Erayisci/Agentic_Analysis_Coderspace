@@ -22,28 +22,24 @@ def _month_start(dates: pd.Series) -> pd.Series:
     return pd.to_datetime(dates).dt.to_period("M").dt.to_timestamp().dt.date
 
 
-def align_monthly(native: pd.DataFrame, catalogue: pd.DataFrame) -> pd.DataFrame:
-    """Native observations -> one row per (series, month)."""
-    rules = catalogue.set_index("series_code")["monthly_rule"]
-    unknown = set(native.series_code) - set(rules.index)
-    if unknown:
-        raise ValueError(f"observations for series missing from the catalogue: {sorted(unknown)[:10]}")
-
-    frame = native.copy()
+def aggregate_monthly(frame: pd.DataFrame, key: str, rules: pd.Series, carry=()) -> pd.DataFrame:
+    """The one monthly aggregation, shared by the EVDS path and the external
+    zone (`ingestion.external.align`): `date`/`value` rows keyed by `key` ->
+    one row per (key, month) with value_avg / value_last / value_sum,
+    n_native_obs, and `value` chosen by the key's rule. `carry` names columns
+    taken as-is from the first native row of the month."""
+    frame = frame.copy()
     frame["period"] = _month_start(frame["date"])
-    frame = frame.sort_values(["series_code", "date"])
+    frame = frame.sort_values([key, "date"])
 
-    grouped = frame.groupby(["series_code", "period"], sort=False)
-    monthly = grouped.agg(
-        datagroup=("datagroup", "first"),
-        value_avg=("value", "mean"),
-        value_last=("value", "last"),
-        value_sum=("value", "sum"),
-        n_native_obs=("value", "size"),
-        grain=("grain", "first"),
-    ).reset_index()
+    aggregations = {name: (name, "first") for name in carry}
+    aggregations.update(
+        value_avg=("value", "mean"), value_last=("value", "last"),
+        value_sum=("value", "sum"), n_native_obs=("value", "size"),
+    )
+    monthly = frame.groupby([key, "period"], sort=False).agg(**aggregations).reset_index()
 
-    monthly["monthly_rule"] = monthly["series_code"].map(rules)
+    monthly["monthly_rule"] = monthly[key].map(rules)
     monthly["value"] = monthly["value_avg"]
     is_last = monthly["monthly_rule"] == "last"
     is_sum = monthly["monthly_rule"] == "sum"
@@ -54,7 +50,17 @@ def align_monthly(native: pd.DataFrame, catalogue: pd.DataFrame) -> pd.DataFrame
     # makes avg/last/sum identical; drop the sum for non-flows so nobody
     # reads it as meaningful.
     monthly.loc[~is_sum, "value_sum"] = None
+    return monthly
 
+
+def align_monthly(native: pd.DataFrame, catalogue: pd.DataFrame) -> pd.DataFrame:
+    """Native observations -> one row per (series, month)."""
+    rules = catalogue.set_index("series_code")["monthly_rule"]
+    unknown = set(native.series_code) - set(rules.index)
+    if unknown:
+        raise ValueError(f"observations for series missing from the catalogue: {sorted(unknown)[:10]}")
+
+    monthly = aggregate_monthly(native, key="series_code", rules=rules, carry=("datagroup", "grain"))
     columns = ["period", "series_code", "datagroup", "value", "value_avg", "value_last",
                "value_sum", "n_native_obs", "monthly_rule"]
     return monthly[columns].sort_values(["datagroup", "series_code", "period"]).reset_index(drop=True)
