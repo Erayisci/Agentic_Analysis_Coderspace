@@ -52,6 +52,20 @@ _BILINGUAL_SUFFIX_RE = re.compile(r"\s*/\s*[A-Za-z]+")  # "Ocak / January" -> "O
 _TR_NUMBER_RE = re.compile(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$|^-?\d+,\d+$")   # 93.824.682.381 / 12,5
 _EN_NUMBER_RE = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")               # 93,824,682,381.5
 
+# ISO 8601 (year first: "2021-02-01", optionally with a time part) is never
+# ambiguous -- `dayfirst` must never apply to it. Measured: with
+# format="mixed", pandas' per-row format guessing still swapped day and month
+# inside an unambiguous ISO string when `dayfirst=True` was set globally
+# ("2021-02-01" parsed as 2021-01-02), because 01 and 02 are each valid as
+# either a day or a month. For a monthly series (day is always the 1st) this
+# silently collapsed most rows onto the wrong month, so a 12-row year came
+# back as one or two points -- `resample_to_monthly` then had at most one
+# "last" observation per month to keep, and the file's real shape was gone
+# with no error raised. ISO strings are routed through dayfirst=False (their
+# only correct reading); everything else -- "03.02.2021", "3/2/2021" -- keeps
+# dayfirst=True for the day-first convention this was written for.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}([ T].*)?$")
+
 
 def _parse_periods(raw: pd.Series) -> pd.Series:
     """Dates from a column, Turkish-aware: day-first (`03.02.2021` is 3 Feb),
@@ -62,7 +76,13 @@ def _parse_periods(raw: pd.Series) -> pd.Series:
     text = raw.astype("string").str.strip()
     text = text.str.replace(_BILINGUAL_SUFFIX_RE, "", regex=True)
     text = text.str.replace(_TR_MONTH_RE, lambda m: _TR_MONTHS[m.group(0).lower()], regex=True)
-    return pd.to_datetime(text, errors="coerce", dayfirst=True, format="mixed")
+    iso = text.str.match(_ISO_DATE_RE, na=False)
+    parsed = pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
+    if iso.any():
+        parsed.loc[iso] = pd.to_datetime(text[iso], errors="coerce", dayfirst=False, format="mixed")
+    if (~iso).any():
+        parsed.loc[~iso] = pd.to_datetime(text[~iso], errors="coerce", dayfirst=True, format="mixed")
+    return parsed
 
 
 def _parse_numbers(raw: pd.Series) -> pd.Series:
