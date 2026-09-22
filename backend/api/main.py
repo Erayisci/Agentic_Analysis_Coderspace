@@ -41,6 +41,7 @@ from ..agent.planner import Plan, Step
 from ..agent.verifier import verify
 from ..core.config import kloudeks_api_key
 from ..llm import KloudeksClient
+from ..tools import browser_render
 from ..tools.web_url import read_url
 
 logger = logging.getLogger("kkb.api")
@@ -79,7 +80,13 @@ def _build_web_search():
 
 
 def _build_url_reader(client: Optional[KloudeksClient]):
-    return read_url if client is None else partial(read_url, ocr=client.ocr)
+    # render_html is bound unconditionally -- rendering is local (Playwright),
+    # needs no API key, and read_url falls back to the static fetch on its
+    # own if no browser is installed (see tools.browser_render, tools.web_url).
+    kwargs = {"render_html": browser_render.render}
+    if client is not None:
+        kwargs["ocr"] = client.ocr
+    return partial(read_url, **kwargs)
 
 
 @asynccontextmanager

@@ -52,6 +52,11 @@ KESIN KURALLAR:
    yeni etiket uydurma. Etiket listesini sen yazma; cevabin sonuna otomatik eklenecek.
 12. facts.notlar varsa oradaki yontem notunu uygula ve cevapta bir cumleyle belirt (ornegin YP
    stokunun TL karsiliginin kurla mekanik olarak arttigi; yorumu TL payi ve USD bazli sutunla yap).
+13. Soru "... sutunu ekleyebilir misin / getirebilir misin" gibi bir ekleme/getirme istiyorsa,
+   "tablo_sutunlari" icinde o seriye karsilik gelen bir sutun VARSA bu zaten yapilmis demektir --
+   "eklenemez/getiremem" DEME, dogrudan eklendigini soyleyip facts'teki degerleriyle cevapla.
+   "tablo_sutunlari" listende olmayan bir seyi ekleyip eklemedigini soyleme; sadece orada gordugunu
+   yansit, kendi yapabilirligin hakkinda tahmin yurutme.
 """
 
 

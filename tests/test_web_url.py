@@ -103,6 +103,37 @@ def test_dispatches_html_and_strips_scripts(monkeypatch):
     assert "Hello world" in result["text"]
 
 
+def test_render_html_replaces_static_content_when_given(monkeypatch):
+    static_html = b"<html><body><p>Not yet loaded</p></body></html>"
+    rendered_html = b"<html><body><p>Deger: 42</p></body></html>"
+    monkeypatch.setattr(web_url, "_fetch", lambda url: _response("text/html", static_html))
+    seen = {}
+
+    def fake_render(url):
+        seen["url"] = url
+        return rendered_html
+
+    result = web_url.read_url("https://example.com/spa", render_html=fake_render)
+
+    assert seen["url"] == "https://example.com/spa"
+    assert result["rendered"] is True
+    assert "Deger: 42" in result["text"]
+    assert "Not yet loaded" not in result["text"]
+
+
+def test_render_html_falls_back_to_static_content_on_failure(monkeypatch):
+    static_html = b"<html><body><p>Static content</p></body></html>"
+    monkeypatch.setattr(web_url, "_fetch", lambda url: _response("text/html", static_html))
+
+    def failing_render(url):
+        raise RuntimeError("no browser installed")
+
+    result = web_url.read_url("https://example.com/spa", render_html=failing_render)
+
+    assert result["rendered"] is False
+    assert "Static content" in result["text"]
+
+
 def test_dispatches_plain_text(monkeypatch):
     monkeypatch.setattr(web_url, "_fetch", lambda url: _response("text/plain", b"raw data", encoding="utf-8"))
 

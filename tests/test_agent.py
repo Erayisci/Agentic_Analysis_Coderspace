@@ -274,6 +274,33 @@ def test_discovery_does_not_offer_a_count_when_asked_for_a_loan_amount():
     assert top["unit"] != "adet"
 
 
+def test_discovery_seeds_the_amount_series_beside_a_rate_word_in_one_clause():
+    """"Faiz orani konut kredisi HACMINI ongormeye yardimci oluyor mu?" names
+    a rate (faiz orani) and an amount (konut kredisi hacmi) in one clause --
+    no "ve"/"ile" for discover_concepts to split on, so both compete in the
+    same ranked pool. RATIO_WORDS' blanket +3%/-3TL bonus (correct for the
+    rate half) buries the amount series under a wall of "KTF"-aliased rate
+    series that also happen to be named "Konut Kredisi": measured live, the
+    milyon-TL housing-loan stock did not reach the top 20, so the model chose
+    a second rate series for "hacim" and ran a causality test between two
+    rates instead of rate-vs-amount, a convincingly-worded wrong answer.
+    AMOUNT_WORDS' seat guarantee (mirroring `discover_concepts`' per-clause
+    seat, applied to a semantic role split within one clause) is what fixes
+    it -- not by reweighting the shared ranking, which would just as easily
+    demote the correct rate series sitting in the same query."""
+    needs_lakehouse()
+    candidates = discover_concepts(
+        "Faiz oranı konut kredisi hacmini öngörmeye yardımcı oluyor mu?", limit=8)["candidates"]
+    by_key = {c["key"]: c for c in candidates}
+    assert "TP.KTF12" in by_key, "the rate half must still be offered"
+    assert by_key["TP.KTF12"]["unit"] == "%"
+    assert "tuketici_kredileri_konut" in by_key, (
+        "the amount half must be seeded even though it never beats the KTF-aliased rate series on score")
+    volume = by_key["tuketici_kredileri_konut"]
+    assert volume["unit"] == "milyon TL"
+    assert volume["temporal_semantics"] == "stock"
+
+
 # --- series routing ---------------------------------------------------------
 
 def test_load_series_routes_all_three_corpora():

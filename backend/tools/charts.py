@@ -176,11 +176,16 @@ def build_chart(artifact: AnalysisArtifact, columns: Optional[List[str]] = None,
         lineage = artifact.lineage[column]
         on_secondary = secondary is not None and lineage.unit == secondary
         series = artifact.frame[column]
+        # A single point drawn with mode="lines" is invisible -- a line needs
+        # two points to have anything to draw between. Plotly's own axis
+        # autorange then zooms tight around that one value (a window a few
+        # parts-per-million wide for a milyar-scale figure), which is what
+        # rangemode="tozero" below guards against.
         trace = dict(
             x=[stamp.strftime("%Y-%m-%d") for stamp in series.index],
             y=[None if value != value else round(float(value), 4) for value in series],
             name=f"{lineage.label}",
-            mode="lines" if kind == "line" else "markers",
+            mode="lines" if kind == "line" and len(series) > 1 else "markers",
             line=dict(color=PALETTE[position % len(PALETTE)],
                       dash="dash" if lineage.unit in DASHED_UNITS else "solid"),
             hovertemplate=f"%{{x|%Y-%m}}<br>%{{y:,.2f}} {lineage.unit}<extra>{lineage.label}</extra>",
@@ -193,14 +198,18 @@ def build_chart(artifact: AnalysisArtifact, columns: Optional[List[str]] = None,
     layout = dict(
         title=title or artifact.title,
         xaxis=dict(title="Dönem"),
-        yaxis=dict(title=ordered_units[0]),
+        yaxis=dict(title=ordered_units[0], rangemode="tozero"),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
-        margin=dict(l=60, r=60, t=60, b=80),
+        # A long or three-plus-trace legend wraps onto a second line at
+        # y=-0.3, which then sits on top of the x-axis title instead of
+        # below it -- y=-0.45 and a taller bottom margin give that wrap
+        # room without moving anything when the legend is short.
+        legend=dict(orientation="h", yanchor="bottom", y=-0.45),
+        margin=dict(l=60, r=60, t=60, b=110),
         template="plotly_white",
     )
     if secondary:
-        layout["yaxis2"] = dict(title=secondary, overlaying="y", side="right")
+        layout["yaxis2"] = dict(title=secondary, overlaying="y", side="right", rangemode="tozero")
     figure.update_layout(**layout)
     return json.loads(figure.to_json())
 
