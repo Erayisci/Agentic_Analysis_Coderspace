@@ -201,23 +201,35 @@ own install from [nodejs.org](https://nodejs.org) if `npm` is not already on you
 
 **Web search and research mode, without Docker.** Off by default here too, same reason as the
 Docker path below: it's a separate stack (SearXNG + a sandboxed crawler/egress pair) most setups
-won't have running.
+won't have running. `web-tools start` still uses Docker for that one stack (it's containers either
+way — see [`extensions/web_tools/`](extensions/web_tools/README.md)); only this backend and the
+frontend run natively here.
+
+**1. Single-shot web search** (a question that just needs "look this up"):
 
 ```bash
 python extensions/web_tools/web-tools setup    # once: generates a private secret + config
-python extensions/web_tools/web-tools start     # starts SearXNG + crawler/egress, in their own containers
+python extensions/web_tools/web-tools start     # starts SearXNG + crawler/egress
+
+WEB_TOOLS_ENABLED=true uvicorn backend.api.main:app --port 8000
+```
+
+**2. Multi-step "Web araştırması" mode** needs one more thing set **before** `web-tools start`
+(order matters — it picks its build target from this file, and running it again after editing the
+file is what rebuilds it correctly): in `extensions/web_tools/.env`, set `WEB_AGENT_ENABLED=true`
+and `WEB_KLOUDEKS_API_KEY=<your key>` (both off/empty by that project's own safe default), *then*:
+
+```bash
+python extensions/web_tools/web-tools setup    # once, if not already done
+python extensions/web_tools/web-tools start     # reads the .env values you just set
 
 WEB_TOOLS_ENABLED=true WEB_AGENT_ENABLED=true uvicorn backend.api.main:app --port 8000
 ```
 
-`web-tools start` still uses Docker for that one stack (SearXNG and the crawler are containers
-either way — see [`extensions/web_tools/`](extensions/web_tools/README.md)); only this backend and
-the frontend run natively here. Single-shot search ("... internetten araştır") works with
-`WEB_TOOLS_ENABLED=true` alone; the multi-step "Web araştırması" mode also needs
-`WEB_AGENT_ENABLED=true` on this command **and** on the web-tools stack itself
-(`extensions/web_tools/.env`: `WEB_AGENT_ENABLED=true`, `WEB_KLOUDEKS_API_KEY=<your key>`) — two
-separate flags of the same name in two separate places, because the model calls for that mode run
-inside the crawler container, not this backend.
+Two separate `WEB_AGENT_ENABLED` flags in two separate places, on purpose: the research loop's
+model calls run inside the crawler container, through its own client, so both this backend's and
+the web-tools stack's own copy of the flag (and `WEB_KLOUDEKS_API_KEY`, a third, separate Kloudeks
+key from this backend's) need to agree.
 
 ### Docker (no venv, no `npm install`, no `playwright install` on the host)
 
