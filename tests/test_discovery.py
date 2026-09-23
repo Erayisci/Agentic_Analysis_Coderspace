@@ -20,6 +20,45 @@ from backend.eval.run_discovery_eval import load_cases, run
 from backend.tools.lakehouse import discover, discover_concepts
 
 
+def test_structured_basis_and_frequency_reach_each_discovery_clause(monkeypatch):
+    from backend.tools import lakehouse as L
+    calls = []
+    monkeypatch.setattr(L, "discover", lambda query, **kw: calls.append(kw) or {"candidates": []})
+    L.discover_concepts("mevduat faizi ve kredi faizi", requested_basis="flow", frequency="weekly")
+    assert len(calls) == 2
+    assert all(c["rate_basis_constraint"] == "akim" and c["frequency"] == "weekly" for c in calls)
+
+
+def test_discovery_preserves_parenthesized_series_names_and_all_clauses(monkeypatch):
+    from backend.tools import lakehouse as L
+    searched = []
+
+    def record(query, **kwargs):
+        searched.append(query)
+        return {"candidates": []}
+
+    monkeypatch.setattr(L, "discover", record)
+    question = ("EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle; "
+                "konut ve mevduat. enflasyon; işsizlik; üretim; "
+                "TP için TP Mevduat / Katılım Fonları - Yurt İçi Yerleşik "
+                "YP için Döviz Tevdiat Hesabı / Katılım Fonları - Yurt İçi Yerleşik")
+    found = L.discover_concepts(question)
+    assert "Taşıt Kredisi (TL, Stok, %) verisini ekle" in searched
+    assert len(searched) > 6
+    assert any("TP Mevduat / Katılım Fonları - Yurt İçi Yerleşik" in c for c in searched)
+    assert any("Döviz Tevdiat Hesabı / Katılım Fonları - Yurt İçi Yerleşik" in c for c in searched)
+    assert found["concepts"] == searched
+    assert found["n_concepts"] == len(searched)
+
+
+def test_nested_parentheses_do_not_split_conjunctions(monkeypatch):
+    from backend.tools import lakehouse as L
+    searched = []
+    monkeypatch.setattr(L, "discover", lambda query, **kw: searched.append(query) or {"candidates": []})
+    L.discover_concepts("Tüketici (Konut ve Taşıt (TL, Stok, %)) ile enflasyon")
+    assert searched == ["Tüketici (Konut ve Taşıt (TL, Stok, %))", "enflasyon"]
+
+
 @pytest.fixture(scope="module")
 def summary():
     if not DUCKDB_PATH.exists():
@@ -137,3 +176,39 @@ def _report(summary) -> str:
             f"@8={summary['recall@8']:.1%} pool={summary['in_pool']:.1%} "
             f"over {summary['n']} phrasings -- run "
             f"`python -m backend.eval.run_discovery_eval --failures` for the detail")
+
+
+def test_long_mentor_prompt_keeps_trailing_rows_and_maturity_datasets():
+    from backend.eval.run_eval import load_scenarios
+    from backend.agent.pipeline import make_plan
+    from backend.agent.router import route
+    from backend.agent.state import Session
+    if not DUCKDB_PATH.exists():
+        pytest.skip("run python -m backend.lakehouse.build first")
+    question = next(s["question"] for s in load_scenarios() if s["id"] == "mentor_tp_yp_maturity")
+    found = discover_concepts(question, limit=12)
+    assert len(found["concepts"]) > 6
+    assert len(found["by_concept"]) == len(found["concepts"])
+    assert len(found["candidates"]) <= 12
+    expected = {"tp_mevduat_katilim_fonlari_yurt_ici_yerlesik",
+                "doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik"}
+    assert {hits[0][1] for hits in found["by_concept"][-2:]} == expected
+    assert expected <= {c["key"] for c in found["candidates"] if c["dataset"] == "mevduat_vade"}
+    # These named rows are distinct keys, not an unsliced balance fetched twice.
+    plan = make_plan(question, Session(), route(question), None)
+    assert expected <= {s.key for s in plan.steps if s.dataset == "mevduat_vade"}
+
+
+def test_trailing_exact_names_survive_a_full_candidate_budget(monkeypatch):
+    from backend.tools import lakehouse as L
+
+    def fake(query, **kwargs):
+        return {"candidates": [{"source": "bulletin", "dataset": "test", "key": query,
+                                "name": query, "score": 10, "name_match": 100 if query == "explicit" else 0}]}
+
+    monkeypatch.setattr(L, "discover", fake)
+    question = "; ".join([f"concept{i}" for i in range(20)] + ["explicit"])
+    result = L.discover_concepts(question, limit=12)
+    assert result["n_concepts"] == 21 and len(result["by_concept"]) == 21
+    assert result["n_candidates"] == 12
+    assert "explicit" in {c["key"] for c in result["candidates"]}

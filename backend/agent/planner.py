@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Intent = Literal["series_analysis", "followup", "url_analysis", "search", "metadata", "unsupported"]
 Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
              "read_url", "search", "chart", "ingest_source", "ingest_external", "clear_table", "footnotes"]
-Operation = Literal["index_to_base", "deflate", "change", "net_change", "ratio", "in_usd"]
+Operation = Literal["index_to_base", "deflate", "change", "net_change", "sum_columns", "ratio", "in_usd"]
 Method = Literal["anomaly", "changepoint", "causality", "decompose"]
 Kind = Literal["auto", "level", "trend", "volatility"]          # changepoint: what kind of change
 Sensitivity = Literal["low", "medium", "high"]                  # changepoint: how eager to cut
@@ -83,7 +83,7 @@ class Step(BaseModel):
     column: Optional[str] = Field(None, description="column in the current table to operate on")
     other_column: Optional[str] = Field(None, description="deflator (deflate) or denominator (ratio)")
     base_period: Optional[str] = Field(None, description="YYYY-MM-DD base for indexing or deflating")
-    periods: Optional[int] = Field(None, description="lag for change: 1 = MoM, 12 = YoY")
+    periods: Optional[int] = Field(None, description="lag for change or net_change: default 1, 12 = YoY")
 
     # analyze / find_periods
     method: Optional[Method] = None
@@ -115,14 +115,21 @@ class Step(BaseModel):
     unit: Optional[str] = Field(None, description="the external column's unit, if it is stated near it")
 
     # chart
-    columns: Optional[List[str]] = Field(None, description="columns to plot; omit for all")
+    columns: Optional[List[str]] = Field(None, description="chart columns (omit for all), or sum_columns inputs")
     title: Optional[str] = None
 
     @model_validator(mode="after")
     def _has_required_fields(self) -> "Step":
-        missing = [field for field in REQUIRED[self.op] if getattr(self, field, None) in (None, "")]
+        required = (("operation", "columns") if self.op == "transform" and self.operation == "sum_columns"
+                    else REQUIRED[self.op])
+        missing = [field for field in required if getattr(self, field, None) in (None, "", [])]
         if missing:
             raise ValueError(f"step op={self.op!r} is missing required field(s): {missing}")
+        if self.op == "transform" and self.operation == "sum_columns":
+            if len(self.columns) < 2 or len(set(self.columns)) != len(self.columns):
+                raise ValueError("sum_columns needs at least two distinct columns")
+        if self.operation == "net_change" and self.periods is not None and self.periods < 1:
+            raise ValueError("net_change periods must be positive")
         return self
 
     def arguments(self) -> dict:
@@ -232,10 +239,16 @@ Adimlar:
   adi (orn. "İSTANBUL") verilirse sadece o ile filtrelenir. Kullanici bir il/sehir adi
   soylediyse province'i MUTLAKA doldur; soylemediyse finturk yerine aylik bulletin serisini sec.
 - transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
-  change (periods=1 aylik, 12 yillik -- YUZDE doner), net_change (change ile ayni periods mantigi
-  ama SERININ KENDI BIRIMINDE mutlak fark doner, orn. milyon TL -- "sadece o ayin degisimini goster,
-  yuzde/stok degil" gibi bir istekte bunu kullan, change'i degil), ratio (other_column=payda),
-  in_usd (TL tutari dolar bazina cevir, other_column=USD/TRY kuru).
+  change (YUZDE degisim; periods=1 aylik, 12 yillik),
+  net_change (stok TUTARIN mutlak net degisimi: cari - onceki; periods varsayilan 1;
+  ayni para birimi korunur, yeni kredi/mevduat girisi veya brut akis DEGILDIR),
+  sum_columns (columns=[a,b,...]: ayni birim/zaman anlami/yayin sikligindaki AYRI tutar
+  sutunlarini topla; toplam ile alt kalemlerini birlikte toplama; eksik girdi eksik sonuc),
+  ratio (other_column=payda), in_usd (TL tutari dolar bazina cevir, other_column=USD/TRY kuru).
+  Vade gruplari icin adaylarin metrics alanindaki ayri kovalarini metric= ile fetch et,
+  sonra sum_columns uygula. Vadesiz, vadeli kovalarindan ayridir; vadesiz dahilse acikca belirt.
+  Stoktan ayin net degisimi istenirse net_change kullan; change yuzdedir. Stoktan brut
+  giris/akis elde edilemez. Onceki donem yoksa ilk net degisim eksiktir, sifir uretme.
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: method + column (+against). Hangi method:
   anomaly     "anomali/aykiri/olagandisi hareket"       -> tek seri; column=ana seri.
@@ -282,9 +295,10 @@ Kurallar:
    "YP mevduat" / "TL krediler" gibi para birimi dilimleri AYRI BIR KEY DEGILDIR: ayni key'i
    currency="FX" veya "TL" ile fetch et (aday satirindaki currency= degerini aynen kopyala).
 6. Sutun adini as_name ile ver (kisa, tek kelime). Bir adimin kullanmadigi alanlari YAZMA:
-   fetch_series icin sadece key, source, dataset, as_name; transform icin operation, column
-   (+other_column/periods/base_period), as_name; find_periods icin column, direction, against,
-   against_direction; analyze icin method, column (+against). unit/columns/title/window yazma
+   fetch_series icin key, source, dataset, as_name (+currency/metric/province); transform icin operation,
+   column (+other_column/periods/base_period), as_name; sum_columns icin column yerine columns;
+   find_periods icin column, direction, against, against_direction; analyze icin method, column (+against).
+   unit/title/window yazma
    (title sadece chart icin). KISA yaz: fazla alan = yavas cevap.
 7. Kullanici disaridan bir dosya/URL'deki veriyi mevcut tabloyla KARSILASTIRMAK veya
    BIRLESTIRMEK istiyorsa "YENI YUKLENEN KAYNAKLAR" listesindeki seriyi fetch_series

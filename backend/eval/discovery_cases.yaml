@@ -19,6 +19,19 @@
 # neighbour with a confident tone -- which is what the system does today.
 
 cases:
+  - family: tasit_kredisi_stok_faizi
+    expect: TP.BKR.TRY.17
+    phrasings:
+      - Taşıt Kredisi (TL, Stok, %)
+      - EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle
+      - Taşıt Kredisi (TL, Stok, %) faiz oranı
+
+  - family: tasit_kredisi_akim_faizi
+    expect: TP.KTF11
+    phrasings:
+      - Taşıt Kredisi (TL, Akım, %)
+      - EVDS Taşıt Kredisi (TL, Akım, %) faiz oranı
+
   - family: konut_kredisi_stok
     expect: tuketici_kredileri_konut
     phrasings:

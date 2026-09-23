@@ -31,12 +31,23 @@ def verify(session: Session) -> Dict[str, Any]:
     # series the previous question fetched is not a caveat this answer should
     # carry. `Session.focus` decided which ones those are.
     artifact = session.view()
+    evidence = session.evidence_view()
 
     def record(name: str, passed: bool, detail: str, severity: str = "error") -> None:
         checks.append({"check": name, "passed": bool(passed), "detail": detail,
                        "severity": severity if not passed else "info"})
 
     failed_steps = [a for a in session.audit if not a.ok]
+    limitations = session.facts.get("semantic_limitations") or []
+    if limitations:
+        record("requested_output_supported", False, "; ".join(limitations))
+    source_limits = session.facts.get("source_limitations") or []
+    if source_limits:
+        record("requested_sources_satisfied", False, "; ".join(source_limits))
+    role_ids = list((session.facts.get("currency_role_identities") or {}).values())
+    if len(role_ids) > 1:
+        record("currency_roles_are_distinct", len(set(role_ids)) == len(role_ids),
+               "currency role identities must refer to different published series")
     record("all_steps_ran", not failed_steps,
            "; ".join(f"{a.op}: {a.detail}" for a in failed_steps) or "every step completed",
            severity="warning")
@@ -93,14 +104,14 @@ def verify(session: Session) -> Dict[str, Any]:
     record("every_column_has_a_unit", not unlabelled,
            f"columns without a unit: {unlabelled}" if unlabelled else "all columns carry a unit")
 
-    uncited = [c for c, line in artifact.lineage.items()
+    uncited = [c for c, line in evidence.lineage.items()
                if not line.citation and line.source != "derived"]
     record("every_fetched_column_is_cited", not uncited,
            f"uncited: {uncited}" if uncited else "every fetched column has provenance")
 
     # A derived column whose parents are gone is a number nobody can explain.
-    orphans = [c for c, line in artifact.lineage.items()
-               if line.derived_from and any(p not in artifact.frame.columns for p in line.derived_from)]
+    orphans = [c for c, line in evidence.lineage.items()
+               if line.derived_from and any(p not in evidence.frame.columns for p in line.derived_from)]
     record("derived_columns_keep_their_inputs", not orphans,
            f"derived columns whose inputs were dropped: {orphans}" if orphans else "lineage intact")
 
@@ -150,12 +161,12 @@ def verify(session: Session) -> Dict[str, Any]:
     # observations that were never measured over the same period -- and it
     # returns a confident, plausible, meaningless number.
     cross_grain = {}
-    for column, line in artifact.lineage.items():
-        if column not in artifact.frame.columns or not line.derived_from:
+    for column, line in evidence.lineage.items():
+        if not line.derived_from:
             continue
-        grains = {artifact.lineage[parent].grain
+        grains = {evidence.lineage[parent].grain
                   for parent in line.derived_from
-                  if parent in artifact.lineage and artifact.lineage[parent].grain}
+                  if parent in evidence.lineage and evidence.lineage[parent].grain}
         if len(grains) > 1:
             cross_grain[column] = sorted(grains)
     record("derived_columns_share_one_grain", not cross_grain,
@@ -244,7 +255,7 @@ def source_map(session: Session) -> Dict[str, Dict[str, Any]]:
     wrote. Each entry carries `label` (what the composer sees), `detail` (what
     the reader is shown) and, for a lakehouse series, `sql` to re-run.
     """
-    artifact = session.view()
+    artifact = session.evidence_view()
     sources: Dict[str, Dict[str, Any]] = {}
     tag_of_column: Dict[str, str] = {}
     counters = {"K": 0, "H": 0, "U": 0}
@@ -428,10 +439,36 @@ def quotable_numbers(session: Session) -> Dict[str, Any]:
             entry["kaynak"] = tag_of_column[name]
         series[name] = entry
     allowed: Dict[str, Any] = {"series": series}
+    sums = {name: {"operation": "sum_columns", "inputs": [
+        {"column": p, "label": session.artifact.lineage[p].label,
+         "metric": session.artifact.lineage[p].citation.get("filters", {}).get("metric")}
+        for p in line.derived_from if p in session.artifact.lineage]}
+        for name, line in session.evidence_view().lineage.items()
+        if (line.transform or "").startswith("sum_columns(")}
+    if sums:
+        allowed["group_definitions"] = sums
+    raw = [(name, line) for name, line in artifact.lineage.items() if line.source != "derived"]
+    if len(raw) == 2 and {line.temporal_semantics for _, line in raw} == {"stock", "flow"}:
+        paired = artifact.frame[[name for name, _ in raw]].dropna()
+        if len(paired) >= 2:
+            changes = paired.iloc[-1] - paired.iloc[0]
+            product = changes.iloc[0] * changes.iloc[1]
+            movement = "zıt yönlerde" if product < 0 else "aynı yönde" if product > 0 else "en az biri değişmeden"
+            labels = "; ".join(f"{name}: " + ("dönem sonu stok (bakiye)" if line.temporal_semantics == "stock"
+                                               else "dönem içi işlem miktarı (akım)") for name, line in raw)
+            allowed["movement_comparison"] = (
+                f"{labels}. Ortak pencerenin ilk ve son gözlemi arasında {movement} hareket ettiler. "
+                "Bu karşılaştırma nedensellik göstermez.")
+    if session.facts.get("semantic_limitations"):
+        allowed["semantic_limitations"] = session.facts["semantic_limitations"]
     valuation = [line for line in artifact.lineage.values()
                  if (line.transform or "").startswith("in_usd(")]
     if valuation:
         allowed["notlar"] = [VALUATION_NOTE]
+    if any(line.temporal_semantics == "net_change" for line in artifact.lineage.values()):
+        allowed.setdefault("notlar", []).append(
+            "Seriler net bakiye değişimidir; brüt giriş veya yeni mevduat değildir. "
+            "Önceki ayın bakiyesi yoksa net değişim eksik bırakılır.")
     if session.facts.get("find_periods"):
         allowed["find_periods"] = session.facts["find_periods"]
     chart = session.facts.get("chart") or {}

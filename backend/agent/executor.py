@@ -19,8 +19,11 @@ message and execution continues, so one bad step costs a column rather than
 the whole question -- the demo-day failure mode that matters most.
 """
 import re
+import logging
 import time
 from typing import Any, Dict, FrozenSet, List, Optional
+
+import pandas as pd
 
 from ..core.labels import slugify
 from ..tools import transforms as T
@@ -218,10 +221,21 @@ class Executor:
 
     def run(self, plan: Plan) -> Session:
         session = self.session
+        # Difference only AFTER fetching the lag history, including inputs of
+        # sums. The displayed plan/window stays unchanged. If the archive has
+        # no preceding month, net_change correctly retains a missing value.
+        lag = max((s.periods or 1 for s in plan.steps if s.op == "transform"
+                   and s.operation in ("net_change", "change")), default=0)
+        fetch_plan = plan
+        if lag and plan.start:
+            fetch_plan = plan.model_copy(update={
+                "start": (pd.Timestamp(plan.start) - pd.DateOffset(months=lag)).strftime("%Y-%m-%d")})
         for index, step in enumerate(plan.steps, start=1):
             started = time.perf_counter()
             try:
-                detail = self._dispatch(step, plan)
+                if step.op == "chart" and lag:
+                    T.window(session.artifact, plan.start, plan.end)
+                detail = self._dispatch(step, fetch_plan if step.op == "fetch_series" else plan)
                 ok = True
             except Exception as exc:                                  # noqa: BLE001
                 # Deliberately broad: a tool raising anything must cost one step,
@@ -305,6 +319,9 @@ class Executor:
             f"{c['source']}:{c['key']}" for c in top) if top else "no candidates"
 
     def _fetch(self, step: Step, plan: Plan) -> str:
+        logging.getLogger("kkb.agent").info(
+            "fetch_series source=%s dataset=%s key=%s metric=%s currency=%s as_name=%s",
+            step.source, step.dataset, step.key, step.metric, step.currency, step.as_name)
         key = _normalise_key(step.key)
         default_source = "macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin"
         # Treat the model's own source/dataset/filter fields as hints, not a
@@ -319,6 +336,8 @@ class Executor:
                                   metric=step.metric, start=plan.start, end=plan.end,
                                   province=step.province)
         except (ValueError, KeyError) as exc:
+            if source == "external":
+                raise ValueError(f"Requested external series unavailable: {key}; no local substitution") from exc
             # A key the model invented is the most common plan defect -- it wrote
             # TP.TUFE where the corpus publishes TP.GENENDEKS.T1. Discovery already
             # knows the real key, so resolve it here rather than losing the column.
@@ -397,6 +416,8 @@ class Executor:
         # Three slices of one line share a name; the label says which slice
         # this is, or the composer cannot tell the FX column from the TL one.
         label = series.name + {"FX": " (YP)", "TL": " (TL)"}.get(currency or "", "")
+        if series.metric and series.metric not in ("balance", "toplam"):
+            label += f" [{series.metric}]"
         self.session.artifact.add_column(name, values, ColumnLineage(
             transform=transform,
             column=name, label=label, source=series.source, unit=series.unit,
@@ -413,7 +434,7 @@ class Executor:
 
     def _transform(self, step: Step, plan: Plan) -> str:
         artifact = self.session.artifact
-        column = self._resolve_column(step.column)
+        column = self._resolve_column(step.column) if step.operation != "sum_columns" else None
         if step.operation == "index_to_base":
             name = T.index_to_base(artifact, column, step.base_period or plan.start, step.as_name)
         elif step.operation == "deflate":
@@ -422,7 +443,10 @@ class Executor:
         elif step.operation == "change":
             name = T.change(artifact, column, step.periods or 1, step.as_name)
         elif step.operation == "net_change":
-            name = T.net_change(artifact, column, step.periods or 1, step.as_name)
+            name = T.net_change(artifact, column, step.periods if step.periods is not None else 1, step.as_name)
+        elif step.operation == "sum_columns":
+            columns = [self._resolve_column(c) for c in step.columns]
+            name = T.sum_columns(artifact, columns, step.as_name)
         elif step.operation == "ratio":
             denominator = self._resolve_column(step.other_column, required="ratio needs other_column")
             name = T.ratio(artifact, column, denominator, step.as_name)
@@ -432,6 +456,7 @@ class Executor:
         else:
             raise ValueError(f"unknown transform {step.operation!r}")
         self.session.touch_column(name)
+        step.title = artifact.lineage[name].label
         return f"{name} = {artifact.lineage[name].transform}"
 
     def _full_history(self, column: str):
@@ -724,6 +749,7 @@ class Executor:
         self.session.turn_cited = []
         self.session.turn_columns = []
         self.session.visible_columns = []
+        self.session.hidden_inputs = []
         return f"cleared {n_columns} column(s); table is now empty"
 
     # -- helpers -----------------------------------------------------------
@@ -738,6 +764,8 @@ class Executor:
         if name is None:
             raise ValueError(required or "this step needs a column")
         columns = self.session.artifact.column_names()
+        if self.session.facts.get("is_followup") is False:
+            columns = [c for c in columns if c in self.session.turn_columns]
         found = match_column(name, columns)
         if found is None:
             raise ValueError(f"column {name!r} is not in the table; have {columns}")

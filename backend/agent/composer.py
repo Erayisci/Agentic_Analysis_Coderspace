@@ -19,6 +19,9 @@ from .state import Session
 from .verifier import VALUATION_NOTE, attach_sources, quotable_numbers, source_map, unsupported_numbers
 
 COMPOSER_SYSTEM = """Sen bir finansal analistsin. Turkce, net ve profesyonel yaziyorsun.
+Vade gruplarinin kapsami yalniz facts.group_definitions inputs listesidir.
+Bu listede olmayan bir kalemi (ornegin vadesiz) gruba dahil diye anlatma.
+Kaynak satir adi ayni olsa da metric alanlari farkli vade kovalaridir.
 
 KESIN KURALLAR:
 1. SADECE sana verilen "facts" icindeki sayilari, ORADA YAZILDIGI METIN HALIYLE kullan
@@ -76,7 +79,9 @@ def compose(session: Session, question: str, client: Optional[KloudeksClient] = 
     verification = session.facts.get("verification", {})
     caveats: List[str] = verification.get("caveats", [])
 
-    if client is None:
+    # Group membership is an executed arithmetic fact. Render grouped answers
+    # from lineage so a model cannot add an unexecuted bucket in its prose.
+    if client is None or facts.get("group_definitions") or facts.get("movement_comparison"):
         return {"summary": attach_sources(deterministic_summary(session, question), sources),
                 "composed_by": "template", "unsupported_numbers": [], "caveats": caveats,
                 "sources": list(sources.values())}
@@ -124,6 +129,8 @@ def deterministic_summary(session: Session, question: str) -> str:
     """
     artifact = session.view()
     if artifact.is_empty():
+        if session.facts.get("semantic_limitations"):
+            return " ".join(session.facts["semantic_limitations"])
         if any(a.op == "clear_table" and a.ok for a in session.audit) and session.artifact.is_empty():
             return "Tablo temizlendi. Yeni bir soru sorabilirsiniz."
         failures = "; ".join(a.detail for a in session.audit if not a.ok)
@@ -145,6 +152,12 @@ def deterministic_summary(session: Session, question: str) -> str:
             f"{', degisim ' + change if change else ''}{tag}")
     if any((line.transform or "").startswith("in_usd(") for line in artifact.lineage.values()):
         lines += ["", "Not: " + VALUATION_NOTE]
+    if any(line.temporal_semantics == "net_change" for line in artifact.lineage.values()):
+        lines += ["", "Seriler net bakiye değişimidir; brüt giriş veya yeni mevduat değildir. "
+                  "Önceki ayın bakiyesi yoksa net değişim eksik bırakılır."]
+    movement = quotable_numbers(session).get("movement_comparison")
+    if movement:
+        lines += ["", movement]
 
     for found in session.facts.get("find_periods", []):
         months = ", ".join(p["period"] for p in found["periods"][:8])

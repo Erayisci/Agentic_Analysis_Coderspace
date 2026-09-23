@@ -13,6 +13,7 @@ import pytest
 from backend.agent.executor import Executor, _normalise_key
 from backend.agent.planner import Plan, Step, template_plan
 from backend.agent.router import extract_window, route
+from backend.agent.semantics import QuerySemantics, SemanticInterpretation
 from backend.agent.state import AnalysisArtifact, ColumnLineage, Session
 from backend.agent.verifier import unsupported_numbers, verify
 from backend.core.config import DUCKDB_PATH
@@ -104,6 +105,92 @@ def test_change_is_refused_on_a_cumulative_series():
         T.change(artifact, "ytd")
 
 
+def test_net_change_is_absolute_and_change_remains_percentage():
+    artifact = synthetic("stock", n=3)
+    artifact.frame["stock"] = [100.0, 120.0, 115.0]
+    artifact.lineage["stock"].grain = "monthly"
+    name = T.net_change(artifact, "stock")
+    assert pd.isna(artifact.frame[name].iloc[0])
+    assert artifact.frame[name].iloc[1:].tolist() == [20.0, -5.0]
+    line = artifact.lineage[name]
+    assert line.unit == "milyon TL" and line.grain == "monthly"
+    assert line.temporal_semantics == "net_change"
+    assert line.transform == "net_change(stock, periods=1)"
+    assert line.derived_from == ["stock"] and line.citation == artifact.lineage["stock"].citation
+    pct = T.change(artifact, "stock")
+    assert pd.isna(artifact.frame[pct].iloc[0])
+    assert artifact.frame[pct].iloc[1:].tolist() == pytest.approx([20, -100 * 5 / 120])
+    assert artifact.lineage[pct].unit == "%"
+    lagged = T.net_change(artifact, "stock", periods=2)
+    assert artifact.frame[lagged].iloc[:2].isna().all()
+    assert artifact.frame[lagged].iloc[-1] == 15
+
+
+@pytest.mark.parametrize("unit,semantics", [("%", "rate"), ("endeks", "index"), ("%", "stock"),
+                                           ("milyon TL", "cumulative_ytd"), ("milyon TL", "flow")])
+def test_net_change_refuses_non_stock_amounts(unit, semantics):
+    with pytest.raises(ValueError, match="requires a stock amount"):
+        T.net_change(synthetic(unit=unit, semantics=semantics), "x")
+
+
+@pytest.mark.parametrize("periods", [0, -1, 1.5, True])
+def test_net_change_requires_positive_integral_lag(periods):
+    with pytest.raises(ValueError, match="positive integer"):
+        T.net_change(synthetic(), "x", periods=periods)
+
+
+def test_sum_columns_preserves_units_lineage_and_missing_inputs():
+    artifact = synthetic("a", n=3)
+    artifact.add_column("b", pd.Series([20.0, float("nan"), 40.0], index=artifact.frame.index),
+                        ColumnLineage(column="b", label="B", source="bulletin", unit="milyon TL",
+                                      temporal_semantics="stock"))
+    name = T.sum_columns(artifact, ["a", "b"], "group")
+    assert artifact.frame[name].iloc[[0, 2]].tolist() == [120, 150]
+    assert pd.isna(artifact.frame[name].iloc[1])
+    assert artifact.lineage[name].derived_from == ["a", "b"]
+    assert artifact.lineage[name].unit == "milyon TL"
+    assert artifact.lineage[name].transform == "sum_columns(a, b)"
+
+
+@pytest.mark.parametrize("field,value,message", [("unit", "bin TL", "units differ"),
+                                                ("grain", "weekly", "different grains"),
+                                                ("temporal_semantics", "rate", "additive amounts")])
+def test_sum_columns_rejects_incompatible_inputs(field, value, message):
+    artifact = synthetic("a")
+    line = ColumnLineage(column="b", label="B", source="bulletin", unit="milyon TL",
+                         temporal_semantics="stock")
+    setattr(line, field, value)
+    artifact.add_column("b", artifact.frame["a"], line)
+    with pytest.raises(ValueError, match=message):
+        T.sum_columns(artifact, ["a", "b"])
+
+
+def test_sum_columns_does_not_double_count_a_repeated_input():
+    with pytest.raises(ValueError, match="distinct columns"):
+        T.sum_columns(synthetic("a"), ["a", "a"])
+
+
+def test_new_transforms_execute_through_the_dsl():
+    session = Session(artifact=synthetic("a", n=3))
+    session.artifact.add_column("b", session.artifact.frame["a"] * 2, ColumnLineage(
+        column="b", label="B", source="bulletin", unit="milyon TL", temporal_semantics="stock"))
+    Executor(session).run(Plan(intent="followup", steps=[
+        Step(op="transform", operation="sum_columns", columns=["a", "b"], as_name="combined"),
+        Step(op="transform", operation="net_change", column="combined", as_name="delta")]))
+    assert all(step.ok for step in session.audit)
+    assert session.artifact.frame.delta.iloc[1:].tolist() == [15.0, 15.0]
+    assert session.artifact.lineage["delta"].derived_from == ["combined"]
+
+
+def test_new_transform_arguments_are_validated():
+    with pytest.raises(ValueError, match="required"):
+        Step(op="transform", operation="sum_columns")
+    with pytest.raises(ValueError, match="distinct"):
+        Step(op="transform", operation="sum_columns", columns=["x", "x"])
+    with pytest.raises(ValueError, match="positive"):
+        Step(op="transform", operation="net_change", column="x", periods=0)
+
+
 def test_find_periods_answers_the_coincidence_question_arithmetically():
     """Turn 1 asks whether the rate fell in months the loan book did not grow."""
     index = pd.date_range("2021-01-01", periods=5, freq="MS")
@@ -146,6 +233,35 @@ def test_three_units_in_one_chart_is_refused():
 ])
 def test_window_extraction(question, expected):
     assert extract_window(question) == expected
+
+
+@pytest.mark.parametrize("months", range(1, 13))
+@pytest.mark.parametrize("phrase", ["2026 yılı ilk {n} ay", "2026'nın ilk {n} ayı",
+                                   "2026 ilk {n} ay", "2026’nın ilk {n} ayı"])
+def test_first_n_months_are_an_exact_window(months, phrase):
+    assert extract_window(phrase.format(n=months)) == ("2026-01-01", f"2026-{months:02d}-01")
+
+
+def test_compact_month_range_in_mentor_prompt():
+    assert extract_window("202101–202512 döneminde") == ("2021-01-01", "2025-12-01")
+
+
+@pytest.mark.parametrize("question", [
+    "Taşıt kredisi tutarlarına faiz oranlarını ekle. Veri setine aynı aylara denk gelecek şekilde "
+    "EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle.",
+    "bu veriyi incele", "bu 2 veriyi karşılaştır", "bu iki veriyi karşılaştır",
+    "aynı aylara hizala", "aynı dönem için faizleri getir", "aynı tarih ekseninde göster",
+    "Veri setine enflasyonu ekle", "sonuca enflasyonu ekle", "Faiz oranlarını ekle",
+])
+def test_dataset_followups_still_require_an_artifact(question):
+    assert route(question, has_artifact=True).is_followup
+    assert not route(question, has_artifact=False).is_followup
+
+
+@pytest.mark.parametrize("question", ["2024 mevduat verilerini göster", "Konut kredilerini incele",
+                                      "Yeni bir veri seti oluştur", "Alışveriş listesine elma ekle"])
+def test_fresh_questions_are_not_dataset_followups(question):
+    assert not route(question, has_artifact=True).is_followup
 
 
 def test_a_url_in_the_prompt_routes_to_the_url_tool_without_a_model():
@@ -838,7 +954,7 @@ def test_a_turn_reports_stage_timings_and_withholds_an_unrequested_figure():
     from backend.agent.pipeline import Agent
     agent = Agent()
     result = agent.ask("2021-2025 arasinda konut kredileri nasil degisti?", session_id="t")
-    assert set(result["timings"]) == {"route", "plan", "execute", "verify", "compose", "total"}
+    assert set(result["timings"]) == {"route", "semantic", "plan", "execute", "verify", "compose", "total"}
     assert result["presentation"] == {"table": False, "chart": False}
     assert result["figure"] is None
     assert result["session"].facts["presentation"] == {"tablo": False, "grafik": False}
@@ -1285,8 +1401,9 @@ def test_tl_deposit_rates_are_not_demoted_as_provinces():
 
 
 def _discovery(*candidates, by_concept=None):
+    from backend.tools.lakehouse import concept_identity
     return {"candidates": list(candidates),
-            "by_concept": by_concept or [[(c["source"], c["key"], c.get("currency"))] for c in candidates]}
+            "by_concept": by_concept or [[concept_identity(c)] for c in candidates]}
 
 
 def test_apply_dimensions_splits_an_unsliced_fetch_into_the_slices_the_question_named():
@@ -2339,3 +2456,270 @@ def test_a_url_in_the_question_lands_in_the_lakehouse_and_reaches_the_table(monk
         assert again["landed_sources"][0]["cache_hit"] is True
     finally:
         store.remove_source(source_id)
+
+
+def _mentor_scenario(scenario_id):
+    from backend.eval.run_eval import load_scenarios
+    return next(s for s in load_scenarios() if s["id"] == scenario_id)
+
+
+def test_mentor_vehicle_conversation_keeps_exactly_six_months_and_the_original_amounts():
+    from backend.agent.pipeline import run_turn
+    needs_lakehouse()
+    # July exists: a six-row result must be a real window, not the source edge.
+    raw = load_series("tuketici_kredileri_tasit", dataset="tuketici_kredileri", start="2026-01-01")
+    assert raw.values.index.max() >= pd.Timestamp("2026-07-01")
+    session = Session()
+    first = run_turn(_mentor_scenario("mentor_vehicle_first_six_months")["question"], session,
+                     client=None, compose_answer=False)
+    before = session.view().frame.copy()
+    assert len(first["table"]["rows"]) == 6
+    assert before.index.tolist() == pd.date_range("2026-01-01", "2026-06-01", freq="MS").tolist()
+    second = run_turn(_mentor_scenario("mentor_vehicle_stock_rate_followup")["question"], session,
+                      client=None, compose_answer=False)
+    assert second["route"]["is_followup"]
+    assert len(second["table"]["rows"]) == 6
+    assert second["plan"]["start"] == "2026-01-01" and second["plan"]["end"] == "2026-06-01"
+    pd.testing.assert_frame_equal(session.view().frame[before.columns], before)
+    keys = {line.key for line in session.view().lineage.values()}
+    assert keys == {"tuketici_kredileri_tasit", "TP.BKR.TRY.17"}
+    assert all(step.ok for step in session.audit)
+
+
+def test_router_window_overrides_conflicting_model_dates_and_followup_inherits_window():
+    from backend.agent.pipeline import make_plan
+    needs_lakehouse()
+    session = Session()
+    question = "2026'nın ilk 6 ayı taşıt kredileri"
+    model_plan = Plan(intent="series_analysis", start="2026-01-01", end="2026-12-01", steps=[
+        Step(op="fetch_series", source="bulletin", dataset="tuketici_kredileri", key="tuketici_kredileri_tasit")])
+    plan = make_plan(question, session, route(question), _StubPlanClient(model_plan))
+    assert (plan.start, plan.end) == ("2026-01-01", "2026-06-01")
+    Executor(session).run(plan)
+    question = "Bu veriye faiz oranlarını ekle"
+    model_plan = Plan(intent="followup", start="2021-01-01", end="2026-12-01", steps=[
+        Step(op="fetch_series", key="TP.BKR.TRY.17", source="macro")])
+    plan = make_plan(question, session, route(question, has_artifact=True), _StubPlanClient(model_plan))
+    assert (plan.start, plan.end) == ("2026-01-01", "2026-06-01")
+
+
+def test_tp_and_yp_currency_fetches_have_distinct_values_and_filters():
+    from backend.agent.pipeline import apply_dimensions
+    needs_lakehouse()
+    found = discover_concepts("BDDK Aylık Bülten TP mevduat ve YP mevduat", limit=12)
+    plan = apply_dimensions(Plan(intent="series_analysis", start="2021-01-01", end="2025-12-01", steps=[
+        Step(op="fetch_series", key="mevduat_katilim_fonu", dataset="bilanco", source="bulletin",
+             currency="total", as_name="deposit")]), found)
+    session = Executor(Session()).run(plan)
+    slices = {line.citation["filters"].get("currency"): name for name, line in session.artifact.lineage.items()
+              if line.key == "mevduat_katilim_fonu"}
+    assert set(slices) == {"TL", "FX"}
+    assert len(session.artifact.frame) == 60
+    assert not session.artifact.frame[slices["TL"]].equals(session.artifact.frame[slices["FX"]])
+    for currency, name in slices.items():
+        gold = load_series("mevduat_katilim_fonu", dataset="bilanco", currency=currency,
+                           start="2021-01-01", end="2025-12-01")
+        assert session.artifact.frame[name].tolist() == gold.values.tolist()
+
+
+def test_mentor_maturity_rows_and_net_changes_execute_with_published_metrics():
+    from backend.agent.pipeline import build_context, make_plan
+    needs_lakehouse()
+    question = _mentor_scenario("mentor_tp_yp_maturity")["question"]
+    found = discover_concepts(question, limit=12)
+    selected = {c["key"]: c for c in reversed(found["candidates"])
+                if c.get("name_match") and c["dataset"] == "mevduat_vade"}
+    tp = selected["tp_mevduat_katilim_fonlari_yurt_ici_yerlesik"]
+    yp = selected["doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik"]
+    session = Session()
+    context = build_context(question, session, route(question), discovery=found)
+    assert "bir_ay_uc_ay" in context and "alti_ay_bir_yil" in context
+    metrics = ["bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
+    assert set(metrics) <= set(tp["metrics"].split(","))
+    steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=c["key"],
+                  metric="toplam", as_name=name) for c, name in [(tp, "tp"), (yp, "yp")]]
+    steps += [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=tp["key"],
+                   metric=metric, as_name=metric) for metric in metrics]
+    steps += [Step(op="transform", operation="sum_columns", columns=metrics[:2], as_name="short_term"),
+              Step(op="transform", operation="sum_columns", columns=metrics[2:], as_name="long_term")]
+    steps += [Step(op="transform", operation="net_change", column=name, as_name=name + "_net")
+              for name in ["tp", "yp", "short_term", "long_term"]]
+    plan = make_plan(question, session, route(question),
+                     _StubPlanClient(Plan(intent="series_analysis", steps=steps)))
+    Executor(session).run(plan)
+    assert all(step.ok for step in session.audit), session.audit
+    frame = session.artifact.frame
+    assert len(frame) == 60 and frame.index.min() == pd.Timestamp("2021-01-01")
+    assert frame.index.max() == pd.Timestamp("2025-12-01")
+    assert not frame.tp.equals(frame.yp)
+    with duckdb.connect(str(DUCKDB_PATH), read_only=True) as con:
+        # Independent SQL proves the generic sum selected source buckets,
+        # excluding both the published total and demand deposits.
+        gold = con.execute("SELECT period, sum(value) AS value FROM bulletin_observations "
+                           "WHERE dataset='mevduat_vade' AND entity_key=? "
+                           "AND metric IN ('bir_aya_kadar','bir_ay_uc_ay') "
+                           "AND period BETWEEN '2021-01-01' AND '2025-12-01' GROUP BY period ORDER BY period",
+                           [tp["key"]]).df()
+    assert frame.short_term.tolist() == gold.value.tolist()
+    for name in ["tp", "yp", "short_term", "long_term"]:
+        pd.testing.assert_series_equal(frame[name + "_net"], frame[name].diff(), check_names=False)
+        assert session.artifact.lineage[name + "_net"].unit == "milyon TL"
+
+
+def _mentor_plan_without_net_change():
+    tp = "tp_mevduat_katilim_fonlari_yurt_ici_yerlesik"
+    yp = "doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik"
+    metrics = ["bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
+    steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=key,
+                  metric="toplam", as_name=name) for key, name in [(tp, "tp"), (yp, "yp")]]
+    steps += [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=tp,
+                   metric=metric, as_name=metric) for metric in metrics]
+    steps += [Step(op="transform", operation="sum_columns", columns=metrics[:2], as_name="short_term"),
+              Step(op="transform", operation="sum_columns", columns=metrics[2:], as_name="long_term")]
+    return Plan(intent="series_analysis", steps=steps)
+
+
+class _OmittingNetChangeClient(_StubPlanClient):
+    def structured(self, messages, schema, **kwargs):
+        if schema is Plan:
+            return self._plan.model_copy(deep=True)
+        if schema is SemanticInterpretation:
+            return SemanticInterpretation(output_requirement="Period balance movements",
+                semantics=QuerySemantics(requested_output="absolute_change", frequency="monthly",
+                                         currencies=["TL", "FX"]).model_dump())
+        return schema(intent="series_analysis", reason="test classifier")
+
+
+@pytest.mark.parametrize("start", ["2021-01-01", "2022-01-01"])
+def test_live_mentor_omission_is_repaired_and_only_four_net_outputs_are_visible(start):
+    from backend.agent.pipeline import run_turn
+    from backend.agent.verifier import source_map, quotable_numbers
+    needs_lakehouse()
+    question = _mentor_scenario("mentor_tp_yp_maturity")["question"]
+    if start == "2022-01-01":
+        question = question.replace("202101", "202201")
+    question += " Grafik olarak da göster."
+    model_plan = _mentor_plan_without_net_change()
+    assert not any(s.operation == "net_change" for s in model_plan.steps)
+    session = Session()
+    result = run_turn(question, session, client=_OmittingNetChangeClient(model_plan), compose_answer=False)
+    repairs = [s for s in result["plan"]["steps"] if s.get("operation") == "net_change"]
+    assert {s["column"] for s in repairs} == {"tp", "yp", "short_term", "long_term"}
+    outputs = [s["as_name"] for s in repairs]
+    assert result["table"]["columns"] == outputs
+    assert len(result["table"]["rows"]) == (60 if start == "2021-01-01" else 48)
+    assert result["table"]["rows"][0]["period"] == start
+    assert result["table"]["rows"][-1]["period"] == "2025-12-01"
+    assert all(session.view().lineage[c].temporal_semantics == "net_change" for c in outputs)
+    assert all(session.view().lineage[c].unit == "milyon TL" for c in outputs)
+    assert "bir_aya_kadar" in session.artifact.frame and "bir_aya_kadar" not in outputs
+    assert result["verification"]["passed"], result["verification"]
+    assert all(s["ok"] for s in result["audit"]), result["audit"]
+    assert len(result["figure"]["data"]) == 4
+    for trace in result["figure"]["data"]:
+        assert str(trace["x"][0]).startswith(start)
+    sources = source_map(session)
+    assert all(i in sources for s in sources.values() if s["kind"] == "transform" for i in s["inputs"])
+    assert any("net bakiye" in n for n in quotable_numbers(session)["notlar"])
+    with duckdb.connect(str(DUCKDB_PATH), read_only=True) as con:
+        for repair in repairs:
+            raw = repair["column"]
+            if raw in ("tp", "yp"):
+                key = session.artifact.lineage[raw].key
+                metrics = ["toplam"]
+            else:
+                parents = session.artifact.lineage[raw].derived_from
+                key = session.artifact.lineage[parents[0]].key
+                metrics = [session.artifact.lineage[c].citation["filters"]["metric"] for c in parents]
+            # Calculate LAG over the source history BEFORE selecting the visible window.
+            gold = con.execute("WITH totals AS (SELECT period, sum(value) AS value FROM bulletin_observations "
+                               "WHERE dataset='mevduat_vade' AND entity_key=? AND metric IN ("
+                               + ",".join("?" for _ in metrics) + ") GROUP BY period), "
+                               "deltas AS (SELECT period, value-lag(value) OVER (ORDER BY period) AS value "
+                               "FROM totals) SELECT value FROM deltas WHERE period BETWEEN ? AND '2025-12-01' "
+                               "ORDER BY period", [key, *metrics, start]).df().value
+            pd.testing.assert_series_equal(session.view().frame[repair["as_name"]].reset_index(drop=True),
+                                           gold, check_names=False)
+    first = session.view().frame.iloc[0]
+    assert first.isna().all() if start == "2021-01-01" else first.notna().all()
+    # A presentation-only follow-up must not resurface hidden inputs or drop January.
+    again = run_turn("bu tablonun grafiğini çiz", session, client=None, compose_answer=False)
+    assert again["table"]["columns"] == outputs
+    assert len(again["table"]["rows"]) == len(result["table"]["rows"])
+
+
+def test_stock_repair_is_generic_and_idempotent():
+    from backend.agent.pipeline import apply_output_semantics
+    discovery = {"candidates": [dict(source="bulletin", dataset="sample", key="balance",
+                                     name="Balance", temporal_semantics="stock", unit="bin TL")]}
+    plan = Plan(intent="series_analysis", steps=[
+        Step(op="fetch_series", source="bulletin", dataset="sample", key="balance", as_name="amount")])
+    session = Session()
+    semantics = QuerySemantics(requested_output="absolute_change")
+    apply_output_semantics(plan, semantics, session, discovery)
+    apply_output_semantics(plan, semantics, session, discovery)
+    assert [(s.operation, s.column) for s in plan.steps if s.op == "transform"] == [("net_change", "amount")]
+    assert session.facts["output_columns"] == ["amount_net"]
+
+
+@pytest.mark.parametrize("output,semantics,unit", [
+    ("level", "stock", "milyon TL"), ("unspecified", "stock", "milyon TL"),
+    ("absolute_change", "rate", "%"), ("absolute_change", "index", "endeks"),
+    ("absolute_change", "flow", "milyon TL"),
+])
+def test_stock_repair_leaves_levels_and_non_stock_series_alone(output, semantics, unit):
+    from backend.agent.pipeline import apply_output_semantics
+    discovery = {"candidates": [dict(source="macro", dataset="sample", key="x", name="x",
+                                     temporal_semantics=semantics, unit=unit)]}
+    plan = Plan(intent="series_analysis", steps=[Step(op="fetch_series", source="macro", key="x")])
+    session = Session()
+    apply_output_semantics(plan, QuerySemantics(requested_output=output), session, discovery)
+    assert not any(s.operation == "net_change" for s in plan.steps)
+
+
+def test_stock_repair_completes_a_partially_correct_model_plan_without_double_differencing():
+    from backend.agent.pipeline import make_plan
+    needs_lakehouse()
+    question = _mentor_scenario("mentor_tp_yp_maturity")["question"]
+    plan = _mentor_plan_without_net_change()
+    plan.steps.append(Step(op="transform", operation="net_change", column="tp", as_name="tp_delta"))
+    session = Session()
+    repaired = make_plan(question, session, route(question), _OmittingNetChangeClient(plan))
+    changed = [s for s in repaired.steps if s.operation == "net_change"]
+    assert len(changed) == 4
+    assert {s.column for s in changed} == {"tp", "yp", "short_term", "long_term"}
+    assert "tp_delta" in session.facts["output_columns"]
+
+
+def test_hidden_stock_inputs_are_still_required_for_verification():
+    session = Session(artifact=synthetic("a", n=3))
+    name = T.net_change(session.artifact, "a")
+    session.turn_columns = ["a", name]
+    session.facts["output_columns"] = [name]
+    session.focus()
+    assert verify(session)["passed"]
+    session.artifact.frame = session.artifact.frame.drop(columns="a")
+    session.artifact.lineage.pop("a")
+    assert not verify(session)["passed"]
+
+
+def test_live_mentor_semantic_parse_repairs_omitted_transforms():
+    """Real interpretation + deliberately faulty plan, without a text lookup stub."""
+    import os
+    from backend.agent.pipeline import run_turn
+    from backend.llm import KloudeksClient
+    if os.environ.get("KKB_LIVE_SEMANTICS") != "1":
+        pytest.skip("opt-in real-model semantic evaluation")
+    needs_lakehouse()
+    question = _mentor_scenario("mentor_tp_yp_maturity")["question"]
+    with KloudeksClient(timeout=45) as live:
+        class Client(_OmittingNetChangeClient):
+            def structured(self, messages, schema, **kwargs):
+                if schema is SemanticInterpretation:
+                    return live.structured(messages, schema, **kwargs)
+                return super().structured(messages, schema, **kwargs)
+        result = run_turn(question, client=Client(_mentor_plan_without_net_change()), compose_answer=False)
+    assert result["semantics"]["requested_output"] == "absolute_change"
+    assert result["table"]["columns"] == ["tp_net", "yp_net", "short_term_net", "long_term_net"]
+    assert len(result["table"]["rows"]) == 60
+    assert result["verification"]["passed"]

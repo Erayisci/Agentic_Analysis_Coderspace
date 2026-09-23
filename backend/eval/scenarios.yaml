@@ -15,6 +15,58 @@ meta:
 
 scenarios:
 
+  - id: mentor_vehicle_first_six_months
+    conversation: mentor_vehicle
+    turn: 1
+    question: >-
+      BDDK Aylık Bülten verilerini kullanarak Tüketici Kredileri - Taşıt kredilerinin
+      2026 yılı ilk 6 ay verisi ile bir veri seti oluştur.
+    expect_intent: series_analysis
+    expect_window: [2026-01-01, 2026-06-01]
+    expect_rows: 6
+    expect_keys: [tuketici_kredileri_tasit]
+    expect_units: ["milyon TL"]
+
+  - id: mentor_vehicle_stock_rate_followup
+    conversation: mentor_vehicle
+    turn: 2
+    question: >-
+      Taşıt kredisi tutarlarına faiz oranlarını ekle. Veri setine aynı aylara denk
+      gelecek şekilde EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle.
+    expect_intent: followup
+    expect_window: [2026-01-01, 2026-06-01]
+    expect_rows: 6
+    expect_keys: [tuketici_kredileri_tasit, TP.BKR.TRY.17]
+    expect_preserves_columns: true
+    expect_units: ["milyon TL", "%"]
+
+  - id: mentor_tp_yp_maturity
+    question: >-
+      BDDK Aylık Bülten verilerini kullanarak 202101–202512 döneminde Türk parası (TP)
+      ve yabancı para (YP) mevduatların gelişimini ve vade yapısını incelemek üzere aylık
+      bir veri seti oluştur.
+      Oluşturulacak veri seti sadece o aydaki mevduat verisini göstermeli stok veri olmamalı.
+      TP ve YP mevduatları ayrı ayrı getir. TP Mevduatları ayrıca açılış vadelerine göre
+      3 aya kadar ve 3 aydan fazla olacak şekilde iki grupta topla ve tüm serileri aynı
+      aylık tarih ekseninde hizala.
+      Verilerin alınacağı ilgili satırlar, TP için TP Mevduat / Katılım Fonları - Yurt İçi
+      Yerleşik YP için Döviz Tevdiat Hesabı / Katılım Fonları - Yurt İçi Yerleşik
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_keys:
+      - tp_mevduat_katilim_fonlari_yurt_ici_yerlesik
+      - doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik
+    expect_units: ["milyon TL"]
+    expect_semantics: [net_change]
+    notes: >-
+      The source is stock. net_change yields net balance changes, not gross deposits;
+      January 2021 has no prior observation in this archive. The maturity table exposes
+      bir_aya_kadar + bir_ay_uc_ay and uc_ay_alti_ay + alti_ay_bir_yil + bir_yil;
+      sum_columns combines these. Vadesiz is separate from opening-term buckets.
+      The deterministic fallback retrieves the named rows; the planner must choose
+      the bucket fetches and transforms for this compound request.
+
   # --- the three canonical demo turns, as one conversation ------------------
   - id: demo_turn1_loans_and_rate
     conversation: reference_demo

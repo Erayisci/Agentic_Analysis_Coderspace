@@ -34,6 +34,37 @@ def test_registry_tier0_names_the_demo_inputs():
     assert {"bie_kt100h", "bie_tukfiy2003", "bie_kfe", "bie_akonutsat1", "bie_akonutsat2", "bie_apifon"} <= tier0
 
 
+def test_stock_and_flow_loan_rate_labels_are_published_metadata(catalogue):
+    from backend.tools.lakehouse import rate_basis
+    for group, basis, frequency in [("bie_kt100h", "akim", "weekly"), ("bie_kt210a", "stok", "monthly")]:
+        rows = catalogue[catalogue.datagroup == group]
+        vehicle = rows[rows.name_tr.str.startswith("Taşıt Kredisi (")]
+        assert len(vehicle) == 1
+        assert rate_basis(vehicle.iloc[0].name_tr) == basis
+        assert vehicle.iloc[0].native_frequency == frequency
+        assert vehicle.iloc[0].temporal_semantics == "rate"
+        assert BY_CODE[group].semantics == "rate", "stock loan basis is still an interest RATE"
+
+
+@pytest.mark.parametrize("basis,key,opposite", [("Stok", "TP.BKR.TRY.17", "akim"),
+                                               ("Akım", "TP.KTF11", "stok")])
+def test_explicit_vehicle_rate_basis_beats_generic_faiz_alias(basis, key, opposite):
+    from backend.tools.lakehouse import discover, discover_concepts, rate_basis
+    if not DUCKDB_PATH.exists():
+        pytest.skip("run python -m backend.lakehouse.build first")
+    question = f"EVDS, Taşıt Kredisi (TL, {basis}, %) faiz oranını ekle"
+    for result in [discover(question, limit=4), discover_concepts(question, limit=4)]:
+        assert result["candidates"][0]["key"] == key
+        assert not any(rate_basis(c["name"]) == opposite for c in result["candidates"])
+
+
+def test_unspecified_loan_rate_basis_keeps_the_demo_choice():
+    from backend.tools.lakehouse import discover
+    if not DUCKDB_PATH.exists():
+        pytest.skip("run python -m backend.lakehouse.build first")
+    assert discover("konut kredisi faiz oranı", limit=1)["candidates"][0]["key"] == "TP.KTF12"
+
+
 @pytest.mark.parametrize(
     "label, expected, grain",
     [

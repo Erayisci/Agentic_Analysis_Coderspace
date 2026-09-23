@@ -392,6 +392,7 @@ AKIM_STOK = {
 }
 
 STOPWORDS = {
+    "kullan", "kullanin", "kullanınız", "sistemdeki",
     # English boilerplate
     "the", "and", "for", "with", "show", "give", "what", "which", "how", "over",
     "between", "please", "monthly", "data", "chart", "table", "also", "using",
@@ -451,6 +452,8 @@ STOPWORDS = {
     # kind of word as "miktari" above -- it says "amount", names nothing.
     "arindir", "arindirir", "arindirin", "arindirilmis", "arind",
     "tutar", "tutari", "tutarini", "tutarlari", "tutarlarini", "tutarlarinin",
+    "verisi", "verisini", "veriyi", "seti", "setine", "setini", "ayni", "aylara",
+    "ekle", "ekleyin", "hizala", "sekilde",
 }
 
 
@@ -474,6 +477,7 @@ def _terms(query: str):
     # published as "oranı". Keys are ASCII already, so this only changes what
     # the names and the search text can be compared against.
     lowered = fold(query).strip()
+    lowered = re.sub(r"\bayni (?:aylara|doneme) denk gelecek sekilde\b", " ", lowered).strip()
     single_word = len(lowered.split()) == 1
     weighted = {lowered: 1.5 if single_word else 4.0}
 
@@ -700,10 +704,46 @@ def _score(candidate, terms, province_named: bool = False) -> float:
 CLAUSE_SPLIT = re.compile(
     r"[.,;?!]|\bbuna ek olarak\b|\bayrica\b|\bayrıca\b|\bve\b|\bile\b|"
     r"(?<!['’])\bda\b|(?<!['’])\bde\b|"
-    r"\bbozmadan\b|\bbozmaks[ıi]z[ıi]n\b|\bsadece\b|\byaln[ıi]zca\b", re.I)
+    r"\bbozmadan\b|\bbozmaks[ıi]z[ıi]n\b|\bsadece\b|\byaln[ıi]zca\b|"
+    # Explicit dimension-to-row mappings need no punctuation between them.
+    r"(?=\b(?:TP|TL|YP|FX)\s+i[çc]in\b)", re.I)
 
 
-def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
+def split_clauses(question: str) -> List[str]:
+    """Keep published labels (including nested parentheses) intact."""
+    chunks, depth, start = [], 0, 0
+    boundaries = re.compile(r"[()]|" + CLAUSE_SPLIT.pattern, CLAUSE_SPLIT.flags)
+    for match in boundaries.finditer(question):
+        token = match.group()
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            chunks.append(question[start:match.start()].strip())
+            start = match.end()
+    chunks.append(question[start:].strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def concept_identity(candidate: Dict[str, Any]) -> tuple:
+    """Both the dataset and the currency slice are part of a series address."""
+    return (candidate["source"], candidate["key"], candidate.get("currency"), candidate.get("dataset"),
+            candidate.get("metric"), candidate.get("province"))
+
+
+def entity_currency(name: str) -> Optional[str]:
+    """A currency encoded by a published row, rather than a fact-table slice."""
+    currency, _ = extract_currency(name)
+    if currency:
+        return currency
+    if re.search(r"\bdoviz\s+tevdiat\b", fold(name or "")):
+        return "FX"
+    return None
+
+
+def discover_concepts(question: str, per_concept: int = 4, limit: int = 8, *,
+                      requested_basis: Optional[str] = None, frequency: Optional[str] = None):
     """Discovery over a whole question, by splitting it into concepts first.
 
     A demo question is a paragraph -- "...konut kredilerinin dagilimini aylik
@@ -724,7 +764,10 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     # own "Toplam Krediler (2+10)". Extracting once, over the whole
     # question, and handing it to every clause is the fix.
     named_sources, _ = extract_sources(question or "")
-    chunks = [chunk.strip() for chunk in CLAUSE_SPLIT.split(question or "") if chunk.strip()]
+    semantic_basis = {"stock": "stok", "flow": "akim"}.get(requested_basis)
+    question_basis = semantic_basis or rate_basis(question or "")
+    context_words = set(re.findall(r"\w+", fold(question or "")))
+    chunks = split_clauses(question or "")
     # Folded, as `_terms` folds: "grafiğini".lower() is not the ASCII
     # "grafigini" the stopword list holds, so an unfolded check let a
     # clause made only of presentation words through to the search.
@@ -734,10 +777,10 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     if not chunks:
         chunks = [question]
 
-    # Identity includes the currency slice: "YP mevduat" and "TL mevduat" are
-    # the same key twice, and both must survive the merge.
+    # Currency slices AND datasets survive: one deposit row occurs in both
+    # the size and maturity tables, with different available metrics.
     merged, seen, by_concept = [], set(), []
-    for chunk in chunks[:6]:
+    for chunk in chunks:
         # The whole-question source only backfills a clause that has neither
         # a source word nor a province of its own: a province names FinTurk
         # (or leaves the source open) by itself, and a source stated for a
@@ -748,14 +791,48 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
         chunk_sources, chunk_body = extract_sources(chunk)
         chunk_province, _ = extract_province(chunk_body)
         fallback_source = None if chunk_province else named_sources
-        found = discover(chunk, source=chunk_sources or fallback_source, limit=per_concept)["candidates"]
-        by_concept.append([(c["source"], c["key"], c.get("currency")) for c in found])
+        basis = semantic_basis or rate_basis(chunk) or question_basis
+        found = discover(chunk, source=chunk_sources or fallback_source, limit=per_concept,
+                         rate_basis_constraint=basis, frequency=frequency)["candidates"]
+        # Identical row labels in different tables are disambiguated using
+        # the whole question's dataset words (e.g. maturity), not row names.
         for candidate in found:
-            identity = (candidate["source"], candidate["key"], candidate.get("currency"))
+            candidate["dataset_match"] = sum(
+                len(word) >= 4 and word in context_words
+                for word in (candidate.get("dataset") or "").split("_"))
+            candidate["dataset_requested"] = candidate.get("dataset_requested", False) or any(
+                len(w) >= 4 and w not in fold(candidate.get("name") or "")
+                and any(word.startswith(w) for word in context_words)
+                for w in (candidate.get("dataset") or "").split("_")[-1:])
+        found.sort(key=lambda c: (*_rank_key(c), -c["dataset_match"]))
+        by_concept.append([concept_identity(c) for c in found])
+        for candidate in found:
+            identity = concept_identity(candidate)
             if identity not in seen:
                 seen.add(identity)
                 merged.append(candidate)
+            elif candidate.get("name_match"):
+                # An earlier vague clause must not erase later exact evidence.
+                previous = next(c for c in merged if concept_identity(c) == identity)
+                if _rank_key(candidate) < _rank_key(previous):
+                    previous.update(candidate)
     merged.sort(key=lambda c: -c["score"])
+
+    # Coordinated phrases share their noun: the first half of 'TP ve YP
+    # mevduat' is not a separate concept without a measure. Resolve each role
+    # against the whole context and retain the actual published identity.
+    roles = [role for role, pattern in CURRENCY_TERMS.items() if pattern.search(question or "")]
+    role_candidates = []
+    for role in roles if any(c.get("dataset_requested") for c in merged) else []:
+        hits = discover(question, source=named_sources, limit=1, currency_role=role,
+                        frequency=frequency, rate_basis_constraint=question_basis)["candidates"]
+        if hits and hits[0].get("entity_currency") == role and hits[0].get("dataset_requested"):
+            candidate = hits[0]
+            candidate["requested_role"] = role
+            role_candidates.append(candidate)
+            if concept_identity(candidate) not in seen:
+                merged.append(candidate)
+                seen.add(concept_identity(candidate))
 
     # Every clause's own first choice gets a seat, before anything competes on
     # score. This is the guarantee that matters, and a per-corpus quota was
@@ -764,11 +841,14 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
     # question -- clause 2's best answer, the commercial-loan rate, scored below
     # clause 4's best, so a merge ordered by score filled all eight seats
     # without it and the planner never saw the series the question named.
-    kept = []
+    # An explicitly quoted published name must survive even when many vague
+    # setup/instruction clauses have already filled the context budget.
+    kept = sorted([c for c in merged if c.get("name_match") or c in role_candidates],
+                  key=lambda c: (-c["name_match"], -c["dataset_match"]))
     for ranked in by_concept:
         if not ranked:
             continue
-        candidate = next((c for c in merged if (c["source"], c["key"], c.get("currency")) == ranked[0]), None)
+        candidate = next((c for c in merged if concept_identity(c) == ranked[0]), None)
         if candidate is not None and candidate not in kept:
             kept.append(candidate)
 
@@ -789,16 +869,21 @@ def discover_concepts(question: str, per_concept: int = 4, limit: int = 8):
             break
         if candidate not in kept:
             kept.append(candidate)
-    kept = sorted(kept[:limit], key=lambda c: -c["score"])
+    first_choices = {ranked[0] for ranked in by_concept if ranked}
+    kept = sorted(kept[:limit], key=lambda c: (
+        -c.get("name_match", 0), not c.get("requested_role"), concept_identity(c) not in first_choices,
+        -c["score"], -c["dataset_match"]))
 
     # `by_concept` keeps each clause's own ranking: the merged list orders by
     # score, and a loud clause's second choice can outscore a quiet clause's
     # first. A deterministic plan wants the first choice of each clause.
-    return {"query": question, "n_concepts": len(chunks), "concepts": chunks[:6],
-            "by_concept": by_concept, "n_candidates": len(kept), "candidates": kept}
+    return {"query": question, "n_concepts": len(chunks), "concepts": chunks,
+            "by_concept": by_concept, "n_candidates": len(kept), "candidates": kept,
+            "currency_roles": {c["requested_role"]: c for c in role_candidates}}
 
 
-def discover(query: str, source=None, limit: int = 8):
+def discover(query: str, source=None, limit: int = 8, rate_basis_constraint: Optional[str] = None,
+             frequency: Optional[str] = None, currency_role: Optional[str] = None):
     """Find the lakehouse keys that answer a natural-language concept.
 
     The candidate pool is every row that matches any term -- not a truncated
@@ -820,6 +905,7 @@ def discover(query: str, source=None, limit: int = 8):
     # words of pure dilution around the one that matters.
     named_sources, query_body = extract_sources(query)
     currency, concept = extract_currency(query_body)
+    currency = currency_role or currency
     concept = concept if currency and concept else query_body
     # A province is the third dimension peeled off before search: "İstanbul"
     # names no row, and left in the concept it only dilutes the words that do.
@@ -926,13 +1012,25 @@ def discover(query: str, source=None, limit: int = 8):
     for candidate in pooled:
         candidate["grain"] = candidate_grain(candidate)
         candidate["score"] = _score(candidate, terms, province_named)
+        candidate["name_match"] = _published_name_match(candidate, query)
+        candidate["entity_currency"] = entity_currency(candidate.get("name") or "")
+        words = set(re.findall(r"\w+", fold(query)))
+        candidate["dataset_match"] = sum(len(w) >= 4 and w in words
+                                         for w in (candidate.get("dataset") or "").split("_"))
+        candidate["dataset_requested"] = any(
+            len(w) >= 4 and w not in fold(candidate.get("name") or "")
+            and any(word.startswith(w) for word in words)
+            for w in (candidate.get("dataset") or "").split("_")[-1:])
+        if (currency and candidate["entity_currency"] == currency and candidate["dataset_requested"]
+                and candidate.get("temporal_semantics") == "stock" and not candidate.get("currencies")):
+            candidate["score"] += 15
 
     # An explicit grain in the question ("aylık", "haftalık") demotes every
     # other grain before anything is ranked; silence keeps every corpus in play.
-    wanted_grain = query_grain(query)
+    wanted_grain = frequency or query_grain(query)
     _apply_grain_policy(pooled, wanted_grain)
 
-    lexical = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
+    lexical = sorted([c for c in pooled if c["score"] > 0], key=_rank_key)
     scored, fusion = _fuse_with_vectors(query, lexical, pooled, limit)
 
     # The slice is a filter, not a score: when the concept named a currency,
@@ -941,6 +1039,7 @@ def discover(query: str, source=None, limit: int = 8):
     # currency column; "TL mevduat faizi" is one series, not a slice), the
     # word was a qualifier of the concept and the plain ranking stands.
     if currency:
+        scored = [c for c in scored if not c.get("entity_currency") or c["entity_currency"] == currency]
         # Excluded: a line that publishes a currency split without this
         # slice (the FX net position is `total` only). Kept beside the tagged
         # lines: series with no currency dimension at all -- an EVDS rate in
@@ -954,7 +1053,7 @@ def discover(query: str, source=None, limit: int = 8):
             currency, sliced = None, []
             for candidate in pooled:
                 candidate["score"] = _score(candidate, plain_terms, province_named)
-            scored = sorted([c for c in pooled if c["score"] > 0], key=lambda c: -c["score"])
+            scored = sorted([c for c in pooled if c["score"] > 0], key=_rank_key)
         if sliced:
             for candidate in sliced:
                 candidate["currency"] = currency
@@ -984,6 +1083,12 @@ def discover(query: str, source=None, limit: int = 8):
     # fill every slot really does hide the row another clause asked for. But it
     # belongs to the merge across clauses, where the list the planner sees is
     # actually built, and not to the ranking of a single concept.
+    # Basis is a constraint on rates, not on loan balances. Apply after dense
+    # fusion too, so an embedding cannot reintroduce the opposite basis.
+    basis = rate_basis_constraint or rate_basis(query)
+    if basis:
+        scored = [c for c in scored if _matches_rate_basis(c, basis)]
+    scored.sort(key=_rank_key)
     ranked = scored[:limit]
 
     # A query naming both a rate and an amount ("faiz orani konut kredisi
@@ -998,7 +1103,11 @@ def discover(query: str, source=None, limit: int = 8):
     # guarantee, applied to a semantic role split within one clause instead
     # of a punctuation split across clauses.
     query_text_for_words = terms[0][0] if terms else ""
-    if RATIO_WORDS.search(query_text_for_words) and AMOUNT_WORDS.search(query_text_for_words):
+    # "Stok" in a published rate's parenthetical basis is not a request for
+    # a monetary balance. Keep actual amount words outside that qualifier.
+    amount_text = re.sub(r"\([^()]*\)", lambda m: " " if rate_basis(m.group()) else m.group(),
+                         query_text_for_words)
+    if RATIO_WORDS.search(query_text_for_words) and AMOUNT_WORDS.search(amount_text):
         # Not a handicap on the shared score -- the "ktf" alias alone puts a
         # 15-20 point gap between a rate series and the correct amount one,
         # so any fixed swing that still ranks them on the same scale leaves
@@ -1020,7 +1129,7 @@ def discover(query: str, source=None, limit: int = 8):
     return {"query": query, "terms_used": [t for t, _ in terms], "currency": currency,
             "province": province,
             "sources": sorted(named_sources) if named_sources else None,
-            "requested_grain": wanted_grain, "retrieval": fusion,
+            "requested_grain": wanted_grain, "requested_basis": basis, "retrieval": fusion,
             "n_candidates": len(ranked), "candidates": ranked}
 
 
@@ -1158,9 +1267,40 @@ def _identity(candidate: Dict[str, Any]):
     return (str(candidate.get("source")), str(candidate.get("dataset")), str(candidate.get("key")))
 
 
+def rate_basis(text: str) -> Optional[str]:
+    """Explicit stock/flow basis in a query or the publisher's rate label."""
+    found = set(re.findall(r"\b(?:stok|akim)\b", fold(text)))
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _matches_rate_basis(candidate: Dict[str, Any], basis: Optional[str]) -> bool:
+    return not (basis and candidate["source"] == "macro" and candidate.get("temporal_semantics") == "rate"
+                and (rate_basis(candidate.get("name") or "") or rate_basis(candidate.get("search_fold") or ""))
+                not in (None, basis))
+
+
+def _published_name_match(candidate: Dict[str, Any], query: str) -> int:
+    # Full names outrank aliases; short generic labels are not exact series
+    # references. Normalise punctuation/spacing without losing any words.
+    name = " ".join(re.findall(r"\w+", fold(candidate.get("name") or "")))
+    body = " ".join(re.findall(r"\w+", fold(query)))
+    if len(name.split()) >= 3 and f" {name} " in f" {body} ":
+        return len(name)
+    # A rate question may name just its product, leaving the basis to another
+    # clause. The complete product heading (before publisher qualifiers) is
+    # more specific than a combined consumer-loan rate mentioning that product.
+    if candidate.get("source") == "macro" and candidate.get("temporal_semantics") == "rate" \
+            and re.search(r"\bfaiz\w*\b|\brate\b", body):
+        subject = " ".join(re.findall(r"\w+", fold(candidate.get("name") or "").split("(")[0]))
+        if len(subject.split()) >= 2 and f" {subject} " in f" {body} ":
+            return len(subject)
+    return 0
+
+
 def _rank_key(candidate: Dict[str, Any]):
     """Order by fused score when the dense half ran, by lexical score otherwise."""
-    return (-candidate.get("rrf_score", 0.0), -candidate.get("score", 0.0))
+    return (-candidate.get("name_match", 0), -candidate.get("rrf_score", 0.0),
+            -candidate.get("score", 0.0))
 
 
 def _fuse_with_vectors(query: str, lexical: List[Dict[str, Any]], pooled: List[Dict[str, Any]],
