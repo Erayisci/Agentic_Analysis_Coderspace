@@ -1,11 +1,13 @@
 """Interpret intent once; data identities and arithmetic belong to later stages."""
 import json
 import logging
+import re
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..llm import LLMError
+from ..core.labels import fold
 
 
 class QuerySemantics(BaseModel):
@@ -31,12 +33,35 @@ class SemanticInterpretation(BaseModel):
     drowning out an output restriction. Only `semantics` reaches the planner
     and validator; this text is never matched or used as an execution trigger.
     """
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"required": [
+        "output_requirement", "rejects_stock_levels", "requires_gross_transactions", "semantics",
+    ]})
 
     output_requirement: str = Field(min_length=1, max_length=400, description=(
         "One short sentence stating the requested output and explicit exclusions. "
         "Identify the output constraint even inside a long question; do not describe source availability."))
+    rejects_stock_levels: bool = Field(False, description="The user excludes balance/stock levels from the output")
+    requires_gross_transactions: bool = Field(True, description=(
+        "True only when gross new business, new deposits, inflows or transactions are explicitly required; "
+        "false when the user just wants period-specific balance movements"))
     semantics: QuerySemantics
+
+
+def explicit_balance_movement(question: str) -> bool:
+    """Conservative no-model interpretation of an unambiguous stock exclusion.
+
+    A period qualifier is required, and any explicit gross transaction demand
+    blocks inference: differences in balances cannot establish gross inflows.
+    """
+    words = fold(question).lower()
+    excludes_stock = re.search(
+        r"\b(?:stok|bakiye)\b(?:\s+\w+){0,3}\s+(?:olmamali|olmasin|degil|istemiyorum|istenmiyor)\b",
+        words)
+    period_movement = re.search(
+        r"\b(?:sadece\s+o\s+aydaki|net\s+(?:bakiye\s+)?degisim|aylik\s+degisim|donem\s+degisimi)\b",
+        words)
+    gross = re.search(r"\b(?:brut|yeni\s+mevduat|yeni\s+kredi|giris|giren)\b", words)
+    return bool(excludes_stock and period_movement and not gross)
 
 
 SEMANTICS_SYSTEM = """Interpret the user's analytical intent as QuerySemantics.
@@ -73,6 +98,8 @@ currencies normalizes local currency (including TP) to TL and foreign currency
 (including YP) to FX. Leave empty when unspecified.
 
 Use the existing table context to resolve references and additions. interaction:
+An additional breakdown of an existing measure extends that analysis even
+without a pronoun referring to the table. Preserve its other existing measures.
 new_analysis for an independent request; extend_previous for adding to or
 modifying the existing analysis; compare_previous for comparison with it;
 presentation_only for changing only its display. Without an existing table use
@@ -80,6 +107,8 @@ new_analysis. preserve_existing_window is true when the current period should
 be kept, including an addition/comparison that requests no replacement period.
 Interpret the current question; previous context is not a new instruction.
 Return output_requirement followed by the interpreted semantics object.
+Also explicitly decide rejects_stock_levels and requires_gross_transactions.
+These flags describe user requirements, not what a source can supply.
 """
 
 
@@ -101,6 +130,11 @@ def parse_query_semantics(question: str, client=None, *, context: Optional[dict]
             messages, SemanticInterpretation, max_tokens=500, think=False))
         if result.semantics.model_fields_set != set(QuerySemantics.model_fields):
             raise LLMError("semantic response omitted required decisions")
+        if (result.rejects_stock_levels and not result.requires_gross_transactions
+                and result.semantics.requested_output in ("level", "flow", "unspecified")):
+            # Period movement is satisfiable from stock history. A loose
+            # flow-like classification must not demand unavailable gross flows.
+            result.semantics.requested_output = "absolute_change"
         return result.semantics
     except (LLMError, ValidationError) as exc:
         logging.getLogger("kkb.agent").warning("semantic parse unavailable: %s", exc)

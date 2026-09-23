@@ -19,6 +19,7 @@ message and execution continues, so one bad step costs a column rather than
 the whole question -- the demo-day failure mode that matters most.
 """
 import re
+import logging
 import time
 from typing import Any, Dict, FrozenSet, List, Optional
 
@@ -318,6 +319,9 @@ class Executor:
             f"{c['source']}:{c['key']}" for c in top) if top else "no candidates"
 
     def _fetch(self, step: Step, plan: Plan) -> str:
+        logging.getLogger("kkb.agent").info(
+            "fetch_series source=%s dataset=%s key=%s metric=%s currency=%s as_name=%s",
+            step.source, step.dataset, step.key, step.metric, step.currency, step.as_name)
         key = _normalise_key(step.key)
         default_source = "macro" if key.upper().startswith(("TP.", "DERIVED.")) else "bulletin"
         # Treat the model's own source/dataset/filter fields as hints, not a
@@ -332,6 +336,8 @@ class Executor:
                                   metric=step.metric, start=plan.start, end=plan.end,
                                   province=step.province)
         except (ValueError, KeyError) as exc:
+            if source == "external":
+                raise ValueError(f"Requested external series unavailable: {key}; no local substitution") from exc
             # A key the model invented is the most common plan defect -- it wrote
             # TP.TUFE where the corpus publishes TP.GENENDEKS.T1. Discovery already
             # knows the real key, so resolve it here rather than losing the column.
@@ -410,6 +416,8 @@ class Executor:
         # Three slices of one line share a name; the label says which slice
         # this is, or the composer cannot tell the FX column from the TL one.
         label = series.name + {"FX": " (YP)", "TL": " (TL)"}.get(currency or "", "")
+        if series.metric and series.metric not in ("balance", "toplam"):
+            label += f" [{series.metric}]"
         self.session.artifact.add_column(name, values, ColumnLineage(
             transform=transform,
             column=name, label=label, source=series.source, unit=series.unit,
@@ -448,6 +456,7 @@ class Executor:
         else:
             raise ValueError(f"unknown transform {step.operation!r}")
         self.session.touch_column(name)
+        step.title = artifact.lineage[name].label
         return f"{name} = {artifact.lineage[name].transform}"
 
     def _full_history(self, column: str):
@@ -755,6 +764,8 @@ class Executor:
         if name is None:
             raise ValueError(required or "this step needs a column")
         columns = self.session.artifact.column_names()
+        if self.session.facts.get("is_followup") is False:
+            columns = [c for c in columns if c in self.session.turn_columns]
         found = match_column(name, columns)
         if found is None:
             raise ValueError(f"column {name!r} is not in the table; have {columns}")

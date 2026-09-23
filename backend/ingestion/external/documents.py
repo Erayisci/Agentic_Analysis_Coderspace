@@ -295,6 +295,10 @@ def _read_html(url: str, content: bytes, final_url: str) -> dict:
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    # Report links often live inside layout tables. Capture them before the
+    # table extraction below removes those nodes from the text view.
+    records = [{"url": urljoin(final_url, a["href"]), "text": a.get_text(" ", strip=True),
+                "download": a.has_attr("download")} for a in soup.find_all("a", href=True)]
     from .ocr import html_tables_to_grids
     sections = []
     for number, table in enumerate(soup.find_all("table"), start=1):
@@ -307,8 +311,6 @@ def _read_html(url: str, content: bytes, final_url: str) -> dict:
     text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
     if text:
         sections.insert(0, {"location": "Webpage", "method": "html_text", "text": text[:50000]})
-    records = [{"url": urljoin(final_url, a["href"]), "text": a.get_text(" ", strip=True),
-                "download": a.has_attr("download")} for a in soup.find_all("a", href=True)]
     return {
         "status": "ok" if sections else "empty", "format": "html", "kind": "html",
         "final_url": final_url, "title": title, "content": text[:50000], "sections": sections,

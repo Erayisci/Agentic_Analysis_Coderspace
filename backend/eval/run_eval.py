@@ -123,7 +123,8 @@ def score_scenario(scenario: Dict[str, Any], result: Dict[str, Any], seconds: fl
     # deterministic fallbacks are honest answers but they are not the model
     # succeeding, so they do not count here.
     reasoning = (plan.get("reasoning") or "").lower()
-    checks["plan_validity"] = not reasoning.startswith("deterministic")
+    origin = (result.get("plan_diagnostics") or {}).get("plan_source")
+    checks["plan_validity"] = origin == "llm" if origin else not reasoning.startswith("deterministic")
 
     if "expect_intent" in scenario:
         checks["intent"] = result["route"]["intent"] == scenario["expect_intent"]
@@ -133,7 +134,8 @@ def score_scenario(scenario: Dict[str, Any], result: Dict[str, Any], seconds: fl
 
     if "expect_window" in scenario:
         periods = [row["period"] for row in table["rows"]]
-        checks["window"] = bool(periods) and [periods[0], periods[-1]] == list(scenario["expect_window"])
+        checks["window"] = bool(periods) and [str(periods[0]), str(periods[-1])] == [
+            str(p) for p in scenario["expect_window"]]
 
     if "expect_keys" in scenario:
         # A key counts as found if the turn actually read it (a citation) or, for
@@ -203,6 +205,9 @@ def score_scenario(scenario: Dict[str, Any], result: Dict[str, Any], seconds: fl
 
 
 def _semantics(result: Dict[str, Any]) -> List[str]:
+    session = result.get("session")
+    if session is not None:
+        return [line.temporal_semantics for line in session.view().lineage.values()]
     return [c.get("temporal_semantics") for c in result["citations"] if c.get("temporal_semantics")]
 
 

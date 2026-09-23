@@ -41,6 +41,13 @@ def verify(session: Session) -> Dict[str, Any]:
     limitations = session.facts.get("semantic_limitations") or []
     if limitations:
         record("requested_output_supported", False, "; ".join(limitations))
+    source_limits = session.facts.get("source_limitations") or []
+    if source_limits:
+        record("requested_sources_satisfied", False, "; ".join(source_limits))
+    role_ids = list((session.facts.get("currency_role_identities") or {}).values())
+    if len(role_ids) > 1:
+        record("currency_roles_are_distinct", len(set(role_ids)) == len(role_ids),
+               "currency role identities must refer to different published series")
     record("all_steps_ran", not failed_steps,
            "; ".join(f"{a.op}: {a.detail}" for a in failed_steps) or "every step completed",
            severity="warning")
@@ -432,6 +439,26 @@ def quotable_numbers(session: Session) -> Dict[str, Any]:
             entry["kaynak"] = tag_of_column[name]
         series[name] = entry
     allowed: Dict[str, Any] = {"series": series}
+    sums = {name: {"operation": "sum_columns", "inputs": [
+        {"column": p, "label": session.artifact.lineage[p].label,
+         "metric": session.artifact.lineage[p].citation.get("filters", {}).get("metric")}
+        for p in line.derived_from if p in session.artifact.lineage]}
+        for name, line in session.evidence_view().lineage.items()
+        if (line.transform or "").startswith("sum_columns(")}
+    if sums:
+        allowed["group_definitions"] = sums
+    raw = [(name, line) for name, line in artifact.lineage.items() if line.source != "derived"]
+    if len(raw) == 2 and {line.temporal_semantics for _, line in raw} == {"stock", "flow"}:
+        paired = artifact.frame[[name for name, _ in raw]].dropna()
+        if len(paired) >= 2:
+            changes = paired.iloc[-1] - paired.iloc[0]
+            product = changes.iloc[0] * changes.iloc[1]
+            movement = "zıt yönlerde" if product < 0 else "aynı yönde" if product > 0 else "en az biri değişmeden"
+            labels = "; ".join(f"{name}: " + ("dönem sonu stok (bakiye)" if line.temporal_semantics == "stock"
+                                               else "dönem içi işlem miktarı (akım)") for name, line in raw)
+            allowed["movement_comparison"] = (
+                f"{labels}. Ortak pencerenin ilk ve son gözlemi arasında {movement} hareket ettiler. "
+                "Bu karşılaştırma nedensellik göstermez.")
     if session.facts.get("semantic_limitations"):
         allowed["semantic_limitations"] = session.facts["semantic_limitations"]
     valuation = [line for line in artifact.lineage.values()
