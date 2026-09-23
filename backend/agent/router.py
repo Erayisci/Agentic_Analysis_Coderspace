@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from ..core.config import KLOUDEKS_FAST_MODEL
 from ..llm import LLMError
 from .planner import Intent
 
@@ -217,10 +218,17 @@ FOOTNOTE_PATTERN = re.compile(
 # 2021", and a plan that read it as January returned eleven months nobody
 # asked for. "2021-2025" is two bare years, not a month stamp -- the stamp
 # branch needs a word boundary after a one- or two-digit month.
+# The year's own genitive marker ("2024'ün ilk 6 ayı") takes the buffer
+# consonant "n" only when the number is pronounced ending in a vowel
+# ("2026" = ...yirmi altı -> "2026'nın"); a consonant-final pronunciation
+# ("2024" = ...yirmi dört) drops the buffer ("2024'ün", not "2024'nün").
+# `n[ıi]n` alone matched only the buffer form, so "2024'ün ilk 6 ayı" (and
+# every other consonant-final year) fell through to a bare year token and
+# read as the whole calendar year instead of six months.
 DATE_TOKEN = re.compile(
     r"\b(20\d{2})"
     r"(?:[-/](0?[1-9]|1[0-2])\b"
-    r"|(?:['’]n[ıi]n)?(?:\s*y[ıi]l[ıi]n?[ıi]?n?)?\s*"
+    r"|(?:['’]n?[ıiuü]n)?(?:\s*y[ıi]l[ıi]n?[ıi]?n?)?\s*"
     r"(sonu\w*|ba[şs][ıi]\w*|ortas[ıi]\w*|ilk\s+(?:[1-9]|1[0-2])\s+ay\w*|"
     r"ilk\s+yar[ıi]s[ıi]\w*|ikinci\s+yar[ıi]s[ıi]\w*)"
     # A bare year with its case suffix: "2021'den itibaren" opens a window,
@@ -384,9 +392,12 @@ def route(question: str, has_artifact: bool = False, client=None) -> Route:
         return Route(intent="series_analysis",
                      reason="no classifier available; defaulting to series analysis", **common)
     try:
+        # `_IntentOnly` is two fields -- small enough that the faster
+        # deployment's guided decoding enforces it reliably (measured; see
+        # `KLOUDEKS_FAST_MODEL`), unlike the planner's flat 12-op DSL.
         decided = client.structured(
             [{"role": "system", "content": CLASSIFIER_SYSTEM}, {"role": "user", "content": question}],
-            _IntentOnly, max_tokens=200)
+            _IntentOnly, max_tokens=200, model=KLOUDEKS_FAST_MODEL)
         return Route(intent=decided.intent, decided_by="llm",
                      reason=decided.reason or "classified by model", **common)
     except LLMError as exc:

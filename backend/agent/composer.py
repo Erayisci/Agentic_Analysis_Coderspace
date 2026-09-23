@@ -13,6 +13,7 @@ warning attached rather than silently trusted.
 import json
 from typing import Any, Dict, List, Optional
 
+from ..core.config import KLOUDEKS_FAST_MODEL
 from ..llm import KloudeksClient, LLMError
 from .formatting import format_change, format_quantity
 from .state import Session
@@ -61,13 +62,30 @@ KESIN KURALLAR:
    "eklenemez/getiremem" DEME, dogrudan eklendigini soyleyip facts'teki degerleriyle cevapla.
    "tablo_sutunlari" listende olmayan bir seyi ekleyip eklemedigini soyleme; sadece orada gordugunu
    yansit, kendi yapabilirligin hakkinda tahmin yurutme.
-14. Soru "her ay icin tablo yap" gibi DONEM DONEM (aybası aybası) bir doküm istiyorsa, KENDIN
+14. Soru "hangi veriler var / neler var / kapsami ne" gibi bir METADATA sorusuysa ve
+   facts.series BOS ama facts.discovered_keys DOLUYSA: bu veri EKSIK DEGIL, sadece
+   fetch edilmedi -- "VERI BULUNAMADI" veya "boyle bir seri yok" DEME. Bunun yerine
+   discovered_keys listesindeki serileri (name, source, unit, temporal_semantics,
+   first_period-last_period) duz cumleyle tanit: hangi kurumdan (source), hangi
+   isimle, hangi birimle yayinlaniyor, hangi donem araligini kapsiyor. Ayni kavramin
+   birden fazla serisi varsa (orn. Akim ve Stok) HEPSINI ayri ayri say, aralarindaki
+   farki (Akim=yeni kullandirim, Stok=bilanco ortalamasi) bir cumleyle belirt.
+15. Soru "her ay icin tablo yap" gibi DONEM DONEM (aybası aybası) bir doküm istiyorsa, KENDIN
    markdown tablo KURMA -- facts sana yalnizca ozet degerler (ilk, son, min, max, degisim) verir,
    her ayin kendi sayisini vermez. Eksik aylari "-" ile doldurup "bu aylarin verisi yok" gibi bir
    izlenim birakma: o veri VAR, sadece sana ulasmadi, ve boyle bir tablo gercek bir veri
    boslugunu uydurma bir bosluktan ayirt edilemez hale getirir. Bunun yerine ozet rakamlari
    (ilk/son/min/max/degisim) duz cumleyle ver ve ayrinti icin ekrandaki "Tablo" panelinin zaten
    tum donemleri gosterdigini soyle.
+16. Soru "... ile yorumla / ilişkilendir / birlikte değerlendir" diyorsa VE facts hem series
+   (K etiketli) hem documents (U etiketli, bir URL/PDF) iceriyorsa: ikisini YAN YANA SAYIP
+   BIRAKMA. Ayri bir paragrafta ACIKCA bir baglanti cumlesi yaz -- hangi yonde (ayni yonde /
+   ters yonde / bagimsiz) hareket ettiklerini ve bunun ne anlama gelebilecegini belirt (orn.
+   "kredi hacmindeki dususle faiz artisi/pazar daralmasi ayni doneme denk geliyor, bu ...
+   isaret ediyor olabilir"). Nedensellik iddia etme (korelasyon nedensellik degildir), ama
+   ilişkiyi ACIKLAMADAN gecme -- "dis kaynaktan sayisal seri alinamadi" gibi bir cumleyle
+   yorumdan kacinma; documents icindeki rakamlar da facts'te yaziyorsa onlar da kullanilabilir
+   bir veridir, eksik degildir.
 """
 
 
@@ -101,7 +119,11 @@ def compose(session: Session, question: str, client: Optional[KloudeksClient] = 
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)[:12000]},
     ]
     try:
-        summary = client.chat(messages, max_tokens=max_tokens, think=think).strip()
+        # Free-text prose, no schema to violate -- the fast deployment writes
+        # fluent Turkish here at a fraction of the planner's latency (measured;
+        # see `KLOUDEKS_FAST_MODEL`).
+        summary = client.chat(messages, max_tokens=max_tokens, think=think,
+                              model=KLOUDEKS_FAST_MODEL).strip()
         composed_by = "llm"
     except LLMError as exc:
         # An unreachable model must not lose the analysis: the numbers are all

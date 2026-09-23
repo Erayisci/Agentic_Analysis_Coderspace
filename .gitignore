@@ -7,6 +7,9 @@ data/
 **/~$*.xlsx
 **/.~lock.*#
 
+# macOS Finder metadata
+.DS_Store
+
 # BDDK workbooks are a derived rendering of bddk_aylik_bulten/_raw_json/, which
 # is the source of truth and IS committed. Regenerate them without network via:
 #   python -m backend.ingestion.bddk_bulletin --from-cache

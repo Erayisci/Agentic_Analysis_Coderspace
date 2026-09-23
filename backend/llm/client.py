@@ -189,10 +189,15 @@ class KloudeksClient:
         max_tokens: int = 1024,
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> str:
-        """Plain text completion."""
-        body = self._post("/chat/completions",
-                          self._chat_payload(messages, max_tokens, think, temperature))
+        """Plain text completion. `model` overrides this client's default for
+        one call -- see `KLOUDEKS_FAST_MODEL` for why only free-text prose and
+        the small intent classifier ever pass one."""
+        payload = self._chat_payload(messages, max_tokens, think, temperature)
+        if model:
+            payload["model"] = model
+        body = self._post("/chat/completions", payload)
         try:
             return body["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError) as exc:
@@ -206,15 +211,21 @@ class KloudeksClient:
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
         repair: bool = True,
+        model: Optional[str] = None,
     ) -> Model:
         """A validated pydantic object, using the server's guided decoding.
 
         Raises LLMError if the model cannot produce a valid object in two
         attempts. The caller is expected to have a deterministic fallback --
-        see `agent.planner.template_plan`.
+        see `agent.planner.template_plan`. `model` overrides this client's
+        default for one call -- reserve it for a schema small enough that a
+        deployment's guided decoding reliably enforces it (see
+        `KLOUDEKS_FAST_MODEL`); the flat `Plan` DSL is not one of them.
         """
         json_schema = schema.model_json_schema()
         payload = self._chat_payload(messages, max_tokens, think, temperature)
+        if model:
+            payload["model"] = model
 
         if self._schema_mode_supported:
             payload["response_format"] = {
@@ -254,6 +265,8 @@ class KloudeksClient:
                 "Return ONLY a corrected JSON object. Do not explain."},
         ]
         repair_payload = self._chat_payload(repair_messages, max_tokens, think, temperature)
+        if model:
+            repair_payload["model"] = model
         repair_payload["response_format"] = payload["response_format"]
         body = self._post("/chat/completions", repair_payload)
         raw = body["choices"][0]["message"]["content"] or ""

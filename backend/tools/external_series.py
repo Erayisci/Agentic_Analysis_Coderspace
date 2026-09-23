@@ -67,6 +67,26 @@ _EN_NUMBER_RE = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")               # 93,8
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}([ T].*)?$")
 
 
+def _assign_parsed_dates(parsed: pd.Series, mask: pd.Series, text: pd.Series, **kwargs) -> None:
+    """`parsed.loc[mask] = pd.to_datetime(text[mask], errors="coerce", **kwargs)`,
+    guarded against a value that "parses" rather than fails.
+
+    A stray table cell that is not really a date ("01-08", a footnote or a
+    page fragment) can still parse under `dayfirst=True, format="mixed"` --
+    with no year, pandas defaults to year 1 ("0001-08-01"), which is not a
+    parse failure `errors="coerce"` catches. Year 1 does not fit
+    `datetime64[ns]` (pandas' nanosecond range starts around 1677), so
+    assigning it into an ns-typed column overflows deep inside pandas and
+    raises an opaque internal AssertionError instead of the normal,
+    catchable `OutOfBoundsDatetime` -- crashing the whole ingest on one
+    unrelated cell. Timestamps outside the representable range are treated
+    the same as an unparseable string: NaT.
+    """
+    candidate = pd.to_datetime(text[mask], errors="coerce", **kwargs)
+    in_range = candidate.isna() | ((candidate >= pd.Timestamp.min) & (candidate <= pd.Timestamp.max))
+    parsed.loc[mask] = candidate.where(in_range)
+
+
 def _parse_periods(raw: pd.Series) -> pd.Series:
     """Dates from a column, Turkish-aware: day-first (`03.02.2021` is 3 Feb),
     Turkish month names, and the bilingual `Ocak / January` labels the BIST
@@ -79,9 +99,9 @@ def _parse_periods(raw: pd.Series) -> pd.Series:
     iso = text.str.match(_ISO_DATE_RE, na=False)
     parsed = pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
     if iso.any():
-        parsed.loc[iso] = pd.to_datetime(text[iso], errors="coerce", dayfirst=False, format="mixed")
+        _assign_parsed_dates(parsed, iso, text, dayfirst=False, format="mixed")
     if (~iso).any():
-        parsed.loc[~iso] = pd.to_datetime(text[~iso], errors="coerce", dayfirst=True, format="mixed")
+        _assign_parsed_dates(parsed, ~iso, text, dayfirst=True, format="mixed")
     return parsed
 
 

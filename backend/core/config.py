@@ -106,6 +106,17 @@ KLOUDEKS_BASE_URL = "https://mia.csp.kloudeks.com/v1"
 KLOUDEKS_CHAT_MODEL = "kkbhackathon2026/Qwen3.8-27B"
 KLOUDEKS_EMBEDDING_MODEL = "kkbhackathon2026/Qwen3-Embedding-8B"
 KLOUDEKS_OCR_MODEL = "kkbhackathon2026/Unlimited-OCR"
+# Added to the platform 2026-09-23. Measured against the plan DSL's flat,
+# `extra="forbid"` schema (12 ops, required fields per op): this deployment's
+# guided decoding does not enforce it the way Qwen's does -- three separate
+# planning questions each came back with an invented field (`window`, not in
+# the schema) and a missing required one (`key` on fetch_series, `method` on
+# analyze), so the model must never write a `Plan`. The router's small
+# `_IntentOnly` classifier (2 fields) and the composer's free-text prose (no
+# schema at all) validated correctly and ran in ~0.1-0.4s against Qwen's
+# 10-90s -- `KloudeksClient.chat`/`.structured` take a per-call `model`
+# override for exactly those two call sites.
+KLOUDEKS_FAST_MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
 
 # Qwen3 is a reasoning model and thinks before answering. Measured against this
 # endpoint: a trivial prompt costs 63 completion tokens with thinking and 2

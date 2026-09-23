@@ -458,41 +458,69 @@ def repair_three_month_groups(plan: Plan, question: str, discovery: dict, sessio
     Model aliases can collide even when their fetch addresses differ. Use the
     metric identities to reconstruct the two sums instead of trusting those
     aliases or an invented bucket membership.
+
+    "3 aya kadar / 3 aydan fazla" is a split by OPENING MATURITY, and
+    `vadesiz` (demand deposits) has no maturity at all -- it is a distinct
+    category, not "0 ay vade", and stays out of both groups (see
+    `mentor_tp_yp_maturity` in scenarios.yaml).
+
+    Measured live on a two-way (TP/YP) split: the model fetched 4 of the 5
+    relevant buckets for each currency, omitting `bir_aya_kadar` from both,
+    and the old code required every bucket to already be fetched -- and only
+    repaired the first matching address -- before it would act at all, so an
+    incomplete model plan for either currency passed through untouched. This
+    now fetches whatever bucket is missing and repairs every address the
+    question names, not just the first or only a complete one.
     """
     words = fold(question)
     if not re.search(r"\b3\s*ay", words) or "fazla" not in words or "kadar" not in words:
         return plan
     short = ("bir_aya_kadar", "bir_ay_uc_ay")
     long = ("uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil")
-    groups = {}
+    all_buckets = short + long
+    groups: Dict[tuple, Dict[str, Step]] = {}
     for step in plan.steps:
-        if step.op == "fetch_series" and step.metric in short + long:
+        if step.op == "fetch_series" and step.metric in all_buckets:
             address = (step.source, step.dataset, _normalise_key(step.key), step.currency, step.province)
             groups.setdefault(address, {})[step.metric] = step
-    role, _ = extract_currency(question)
-    expected = (discovery.get("currency_roles") or {}).get(role)
+    repaired_any = False
     for address, metrics in groups.items():
-        if not all(metric in metrics for metric in short + long):
-            continue
-        if expected and address[:3] != (expected["source"], expected["dataset"], expected["key"]):
-            continue
-        old_aliases = {metrics[metric].as_name or metrics[metric].key for metric in short + long}
+        old_aliases = {step.as_name or step.key for step in metrics.values()}
         model_sums = [step for step in plan.steps if step.op == "transform"
                       and step.operation == "sum_columns"
                       and any(name in old_aliases for name in step.columns or [])]
-        if len(old_aliases) == len(short + long) and len(model_sums) >= 2:
-            continue
-        prefix = (role or "vade").lower()
-        for metric in short + long:
-            metrics[metric].as_name = f"{prefix}_{metric}"
+        if set(metrics) == set(all_buckets) and len(model_sums) >= 2:
+            continue  # already a complete, correctly-scoped split
+        # The entity's own currency role ("tl"/"fx") reads the same on this
+        # address whichever way the question phrases it -- but the row label
+        # does not always say it ("Döviz Tevdiat..." carries no recognised
+        # currency word on its own), and the whole question cannot be trusted
+        # when it names two addresses at once (a shared "tl" prefix would
+        # collide). Fall back to the whole question's role only when this is
+        # the only address being repaired, and to the entity key's own first
+        # word only when neither says anything.
+        role, _ = extract_currency(address[2].replace("_", " "))
+        if not role and len(groups) == 1:
+            role, _ = extract_currency(question)
+        prefix = (role or address[2].split("_")[0] or "vade").lower()
+        new_fetches = []
+        for metric in all_buckets:
+            as_name = f"{prefix}_{metric}"
+            if metric in metrics:
+                metrics[metric].as_name = as_name
+            else:
+                new_fetches.append(Step(op="fetch_series", source=address[0], dataset=address[1],
+                                        key=address[2], metric=metric, currency=address[3],
+                                        province=address[4], as_name=as_name))
         plan.steps = [step for step in plan.steps if step not in model_sums]
-        insert_at = max((i + 1 for i, step in enumerate(plan.steps) if step.op == "fetch_series"), default=0)
-        plan.steps[insert_at:insert_at] = [
+        plan.steps.extend(new_fetches)
+        plan.steps.extend(
             Step(op="transform", operation="sum_columns", columns=[f"{prefix}_{m}" for m in bucket],
                  as_name=f"{prefix}_{suffix}")
-            for bucket, suffix in ((short, "3aya_kadar"), (long, "3aydan_fazla"))]
-        session.facts["maturity_group_repair"] = {"source": address[:3], "short": short, "long": long}
-        break
+            for bucket, suffix in ((short, "3aya_kadar"), (long, "3aydan_fazla")))
+        repaired_any = True
+    if repaired_any:
+        session.facts["maturity_group_repair"] = {"short": short, "long": long}
     return plan
 
 
@@ -1222,6 +1250,19 @@ def make_plan(question: str, session: Session, route_result: Route,
                   if external_store.canonical_url(url) not in landed_urls]
     if prose_urls and not any(step.op == "read_url" for step in plan.steps):
         plan.steps = template_plan("url_analysis", question, prose_urls).steps + plan.steps
+    # "Hangi veriler var" is answered in prose, not a fetched column -- but the
+    # composer only ever sees `quotable_numbers()`, and that dict's
+    # `discovered_keys` entry is populated from `session.facts["discovery"]`,
+    # which is written by the `discover` op's own executor step. A model plan
+    # for a metadata question sometimes decides (correctly, per its own
+    # reasoning) that no fetch is needed and writes zero steps at all -- so the
+    # `discover` step that found the answer never runs, the composer's facts
+    # stay empty, and it denies the data exists even though the plan's own
+    # reasoning named the right series. Guarantee the step the same way
+    # `apply_analysis` guarantees an `analyze` step for an analysis question.
+    if (route_result.intent == "metadata" and not any(step.op == "discover" for step in plan.steps)
+            and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
+        plan.steps.append(Step(op="discover", query=question))
     metadata = {**found, "candidates": found["candidates"] + landed}
     return apply_output_semantics(plan, semantics, session, metadata, route_result.is_followup)
 
@@ -1263,7 +1304,24 @@ def _run_turn(question: str, session: Optional[Session] = None,
         route_result.intent = "search"  # an explicit UI mode still selects its runner
     logger.info("route -> %s (%s) chart=%s table=%s", route_result.intent,
                 route_result.decided_by, route_result.wants_chart, route_result.wants_table)
-    if route_result.intent == "search" and research_runner is not None:
+    # Explicit "Web araştırması" always uses the bounded research loop -- that
+    # IS the mode, model-chosen searches and reads, no known URL required. An
+    # "auto" question the classifier merely labeled "search" is different:
+    # if the question names a URL, that address is a source commitment (see
+    # `router.without_urls`'s own reasoning elsewhere in this file) -- the
+    # normal pipeline's `pre_ingest`/`read_url` already reads it reliably,
+    # same as any other question, and unlike the research loop it can still
+    # see the session's table. Sending a URL-bearing question into the
+    # research loop instead means the model picks its own searches and may
+    # not even prioritize the URL the user gave, and the loop has no access
+    # to session.artifact at all -- a demo turn like "taşıt kredileri ve
+    # faizini şu PDF'teki verilerle yorumla", asked right after fetching
+    # those two local series, silently dropped them and answered from the
+    # PDF alone. Measured live: this never fired before research mode was
+    # configured (research_runner was None), so a URL-less fresh question
+    # still gets the same automatic research path it always did.
+    auto_search_should_use_normal_path = mode != "research" and (route_result.urls or session.has_artifact())
+    if route_result.intent == "search" and research_runner is not None and not auto_search_should_use_normal_path:
         return _research_turn(question, session, route_result, research_runner, on_tool_result, timings)
     if mode == "research":
         raise ValueError("Web research is disabled; enable WEB_TOOLS_ENABLED and WEB_AGENT_ENABLED.")

@@ -13,7 +13,14 @@ function formatPeriod(value) {
 
 export default function DataTable({ table }) {
   if (!table || !table.columns || table.columns.length === 0) {
-    return <p className="empty-hint">Henüz bir tablo oluşturulmadı.</p>;
+    return (
+      <p className="empty-hint">
+        Henüz bir tablo oluşturulmadı. Sorunuzda <strong>"tablo"</strong>, <strong>"veri seti"</strong>,{" "}
+        <strong>"sütun"</strong> veya <strong>"listele"</strong> gibi bir kelime geçirirseniz tablo
+        otomatik oluşturulur — örneğin: "Konut kredisi verilerini tablo olarak göster" ya da "...ile
+        bir veri seti oluştur".
+      </p>
+    );
   }
 
   const { columns, units, rows, all_columns: allColumns } = table;

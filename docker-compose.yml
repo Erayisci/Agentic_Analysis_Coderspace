@@ -1,0 +1,55 @@
+# One command to run the live system with no manual setup step: no venv, no
+# `playwright install`, no `npm install` on the host. `docker compose up
+# --build` builds the lakehouse into the backend image (offline, from the
+# committed regulator archives) and serves both the API and the UI.
+#
+# The frontend runs Vite's own dev server rather than a production build --
+# this is the demo-day image, not a long-lived deployment, and dev mode means
+# one Dockerfile with no separate nginx/static-serving step to keep in sync
+# with frontend/vite.config.js's own dev-server settings.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Put your real key in a repo-root .env (gitignored; see README) --
+      # Compose reads that file automatically and forwards this variable.
+      # Without it the API still starts, answering deterministic-only.
+      - KLOUDEKS_API_KEY=${KLOUDEKS_API_KEY:-}
+      - EVDS_API_KEY=${EVDS_API_KEY:-}
+      # Optional: the web-tools extension (extensions/web_tools/), run
+      # separately with its own `docker compose up` there (SearXNG + a
+      # crawler/egress pair). host.docker.internal is Docker Desktop's name
+      # for the host machine -- 127.0.0.1 from inside this container would
+      # mean this container, not the host the extension's containers publish
+      # their ports on. Leave WEB_TOOLS_ENABLED unset/false if that stack
+      # isn't running; search then fails one step, not the whole API.
+      - WEB_TOOLS_ENABLED=${WEB_TOOLS_ENABLED:-false}
+      - WEB_AGENT_ENABLED=${WEB_AGENT_ENABLED:-false}
+      - WEB_SEARXNG_URL=${WEB_SEARXNG_URL:-http://host.docker.internal:8888}
+      - WEB_CRAWLER_URL=${WEB_CRAWLER_URL:-http://host.docker.internal:8932}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      # The service name "backend" is resolved by Compose's own DNS -- see
+      # the comment in vite.config.js for why 127.0.0.1 would not work here.
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy

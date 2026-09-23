@@ -161,8 +161,18 @@ if evidence is insufficient, explain missing requirements and insufficient sourc
                 {"role": "user", "content": json.dumps({"question": request["question"],
                     "force_answer": request["force_answer"], "evidence_and_history": request["context"]}, ensure_ascii=False)}]
     AssetStore(config).consume_model_call()
+    # Measured live against this Kloudeks deployment: round trips range from
+    # ~0.15s to ~90s with no thinking tokens involved (chat_template_kwargs
+    # already disables those), and later decisions in a research loop carry
+    # more accumulated evidence in the prompt -- a bigger context, a slower
+    # response. The old 50s cap cut off real, still-in-flight responses on
+    # exactly those later calls, failing a question whose first two tool
+    # calls (search, then read) had already succeeded. 110s keeps the 2s
+    # margin under `asset_timeout_seconds` the cap always respected, just
+    # raises the ceiling closer to it (default 120s) instead of an
+    # arbitrary, much tighter constant.
     client = KloudeksClient(config.kloudeks_base_url, config.kloudeks_api_key, proxy,
-                           timeout=min(50, config.asset_timeout_seconds - 2))
+                           timeout=min(110, config.asset_timeout_seconds - 2))
     response = client.chat(messages, model=config.kloudeks_chat_model, max_tokens=config.model_max_tokens)
     if response["truncated"]:
         raise AssetFailure("model_output_limit")

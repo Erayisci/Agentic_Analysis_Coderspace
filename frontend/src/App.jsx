@@ -134,14 +134,17 @@ export default function App() {
             <label htmlFor="question-mode">Soru modu</label>
             <select id="question-mode" value={mode} disabled={loading} onChange={(e) => setMode(e.target.value)}>
               <option value="auto">Otomatik / veri analizi</option>
-              <option value="research">Web araştırması</option>
+              {/* Disabled (not hidden) when the backend reports it off, so the
+                  reason is visible in the option itself -- a judge who picks
+                  it used to only find out from a hint AFTER selecting it,
+                  which read as broken rather than intentionally off. */}
+              <option value="research" disabled={researchConfigured === false}>
+                Web araştırması{researchConfigured === false ? " (kapalı)" : ""}
+              </option>
             </select>
             {mode === "research" ? (
               <p className="empty-hint">
                 Model arama yapar, kaynakları okur ve kanıtları veritabanına kaydeder.
-                {researchConfigured === false
-                  ? " Web araştırması kapalı: API ve web-tools servislerinde WEB_TOOLS_ENABLED ve WEB_AGENT_ENABLED ayarlarını açın."
-                  : ""}
               </p>
             ) : null}
           </div>
@@ -198,7 +201,10 @@ export default function App() {
             {activeTab === "research" && <ResearchPanel sessionId={sessionId} latest={latest} />}
             {activeTab === "table" && (
               latest && latest.presentation && !latest.presentation.table
-                ? <p className="empty-hint">Bu soru tablo istemedi. Tabloyu görmek için soruda "tablo" deyin.</p>
+                ? <p className="empty-hint">
+                    Bu soru tablo istemedi. Sorunuzda "tablo", "veri seti", "sütun" veya "listele"
+                    gibi bir kelime geçirirseniz tablo otomatik oluşturulur.
+                  </p>
                 : <DataTable table={latest?.table} />
             )}
             {activeTab === "chart" && <ChartPanel figure={figure} />}

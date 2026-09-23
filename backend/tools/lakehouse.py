@@ -1212,6 +1212,22 @@ def _apply_grain_policy(candidates: List[Dict[str, Any]], wanted: Optional[str])
     for candidate in candidates:
         grain = candidate.get("grain") or candidate_grain(candidate)
         candidate["grain"] = grain
+        # EVDS ("macro") is pulled at native frequency but published to the
+        # agent through `macro_observations`, already aligned to months
+        # (`transform.macro.align_monthly`) -- every series is deliverable at
+        # monthly grain regardless of how often it is actually reported.
+        # `candidate_grain` reads `native_frequency` for macro candidates
+        # (there is no fixed entry for "macro" in GRAIN_BY_SOURCE, unlike
+        # bulletin/weekly/finturk, each pinned to one real table), so a
+        # weekly-native series like TP.KTF12 (the reference demo's own
+        # housing-loan rate) was demoted -10 by an explicit "aylık" the same
+        # way a genuinely wrong-vintage BDDK weekly item would be -- enough
+        # to flip a close pair to its Stok counterpart, which happens to be
+        # monthly-native. A non-monthly explicit request (haftalık/günlük)
+        # still penalizes a macro candidate whose native frequency cannot
+        # serve it natively.
+        if wanted == "monthly" and candidate.get("source") == "macro":
+            continue
         if grain != wanted:
             candidate["score"] = round(candidate.get("score", 0.0) + GRAIN_PENALTY, 3)
             candidate["grain_mismatch"] = f"{grain} != requested {wanted}"
