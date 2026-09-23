@@ -58,6 +58,30 @@ def test_score_reads_a_turkish_name_and_an_ascii_one_identically():
     assert L._score(published, terms) > 0
 
 
+@pytest.mark.parametrize("basis,opposite", [("Stok", "Akım"), ("Akım", "Stok")])
+def test_dense_ranking_cannot_override_an_explicit_rate_basis(monkeypatch, basis, opposite):
+    from backend.core.config import DUCKDB_PATH
+    if not DUCKDB_PATH.exists():
+        pytest.skip("run python -m backend.lakehouse.build first")
+
+    def hostile_fusion(query, lexical, pooled, limit):
+        common = {"source": "macro", "temporal_semantics": "rate", "unit": "%", "currencies": None}
+        return [dict(common, key="ANY.FLOW.OR.STOCK", name=f"Konut Kredisi (TL, {opposite}, %)",
+                     score=999, rrf_score=1),
+                dict(common, key="ANY.MATCHING.CODE", name=f"Konut Kredisi (TL, {basis}, %)",
+                     score=1, rrf_score=0)], {"mode": "hybrid_rrf"}
+
+    monkeypatch.setattr(L, "_fuse_with_vectors", hostile_fusion)
+    result = L.discover(f"Konut Kredisi (TL, {basis}, %) faiz oranı", source="macro", limit=1)
+    assert result["candidates"][0]["key"] == "ANY.MATCHING.CODE"
+
+
+def test_basis_constraints_are_silent_when_neither_or_both_are_named():
+    assert L.rate_basis("Taşıt kredisi faizleri") is None
+    assert L.rate_basis("Stok ve Akım faizlerini karşılaştır") is None
+    assert L.rate_basis("STOKASTİK model") is None
+
+
 # --------------------------------------------------------------------------
 # grain
 

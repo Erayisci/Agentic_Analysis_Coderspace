@@ -22,6 +22,8 @@ import re
 import time
 from typing import Any, Dict, FrozenSet, List, Optional
 
+import pandas as pd
+
 from ..core.labels import slugify
 from ..tools import transforms as T
 from ..tools.anomaly import detect_anomalies_in_series
@@ -218,10 +220,21 @@ class Executor:
 
     def run(self, plan: Plan) -> Session:
         session = self.session
+        # Difference only AFTER fetching the lag history, including inputs of
+        # sums. The displayed plan/window stays unchanged. If the archive has
+        # no preceding month, net_change correctly retains a missing value.
+        lag = max((s.periods or 1 for s in plan.steps if s.op == "transform"
+                   and s.operation in ("net_change", "change")), default=0)
+        fetch_plan = plan
+        if lag and plan.start:
+            fetch_plan = plan.model_copy(update={
+                "start": (pd.Timestamp(plan.start) - pd.DateOffset(months=lag)).strftime("%Y-%m-%d")})
         for index, step in enumerate(plan.steps, start=1):
             started = time.perf_counter()
             try:
-                detail = self._dispatch(step, plan)
+                if step.op == "chart" and lag:
+                    T.window(session.artifact, plan.start, plan.end)
+                detail = self._dispatch(step, fetch_plan if step.op == "fetch_series" else plan)
                 ok = True
             except Exception as exc:                                  # noqa: BLE001
                 # Deliberately broad: a tool raising anything must cost one step,
@@ -413,7 +426,7 @@ class Executor:
 
     def _transform(self, step: Step, plan: Plan) -> str:
         artifact = self.session.artifact
-        column = self._resolve_column(step.column)
+        column = self._resolve_column(step.column) if step.operation != "sum_columns" else None
         if step.operation == "index_to_base":
             name = T.index_to_base(artifact, column, step.base_period or plan.start, step.as_name)
         elif step.operation == "deflate":
@@ -421,6 +434,11 @@ class Executor:
             name = T.deflate(artifact, column, deflator, step.base_period or plan.start, step.as_name)
         elif step.operation == "change":
             name = T.change(artifact, column, step.periods or 1, step.as_name)
+        elif step.operation == "net_change":
+            name = T.net_change(artifact, column, step.periods if step.periods is not None else 1, step.as_name)
+        elif step.operation == "sum_columns":
+            columns = [self._resolve_column(c) for c in step.columns]
+            name = T.sum_columns(artifact, columns, step.as_name)
         elif step.operation == "ratio":
             denominator = self._resolve_column(step.other_column, required="ratio needs other_column")
             name = T.ratio(artifact, column, denominator, step.as_name)
@@ -722,6 +740,7 @@ class Executor:
         self.session.turn_cited = []
         self.session.turn_columns = []
         self.session.visible_columns = []
+        self.session.hidden_inputs = []
         return f"cleared {n_columns} column(s); table is now empty"
 
     # -- helpers -----------------------------------------------------------

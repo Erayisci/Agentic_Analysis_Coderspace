@@ -114,6 +114,47 @@ def change(artifact: AnalysisArtifact, column: str, periods: int = 1,
     return name
 
 
+def net_change(artifact: AnalysisArtifact, column: str, periods: int = 1,
+               as_name: Optional[str] = None) -> str:
+    """Absolute stock difference, in the input unit; never gross inflows."""
+    lineage = _require(artifact, column)
+    if lineage.temporal_semantics != "stock" or not lineage.unit or lineage.unit.lower() in RELATIVE_UNITS:
+        raise ValueError(f"net_change requires a stock amount; {column!r} is "
+                         f"{lineage.temporal_semantics} ({lineage.unit})")
+    if isinstance(periods, bool) or not isinstance(periods, int) or periods < 1:
+        raise ValueError("net_change periods must be a positive integer")
+    name = as_name or f"{column}_net_change{periods}"
+    values = artifact.frame[column] - artifact.frame[column].shift(periods)
+    artifact.add_column(name, values, ColumnLineage(
+        column=name, label=f"{lineage.label} (net bakiye degisimi, {periods} donem; brut akis degil)",
+        source=DERIVED, unit=lineage.unit, temporal_semantics="net_change", key=lineage.key,
+        grain=lineage.grain, transform=f"net_change({column}, periods={periods})",
+        derived_from=[column], citation=dict(lineage.citation)))
+    return name
+
+
+def sum_columns(artifact: AnalysisArtifact, columns: List[str], as_name: Optional[str] = None) -> str:
+    """Sum compatible, disjoint amount columns; missing inputs stay missing."""
+    if len(columns) < 2 or len(set(columns)) != len(columns):
+        raise ValueError("sum_columns needs at least two distinct columns")
+    lines = [_require(artifact, column) for column in columns]
+    first = lines[0]
+    if len({line.unit for line in lines}) != 1:
+        raise ValueError("sum_columns units differ")
+    if len({line.grain for line in lines}) != 1:
+        raise ValueError("sum_columns inputs have different grains")
+    if (len({line.temporal_semantics for line in lines}) != 1
+            or first.temporal_semantics not in ("stock", "flow", "net_change")
+            or not first.unit or first.unit.lower() in RELATIVE_UNITS):
+        raise ValueError("sum_columns requires compatible additive amounts")
+    name = as_name or "_plus_".join(columns)
+    artifact.add_column(name, artifact.frame[columns].sum(axis=1, min_count=len(columns)), ColumnLineage(
+        column=name, label=" + ".join(line.label for line in lines), source=DERIVED,
+        unit=first.unit, temporal_semantics=first.temporal_semantics, grain=first.grain,
+        transform=f"sum_columns({', '.join(columns)})", derived_from=list(columns), citation={}))
+    return name
+
+
 def ratio(artifact: AnalysisArtifact, numerator: str, denominator: str,
           as_name: Optional[str] = None, as_percent: bool = True) -> str:
     """One column over another, as a share. Refuses mismatched units."""

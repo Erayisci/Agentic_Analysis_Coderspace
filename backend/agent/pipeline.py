@@ -1,6 +1,6 @@
-"""Wires the five stages into one turn, and holds sessions across turns.
+"""Wires interpretation, planning and execution into one turn across sessions.
 
-    route -> (pre-ingest URLs) -> plan -> execute -> verify -> compose
+    route -> semantics -> (pre-ingest URLs) -> plan -> execute -> verify -> compose
 
 A URL in the prompt is landed in the lakehouse's external zone BEFORE the
 planner runs (`pre_ingest`). That is what makes demo-day sources automatic:
@@ -29,12 +29,13 @@ from ..core.labels import fold
 from ..ingestion.external import IngestResult, ingest_url
 from ..lakehouse import external_store
 from ..llm import KloudeksClient, LLMError
-from ..tools.lakehouse import discover_concepts
+from ..tools.lakehouse import concept_identity, discover_concepts
 from .composer import compose
 from .evidence_store import EvidenceStorageError
 from .executor import DATASET_SOURCES, Executor, _column_name, _normalise_key, match_column
 from .planner import Plan, Step, planner_messages, template_plan
 from .router import Route, extract_single_month, extract_urls, route, without_urls
+from .semantics import QuerySemantics, parse_query_semantics
 from .state import AuditStep, Session
 from .verifier import verify
 
@@ -45,6 +46,43 @@ MAX_CANDIDATES_IN_CONTEXT = 12
 MAX_LANDED_IN_CONTEXT = 12
 
 logger = logging.getLogger("kkb.agent")
+
+
+def interpret_query(question: str, session: Session, route_result: Route, client=None) -> QuerySemantics:
+    """Structured interaction overrides legacy routing only after a valid parse."""
+    view = session.view()
+    semantics = parse_query_semantics(question, client, context={
+        "has_artifact": session.has_artifact(),
+        "columns": {name: {"label": line.label, "semantics": line.temporal_semantics}
+                    for name, line in view.lineage.items()},
+        "window": view.periods()[:1] + view.periods()[-1:],
+        "previous_question": session.turns[-2]["question"] if len(session.turns) > 1 else None,
+    })
+    if semantics is None:
+        # The existing router remains the interaction fallback. Output intent
+        # stays unspecified: no dictionary of stock-rejection phrases here.
+        semantics = QuerySemantics(
+            interaction=("presentation_only" if route_result.presentation_only else
+                         "extend_previous" if route_result.is_followup else "new_analysis"),
+            preserve_existing_window=route_result.is_followup)
+        session.facts["semantic_source"] = "fallback"
+    else:
+        session.facts["semantic_source"] = "llm"
+        follows = session.has_artifact() and semantics.interaction != "new_analysis"
+        route_result.is_followup = follows
+        route_result.presentation_only = follows and semantics.interaction == "presentation_only"
+        if follows:
+            route_result.wants_table = True
+            if not route_result.urls:
+                route_result.intent = "followup"
+        elif route_result.intent == "followup":
+            route_result.intent = "series_analysis"
+        route_result.decided_by = "semantic"
+    session.facts["query_semantics"] = semantics.model_dump()
+    logger.info("semantic -> interaction=%s output=%s basis=%s frequency=%s currencies=%s preserve_window=%s",
+                semantics.interaction, semantics.requested_output, semantics.requested_basis,
+                semantics.frequency, semantics.currencies, semantics.preserve_existing_window)
+    return semantics
 
 
 def pre_ingest(question: str, session: Session, route_result: Route, client=None) -> List[IngestResult]:
@@ -142,7 +180,8 @@ def _timed(timings: Dict[str, float], stage: str) -> Generator[None, None, None]
 
 def build_context(question: str, session: Session, route_result: Route,
                   discovery: Optional[Dict[str, Any]] = None,
-                  landed: Optional[List[Dict[str, Any]]] = None) -> str:
+                  landed: Optional[List[Dict[str, Any]]] = None,
+                  semantics: Optional[QuerySemantics] = None) -> str:
     """What the planner needs to know before it can name a key.
 
     Discovery runs first, deterministically, for exactly this reason: the plan
@@ -151,6 +190,12 @@ def build_context(question: str, session: Session, route_result: Route,
     discovery it already ran so the dimension guard sees the same candidates.
     """
     blocks: List[str] = []
+    if semantics is not None:
+        blocks.append("QUERY SEMANTICS (authoritative intent; resolve identities from discovery): "
+                      + semantics.model_dump_json() + "\n"
+                      "absolute_change on stock amounts requires net_change after any sums; "
+                      "percent_change requires change. flow requires a flow source: stock differences "
+                      "are not gross inflows. level keeps source levels. unspecified forces no transform.")
 
     if session.has_artifact() and route_result.is_followup:
         # The table the user is looking at, which is the last turn's columns --
@@ -205,6 +250,8 @@ def build_context(question: str, session: Session, route_result: Route,
             + (f" | currency={c['currency']} (soruda istenen dilim)" if c.get("currency")
                else (f" | cur={','.join(c['currencies'])}" if c.get("currencies") else ""))
             + (f" | province={c['province']} (soruda istenen il; aynen kopyala)" if c.get("province") else "")
+            + (f" | metrics={c['metrics']} (fetch_series metric alani)" if c.get("metrics")
+               and c["source"] == "bulletin" else "")
             + (f" | {str(c['first_period'])[:7]}..{str(c['last_period'])[:7]} ({c['n_periods']} donem)"
                if c.get("n_periods") else "")
             for c in found["candidates"])
@@ -241,7 +288,7 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
     # `discover` on a thirty-word question diluted the one content word that
     # mattered, which is exactly what `discover_concepts` exists to prevent.
     found = discovery if discovery is not None else discover_concepts(question, limit=MAX_CANDIDATES_IN_CONTEXT)
-    by_identity = {(c["source"], c["key"], c.get("currency")): c for c in found["candidates"]}
+    by_identity = {concept_identity(c): c for c in found["candidates"]}
     chosen, taken = [], set()
     if landed:
         limit += 1          # two landed series plus two from the base corpus
@@ -254,6 +301,9 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
 
     for candidate in (landed or [])[:2]:
         take(candidate)
+    for candidate in sorted(found["candidates"], key=lambda c: -c.get("name_match", 0)):
+        if candidate.get("name_match"):
+            take(candidate)
     # Each clause's first choice first ("konut kredileri" -> the loan book,
     # "faiz oranlari" -> the rate), then the best of any corpus not yet seen.
     for ranked in found.get("by_concept") or []:
@@ -296,6 +346,141 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
 def _slice_name(base: str, currency: str) -> str:
     slug = re.sub(r"[^\w]+", "_", base).strip("_")
     return f"{slug}_{currency.lower()}"
+
+
+def apply_output_semantics(plan: Plan, semantics: QuerySemantics, session: Session,
+                           discovery: Dict[str, Any], is_followup: bool = False) -> Plan:
+    """Enforce structured intent using published metadata, never question text.
+
+    Totals/groups are outputs; source buckets remain hidden lineage. Stock
+    differences cannot satisfy gross flow requests.
+    """
+    from ..tools.transforms import RELATIVE_UNITS
+
+    requested = semantics.requested_output
+    if requested == "unspecified":
+        return plan
+    candidates = discovery.get("candidates") or []
+    named = {(c["source"], c["key"], c.get("dataset")) for c in candidates
+             if c.get("name_match") and c.get("temporal_semantics") == "stock"}
+    columns, consumed, aliases = {}, set(), {}
+    if is_followup:
+        for name, line in session.view().lineage.items():
+            columns[name] = dict(semantics=line.temporal_semantics, unit=line.unit, roots=set(),
+                                 operation=(line.transform or "").split("(")[0])
+    kept_steps = []
+    for step in plan.steps:
+        # Removing an inappropriate difference also repairs its consumers.
+        for field in ("column", "other_column", "against"):
+            value = getattr(step, field, None)
+            if value in aliases:
+                setattr(step, field, aliases[value])
+        if step.columns:
+            step.columns = [aliases.get(c, c) for c in step.columns]
+        if step.op == "fetch_series":
+            key = _normalise_key(step.key)
+            matches = [c for c in candidates if c["key"] == key
+                       and (not step.source or step.source == c["source"])
+                       and (not step.dataset or step.dataset == c.get("dataset"))]
+            if matches:
+                c = matches[0]
+                name = _column_name(step, re.sub(r"[^\w]+", "_", key))
+                step.as_name = name
+                columns[name] = dict(semantics=c["temporal_semantics"], unit=c["unit"],
+                                     currency_slice=bool(c.get("currencies") and step.currency in ("TL", "FX")),
+                                     roots={(c["source"], key, c.get("dataset"))})
+        elif step.op == "transform":
+            references = step.columns if step.operation == "sum_columns" else [step.column, step.other_column]
+            inputs = [match_column(c, list(columns)) for c in references if c]
+            if not inputs or any(c is None for c in inputs):
+                kept_steps.append(step)
+                continue
+            first = columns[inputs[0]]
+            stock_amount = (first["semantics"] == "stock" and first["unit"]
+                            and first["unit"].lower() not in RELATIVE_UNITS)
+            if step.operation in ("net_change", "change"):
+                default = (f"{inputs[0]}_net_change{step.periods or 1}" if step.operation == "net_change"
+                           else f"{inputs[0]}_{'yoy' if step.periods == 12 else f'chg{step.periods or 1}'}_pct")
+                old_name = _column_name(step, default)
+                if requested in ("level", "flow"):
+                    aliases[old_name] = inputs[0]
+                    continue
+                if requested == "absolute_change" and stock_amount:
+                    step.operation = "net_change"
+                elif requested == "percent_change":
+                    step.operation = "change"
+                step.as_name = old_name
+            consumed.update(inputs)
+            output_semantics = {"net_change": "net_change", "change": "rate", "ratio": "ratio",
+                                "index_to_base": "index"}.get(step.operation, first["semantics"])
+            if step.operation == "sum_columns":
+                output_semantics = first["semantics"] if all(columns[c]["semantics"] == first["semantics"]
+                                                            for c in inputs) else None
+                default = "_plus_".join(inputs)
+            else:
+                default = step.as_name or {
+                    "index_to_base": f"{inputs[0]}_endeks", "deflate": f"{inputs[0]}_reel",
+                    "in_usd": f"{inputs[0]}_usd",
+                    "ratio": f"{inputs[0]}_over_{inputs[-1]}",
+                }.get(step.operation)
+            if default:
+                name = _column_name(step, default)
+                step.as_name = name
+                columns[name] = dict(semantics=output_semantics,
+                                     unit="%" if step.operation in ("change", "ratio") else first["unit"],
+                                     operation=step.operation,
+                                     roots=set().union(*(columns[c]["roots"] for c in inputs)))
+        kept_steps.append(step)
+
+    selected_named = named & set().union(*(c["roots"] for c in columns.values())) if columns else set()
+    outputs, added, limitations = [], [], []
+    for name, meta in list(columns.items()):
+        if name in consumed:
+            continue
+        stock = meta["semantics"] == "stock" and meta["unit"] and meta["unit"].lower() not in RELATIVE_UNITS
+        if stock and meta.get("currency_slice") and selected_named and not meta["roots"] & selected_named:
+            continue
+        operation = None
+        if requested == "absolute_change" and stock:
+            operation = "net_change"
+        elif requested == "percent_change" and meta.get("operation") != "change":
+            if meta["unit"] and meta["semantics"] in ("stock", "flow", "rate", "index", "ratio", "net_change"):
+                operation = "change"
+            else:
+                limitations.append(f"{name}: bu kaynağın zaman anlamı yüzde değişim hesabını desteklemiyor.")
+                continue
+        elif requested == "flow" and meta["semantics"] != "flow":
+            limitations.append(
+                f"{name}: seçilen kaynak {meta['semantics']} verisi içeriyor; dönem içindeki brüt giriş "
+                "veya yeni mevduat doğrudan hesaplanamaz. Net bakiye değişimi brüt akış değildir; "
+                "işlem/akış kaynağı gerekir.")
+            continue
+        if operation:
+            suffix_name = "net" if operation == "net_change" else "pct"
+            target, suffix = f"{name}_{suffix_name}", 2
+            while target in columns or target in outputs:
+                target, suffix = f"{name}_{suffix_name}_{suffix}", suffix + 1
+            added.append(Step(op="transform", operation=operation, column=name, as_name=target))
+            outputs.append(target)
+        else:
+            outputs.append(name)
+    if requested == "flow" and not columns:
+        limitations.append("Akış kaynağı doğrulanamadı; brüt giriş veya yeni mevduat gösterilemiyor.")
+    if limitations:
+        session.facts["semantic_limitations"] = limitations
+    if not columns and not limitations:
+        return plan
+    charts = [step for step in kept_steps if step.op == "chart"]
+    plan.steps = [step for step in kept_steps if step.op != "chart"] + added + charts
+    for step in charts:
+        step.columns = outputs
+    session.facts["output_columns"] = outputs
+    session.facts["semantic_status"] = "unsupported" if limitations else "enforced"
+    note = "net bakiye degisimi; brut akis degil" if requested == "absolute_change" else requested
+    marker = f"[output semantics: {note}]"
+    if marker not in (plan.reasoning or ""):
+        plan.reasoning = f"{plan.reasoning or ''} {marker}".strip()
+    return plan
 
 
 def apply_dimensions(plan: Plan, discovery: Dict[str, Any]) -> Plan:
@@ -417,7 +602,7 @@ def apply_scope(plan: Plan, route_result: Route, session: Session, discovery: Di
     if route_result.is_followup or not session.has_artifact():
         return plan
     stale = session.artifact.column_names()
-    by_identity = {(c["source"], c["key"], c.get("currency")): c for c in discovery.get("candidates") or []}
+    by_identity = {concept_identity(c): c for c in discovery.get("candidates") or []}
     fetched = {(s.source, _normalise_key(s.key)) for s in plan.steps if s.op == "fetch_series" and s.key}
     spare: List[Dict[str, Any]] = []
     for ranked in discovery.get("by_concept") or []:
@@ -626,7 +811,7 @@ def apply_presentation(plan: Plan, route_result: Route, question: str,
     """
     named = [step for step in plan.steps if step.op == "chart"]
     plan.steps = [step for step in plan.steps if step.op != "chart"]
-    if not route_result.wants_chart:
+    if not route_result.wants_chart or (session is not None and session.facts.get("output_columns") == []):
         return plan
     has_data = any(step.op in DATA_PRODUCING_OPS for step in plan.steps)
     # Only a FOLLOW-UP may chart the table it extends: a fresh question whose
@@ -637,6 +822,8 @@ def apply_presentation(plan: Plan, route_result: Route, question: str,
     if has_data or has_table:
         # Keep the columns/title the model named, if it named any.
         chart = named[0] if named else Step(op="chart")
+        if session is not None and session.facts.get("output_columns") is not None:
+            chart.columns = session.facts["output_columns"]
         # No title from the question: "bunun grafigini ciz" says nothing
         # about what is drawn. Left empty, the executor titles the chart
         # from the series it actually holds and the period it covers.
@@ -652,7 +839,8 @@ def apply_presentation(plan: Plan, route_result: Route, question: str,
 
 def make_plan(question: str, session: Session, route_result: Route,
               client: Optional[KloudeksClient],
-              ingested: Optional[List[IngestResult]] = None) -> Plan:
+              ingested: Optional[List[IngestResult]] = None,
+              semantics: Optional[QuerySemantics] = None) -> Plan:
     """A validated plan: from the model when possible, from a template otherwise.
 
     Discovery runs once here and feeds three consumers -- the planner's
@@ -666,6 +854,7 @@ def make_plan(question: str, session: Session, route_result: Route,
     # is an address the router already carries on `route_result.urls`. See
     # `router.without_urls` for what its path words cost when they rank as
     # search terms. The model still sees the question as the user wrote it.
+    semantics = semantics if semantics is not None else interpret_query(question, session, route_result, client)
     concepts = without_urls(question)
     landed = landed_series(ingested or [], concepts)
     series_intent = route_result.intent in ("series_analysis", "followup") or bool(landed)
@@ -688,7 +877,8 @@ def make_plan(question: str, session: Session, route_result: Route,
         return Plan(intent="followup", steps=[Step(op="clear_table")],
                     reasoning="deterministic: explicit clear request")
 
-    found = (discover_concepts(concepts, limit=MAX_CANDIDATES_IN_CONTEXT)
+    found = (discover_concepts(concepts, limit=MAX_CANDIDATES_IN_CONTEXT,
+                               requested_basis=semantics.requested_basis, frequency=semantics.frequency)
              if client is not None or series_intent else {"candidates": [], "by_concept": []})
 
     def fallback() -> Plan:
@@ -703,7 +893,7 @@ def make_plan(question: str, session: Session, route_result: Route,
         try:
             plan = client.structured(
                 planner_messages(question, build_context(question, session, route_result,
-                                                         discovery=found, landed=landed)),
+                                                         discovery=found, landed=landed, semantics=semantics)),
                 Plan, max_tokens=1400)
         except LLMError:
             plan = None
@@ -738,22 +928,22 @@ def make_plan(question: str, session: Session, route_result: Route,
     # The router's regex read of the date range beats the model's: it is exact,
     # and a plan that silently drops the window returns 67 months for a
     # question that asked for 60.
-    if route_result.start and not plan.start:
+    if route_result.start:
         plan.start = route_result.start
-    if route_result.end and not plan.end:
+    if route_result.end:
         plan.end = route_result.end
 
     # A follow-up inherits the window of the table it extends. "Bu tabloyu hic
     # bozmadan" states no dates, so without this the new column arrives with its
     # own full history and the outer join stretches the table from 60 rows to 67
     # -- disturbing precisely what the question said not to disturb.
-    if route_result.is_followup and session.has_artifact():
+    if semantics.preserve_existing_window and session.has_artifact():
         # The window of the table on screen, which a narrower focus may have
         # shortened -- "bozmadan" protects what the last turn showed.
         index = session.view().frame.index
         if len(index):
-            plan.start = plan.start or index.min().strftime("%Y-%m-%d")
-            plan.end = plan.end or index.max().strftime("%Y-%m-%d")
+            plan.start = route_result.start or index.min().strftime("%Y-%m-%d")
+            plan.end = route_result.end or index.max().strftime("%Y-%m-%d")
     # A URL that produced no series is a document to read, not a table to
     # join: give the composer its text. A URL that did produce series is
     # already in the plan's reach as external keys and needs no read step.
@@ -762,7 +952,8 @@ def make_plan(question: str, session: Session, route_result: Route,
                   if external_store.canonical_url(url) not in landed_urls]
     if prose_urls and not any(step.op == "read_url" for step in plan.steps):
         plan.steps = template_plan("url_analysis", question, prose_urls).steps + plan.steps
-    return plan
+    metadata = {**found, "candidates": found["candidates"] + landed}
+    return apply_output_semantics(plan, semantics, session, metadata, route_result.is_followup)
 
 
 def _table_payload(session: Session) -> Dict[str, Any]:
@@ -796,6 +987,10 @@ def _run_turn(question: str, session: Optional[Session] = None,
                                  reason="website web research mode")
         else:
             route_result = route(question, has_artifact=session.has_artifact(), client=client)
+    with _timed(timings, "semantic"):
+        semantics = interpret_query(question, session, route_result, client)
+    if mode == "research":
+        route_result.intent = "search"  # an explicit UI mode still selects its runner
     logger.info("route -> %s (%s) chart=%s table=%s", route_result.intent,
                 route_result.decided_by, route_result.wants_chart, route_result.wants_table)
     if route_result.intent == "search" and research_runner is not None:
@@ -813,7 +1008,7 @@ def _run_turn(question: str, session: Optional[Session] = None,
     # `plan` includes discovery (`build_context`) and the planner's model call;
     # `KloudeksClient` logs each call separately, so the two are separable.
     with _timed(timings, "plan"):
-        plan = make_plan(question, session, route_result, client, ingested)
+        plan = make_plan(question, session, route_result, client, ingested, semantics)
         plan = apply_valuation_guard(plan, session, is_followup=route_result.is_followup)
         plan = apply_analysis(plan, route_result, session)
         plan = apply_presentation(plan, route_result, question, session)
@@ -855,6 +1050,8 @@ def _run_turn(question: str, session: Optional[Session] = None,
 
     return {
         "question": question,
+        "semantics": semantics.model_dump(),
+        "semantic_status": session.facts.get("semantic_status"),
         "route": route_result.model_dump(),
         "plan": plan.model_dump(exclude_none=True),
         "summary": answer["summary"],

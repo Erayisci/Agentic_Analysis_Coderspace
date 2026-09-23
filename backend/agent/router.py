@@ -1,13 +1,9 @@
-"""Decides what kind of question this is, cheaply and mostly without a model.
+"""Extract dates, URLs and presentation flags, with legacy interaction fallback.
 
-Everything the router can settle with a regex, it settles with a regex. A URL
-in the prompt means the URL tool runs -- no model needed to notice that. A
-follow-up phrased "bozmadan" against an existing table is a follow-up whatever
-a classifier thinks. This removes the model from the decisions it is worst at
-and makes the common paths free and deterministic.
-
-The LLM is consulted only when the deterministic signals are silent, and even
-then its answer is one of six labels chosen by guided decoding, not free text.
+The pipeline's structured semantic interpretation takes precedence over this
+router's follow-up decision. These rules still support standalone routing and
+turns where semantic parsing is unavailable. The narrow intent classifier
+handles research/metadata/analysis routing when deterministic signals are silent.
 """
 import re
 from typing import List, Optional
@@ -54,6 +50,10 @@ FOLLOWUP_PATTERN = re.compile(
     r"(bozmadan|bozmaks[ıi]z[ıi]n|ayn[ıi]\s+(tablo|grafi)\w*|bu\s+(tablo|grafi)\w*|"
     r"mevcut\s+(tablo|grafi)\w*|tablo(ya|nun|daki|dan)\b|grafi[ğg]e\s+ekle|"
     r"yeni\s+bir?\s+s[üu]tun|s[üu]tun\s+olarak\s+ekle|[üu]st[üu]ne\s+ekle|"
+    r"bu\s+(?:(?:\d+|iki)\s+)?veri\w*|ayn[ıi]\s+(ay\w*|d[öo]nem\w*|tarih\s+eksen\w*)|"
+    r"veri\s*seti(?:ne|ni|nin|ndeki)\b|"
+    r"\b(?:sonu[çc]\w*|seri\w*|veri\w*|faiz\w*|kredi\w*|mevduat\w*|enflasyon\w*|kur\w*)"
+    r"[^.!?;]*\bekle(?:yin|yiniz|r\s+misin|meni|mek)?\b|"
     r"without\s+(disturbing|changing|breaking)|add\s+(a\s+)?(new\s+)?column|same\s+(table|chart))", re.I)
 
 # The words a bare presentation request is made of: "bunun grafiğini çizer
@@ -143,7 +143,7 @@ CHART_PATTERN = re.compile(
     r"\bpasta(s[ıi]|y[ıi]|n[ıi])?\b|\bpie\b)", re.I)
 # "aylık olarak gösteriniz" asks to see the monthly figures, which is a table.
 TABLE_PATTERN = re.compile(
-    r"(tablo|s[üu]tun|listele|d[öo]k(?:üm|um)|table|column|list\s+(the|all)|\bshow\b)", re.I)
+    r"(tablo|veri\s*seti|dataset|s[üu]tun|listele|d[öo]k(?:üm|um)|table|column|list\s+(the|all)|\bshow\b)", re.I)
 # "göster" is a request to display something -- except in "değişim göstermiş",
 # "tepki vermiş/göstermiş", "artış gösterdi", where it is the verb "exhibit"
 # and the question wants prose. Both phrasings are common in the same
@@ -220,7 +220,9 @@ FOOTNOTE_PATTERN = re.compile(
 DATE_TOKEN = re.compile(
     r"\b(20\d{2})"
     r"(?:[-/](0?[1-9]|1[0-2])\b"
-    r"|(?:\s*y[ıi]l[ıi]n?[ıi]?n?)?\s*(sonu\w*|ba[şs][ıi]\w*|ortas[ıi]\w*|ilk\s+yar[ıi]s[ıi]\w*|ikinci\s+yar[ıi]s[ıi]\w*)"
+    r"|(?:['’]n[ıi]n)?(?:\s*y[ıi]l[ıi]n?[ıi]?n?)?\s*"
+    r"(sonu\w*|ba[şs][ıi]\w*|ortas[ıi]\w*|ilk\s+(?:[1-9]|1[0-2])\s+ay\w*|"
+    r"ilk\s+yar[ıi]s[ıi]\w*|ikinci\s+yar[ıi]s[ıi]\w*)"
     # A bare year with its case suffix: "2021'den itibaren" opens a window,
     # "2024'e kadar" closes one. Without this the year read as a closed
     # calendar year and "2021'den itibaren" returned twelve months.
@@ -272,6 +274,8 @@ def extract_window(question: str):
     is 60 months -- the count the brief itself states, and a useful check that
     this read is the intended one.
     """
+    # Bulletin periods are also written as YYYYMM, including in ranges.
+    question = re.sub(r"\b(20\d{2})(0[1-9]|1[0-2])\b", r"\1-\2", question or "")
     tokens = []                                   # (year, start_month, end_month, qualifier)
     for year, month, qualifier, suffix in DATE_TOKEN.findall(question or ""):
         year = int(year)
@@ -288,7 +292,8 @@ def extract_window(question: str):
             elif word.startswith("orta"):
                 span = (6, 6)
             elif word.startswith("ilk"):
-                span = (1, 6)
+                count = re.search(r"\d+", word)
+                span = (1, int(count.group()) if count else 6)
             else:
                 span = (7, 12)
             tokens.append((year, span[0], span[1], word))

@@ -88,7 +88,7 @@ class AnalysisArtifact:
     def units(self) -> Dict[str, str]:
         return {name: line.unit for name, line in self.lineage.items() if name in self.frame.columns}
 
-    def subset(self, columns: List[str]) -> "AnalysisArtifact":
+    def subset(self, columns: List[str], drop_empty: bool = True) -> "AnalysisArtifact":
         """A view of this table holding only `columns` -- the artifact itself
         is untouched.
 
@@ -110,7 +110,7 @@ class AnalysisArtifact:
             return self
         return AnalysisArtifact(
             title=self.title,
-            frame=self.frame[keep].dropna(how="all"),
+            frame=self.frame[keep].dropna(how="all") if drop_empty else self.frame[keep],
             lineage={name: self.lineage[name] for name in keep if name in self.lineage})
 
     def column_names(self) -> List[str]:
@@ -223,6 +223,7 @@ class Session:
     # about. The artifact is the whole conversation; these two are the turn.
     turn_columns: List[str] = field(default_factory=list)
     visible_columns: List[str] = field(default_factory=list)
+    hidden_inputs: List[str] = field(default_factory=list)  # retained lineage, excluded from automatic focus
     # What this turn cited, as opposed to `citations`, the conversation's.
     turn_cited: List[Dict[str, Any]] = field(default_factory=list)
     # This turn shows no table at all: a NEW question that produced no column
@@ -262,7 +263,7 @@ class Session:
         FinTurk row under an answer that never touched it.
         """
         out: List[Dict[str, Any]] = []
-        for line in self.view().lineage.values():
+        for line in self.evidence_view().lineage.values():
             if line.citation and line.citation not in out:
                 out.append(line.citation)
         column_citations = [line.citation for line in self.artifact.lineage.values() if line.citation]
@@ -293,16 +294,24 @@ class Session:
         whole session forward instead is what put four columns under a
         question that named two, and three turns in it would have been six.
 
-        A derived column's inputs come along: the table must be able to
-        explain the numbers it shows, and `verifier` checks exactly that.
+        A derived column's inputs normally come along. An enforced output
+        selection keeps them hidden and available through `evidence_view`.
         """
         existing = self.artifact.column_names()
+        outputs = self.facts.get("output_columns")
+        if outputs is not None:
+            eligible = set(self.turn_columns) | (set(self.visible_columns) if keep_previous else set())
+            self.visible_columns = [c for c in outputs if c in existing and c in eligible]
+            self.hidden_inputs = list(dict.fromkeys(self.hidden_inputs + [
+                c for c in self.turn_columns if c not in self.visible_columns]))
+            self.shown_empty = not self.visible_columns
+            return self.visible_columns
         scope = {c for c in self.turn_columns if c in existing}
         if keep_previous:
             scope |= {c for c in self.visible_columns if c in existing}
         for _ in range(len(existing)):
             parents = {p for c in scope for p in self.artifact.lineage[c].derived_from
-                       if c in self.artifact.lineage and p in existing}
+                       if c in self.artifact.lineage and p in existing and p not in self.hidden_inputs}
             if parents <= scope:
                 break
             scope |= parents
@@ -325,7 +334,25 @@ class Session:
         """The artifact as this turn should present it -- see `focus`."""
         if self.shown_empty:
             return AnalysisArtifact()
-        return self.artifact.subset(self.visible_columns) if self.visible_columns else self.artifact
+        # A missing first difference is still a requested month, not a row to
+        # drop. Keep it visible as null while leaving other subset rules alone.
+        drop_empty = not any(self.artifact.lineage[c].temporal_semantics == "net_change"
+                             for c in self.visible_columns if c in self.artifact.lineage)
+        return self.artifact.subset(self.visible_columns, drop_empty=drop_empty) if self.visible_columns else self.artifact
+
+    def evidence_view(self) -> AnalysisArtifact:
+        """Visible outputs and their transitive inputs, for citations/verification."""
+        scope = set(self.view().column_names())
+        if not scope:
+            return AnalysisArtifact()
+        for _ in range(len(self.artifact.lineage)):
+            parents = {p for c in scope if c in self.artifact.lineage
+                       for p in self.artifact.lineage[c].derived_from
+                       if p in self.artifact.lineage}
+            if parents <= scope:
+                break
+            scope |= parents
+        return self.artifact.subset(list(scope), drop_empty=False)
 
     def has_artifact(self) -> bool:
         return not self.artifact.is_empty()

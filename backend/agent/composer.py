@@ -116,6 +116,8 @@ def deterministic_summary(session: Session, question: str) -> str:
     """
     artifact = session.view()
     if artifact.is_empty():
+        if session.facts.get("semantic_limitations"):
+            return " ".join(session.facts["semantic_limitations"])
         if any(a.op == "clear_table" and a.ok for a in session.audit) and session.artifact.is_empty():
             return "Tablo temizlendi. Yeni bir soru sorabilirsiniz."
         failures = "; ".join(a.detail for a in session.audit if not a.ok)
@@ -137,6 +139,9 @@ def deterministic_summary(session: Session, question: str) -> str:
             f"{', degisim ' + change if change else ''}{tag}")
     if any((line.transform or "").startswith("in_usd(") for line in artifact.lineage.values()):
         lines += ["", "Not: " + VALUATION_NOTE]
+    if any(line.temporal_semantics == "net_change" for line in artifact.lineage.values()):
+        lines += ["", "Seriler net bakiye değişimidir; brüt giriş veya yeni mevduat değildir. "
+                  "Önceki ayın bakiyesi yoksa net değişim eksik bırakılır."]
 
     for found in session.facts.get("find_periods", []):
         months = ", ".join(p["period"] for p in found["periods"][:8])
