@@ -59,8 +59,10 @@ sorularında bazı vade kovalarını (örn. `bir_aya_kadar`) atlıyordu, eski ko
 fetch edilmiş olmadıkça hiç düzeltme yapmıyordu, ayrıca sadece İLK adresi düzeltip `break`
 ediyordu (ikinci para birimi düzeltilmeden kalıyordu). **Fix**: eksik kovaları otomatik fetch
 ediyor, TÜM adresleri (her para birimini) düzeltiyor, prefiks çakışmasını (`tl_`/`doviz_`) önlüyor.
-Not: `vadesiz` bilinçli olarak dışarıda tutuluyor (test senaryosunun kendi notu: "vadesiz açılış
-vade kovalarından ayrıdır" — vadesiz = vade YOK, 0 ay değil).
+Not (2026-09-23'te değişti): `vadesiz` artık "3 aya kadar" grubuna DAHİL. Gruplar satırın
+tamamını paylaşır: kısa + uzun = toplam satırı, ve bu eşitliği bir test pinliyor. Eski okuma
+("vadesiz = vade yok, iki gruba da girmez") kısa grubu vadesiz hareketi kadar eksik gösteriyordu
+ve grupların toplamı satırı tutmuyordu.
 
 ### 4. Dış kaynak PDF'lerinde tarih ayrıştırma çöküyordu
 `backend/tools/external_series.py::_parse_periods` — PDF tablosundaki alakasız bir metin parçası

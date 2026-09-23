@@ -21,7 +21,7 @@ from .verifier import VALUATION_NOTE, attach_sources, quotable_numbers, source_m
 
 COMPOSER_SYSTEM = """Sen bir finansal analistsin. Turkce, net ve profesyonel yaziyorsun.
 Vade gruplarinin kapsami yalniz facts.group_definitions inputs listesidir.
-Bu listede olmayan bir kalemi (ornegin vadesiz) gruba dahil diye anlatma.
+Bu listede olmayan bir kalemi (ornegin toplam satiri) gruba dahil diye anlatma.
 Kaynak satir adi ayni olsa da metric alanlari farkli vade kovalaridir.
 
 KESIN KURALLAR:

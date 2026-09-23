@@ -2534,14 +2534,14 @@ def test_mentor_maturity_rows_and_net_changes_execute_with_published_metrics():
     session = Session()
     context = build_context(question, session, route(question), discovery=found)
     assert "bir_ay_uc_ay" in context and "alti_ay_bir_yil" in context
-    metrics = ["bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
+    metrics = ["vadesiz", "bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
     assert set(metrics) <= set(tp["metrics"].split(","))
     steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=c["key"],
                   metric="toplam", as_name=name) for c, name in [(tp, "tp"), (yp, "yp")]]
     steps += [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=tp["key"],
                    metric=metric, as_name=metric) for metric in metrics]
-    steps += [Step(op="transform", operation="sum_columns", columns=metrics[:2], as_name="short_term"),
-              Step(op="transform", operation="sum_columns", columns=metrics[2:], as_name="long_term")]
+    steps += [Step(op="transform", operation="sum_columns", columns=metrics[:3], as_name="short_term"),
+              Step(op="transform", operation="sum_columns", columns=metrics[3:], as_name="long_term")]
     steps += [Step(op="transform", operation="net_change", column=name, as_name=name + "_net")
               for name in ["tp", "yp", "short_term", "long_term"]]
     plan = make_plan(question, session, route(question),
@@ -2553,11 +2553,11 @@ def test_mentor_maturity_rows_and_net_changes_execute_with_published_metrics():
     assert frame.index.max() == pd.Timestamp("2025-12-01")
     assert not frame.tp.equals(frame.yp)
     with duckdb.connect(str(DUCKDB_PATH), read_only=True) as con:
-        # Independent SQL proves the generic sum selected source buckets,
-        # excluding both the published total and demand deposits.
+        # Independent SQL proves the generic sum selected the source buckets
+        # of "3 aya kadar" (demand deposits included), not the published total.
         gold = con.execute("SELECT period, sum(value) AS value FROM bulletin_observations "
                            "WHERE dataset='mevduat_vade' AND entity_key=? "
-                           "AND metric IN ('bir_aya_kadar','bir_ay_uc_ay') "
+                           "AND metric IN ('vadesiz','bir_aya_kadar','bir_ay_uc_ay') "
                            "AND period BETWEEN '2021-01-01' AND '2025-12-01' GROUP BY period ORDER BY period",
                            [tp["key"]]).df()
     assert frame.short_term.tolist() == gold.value.tolist()
@@ -2612,7 +2612,10 @@ def test_live_mentor_omission_is_repaired_and_only_four_net_outputs_are_visible(
     assert result["table"]["rows"][-1]["period"] == "2025-12-01"
     assert all(session.view().lineage[c].temporal_semantics == "net_change" for c in outputs)
     assert all(session.view().lineage[c].unit == "milyon TL" for c in outputs)
-    assert "bir_aya_kadar" in session.artifact.frame and "bir_aya_kadar" not in outputs
+    # The model omitted `vadesiz`; the repair fetched it and re-aliased the
+    # buckets under the line's currency prefix, keeping the model's group names.
+    buckets = [c for c in session.artifact.frame if c.endswith(("bir_aya_kadar", "vadesiz"))]
+    assert len(buckets) == 2 and not set(buckets) & set(outputs)
     assert result["verification"]["passed"], result["verification"]
     assert all(s["ok"] for s in result["audit"]), result["audit"]
     assert len(result["figure"]["data"]) == 4

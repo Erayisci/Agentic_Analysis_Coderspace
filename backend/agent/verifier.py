@@ -555,8 +555,9 @@ def unsupported_numbers(text: str, allowed: Dict[str, Any], tolerance: float = 0
     """Numbers in the narrative that match nothing the tools computed.
 
     Years and small integers are ignored -- "2021" and "60 ay" are structure,
-    not claims. Everything else must appear in the computed facts within a
-    tolerance, since a model may round 245.34 to 245.3 legitimately.
+    not claims, and so is a bulletin period stamp ("202512", the way the
+    brief writes a month). Everything else must appear in the computed facts
+    within a tolerance, since a model may round 245.34 to 245.3 legitimately.
     """
     import json as _json
 
@@ -582,6 +583,8 @@ def unsupported_numbers(text: str, allowed: Dict[str, Any], tolerance: float = 0
             continue                                   # counts, lags, small integers
         if 1900 <= value <= 2100 and float(value).is_integer():
             continue                                   # years
+        if 190001 <= value <= 210012 and float(value).is_integer() and 1 <= value % 100 <= 12:
+            continue                                   # YYYYMM period stamps
         # Magnitude only: Turkish prose puts the sign before the percent sign
         # ("-%52,2") or in the verb ("%80,2 daraldı"), so a computed -80.21
         # is quoted as 80.21 and the sign lives in the words, not the number.

@@ -49,10 +49,12 @@ def without_urls(question: str) -> str:
 # follow-up, not its case ending.
 FOLLOWUP_PATTERN = re.compile(
     r"(bozmadan|bozmaks[ıi]z[ıi]n|ayn[ıi]\s+(tablo|grafi)\w*|bu\s+(tablo|grafi)\w*|"
-    r"mevcut\s+(tablo|grafi)\w*|tablo(ya|nun|daki|dan)\b|grafi[ğg]e\s+ekle|"
+    r"mevcut\s+(tablo|grafi|veri)\w*|tablo(ya|nun|daki|dan)\b|grafi[ğg]e\s+ekle|"
     r"yeni\s+bir?\s+s[üu]tun|s[üu]tun\s+olarak\s+ekle|[üu]st[üu]ne\s+ekle|"
     r"bu\s+(?:(?:\d+|iki)\s+)?veri\w*|ayn[ıi]\s+(ay\w*|d[öo]nem\w*|tarih\s+eksen\w*)|"
-    r"veri\s*seti(?:ne|ni|nin|ndeki)\b|"
+    # "mevcut veri setiyle tarih bazinda hizala": the instrumental case names
+    # the table on screen as the thing to align with.
+    r"veri\s*seti(?:ne|ni|nin|ndeki|yle|ile)\b|"
     r"\b(?:sonu[çc]\w*|seri\w*|veri\w*|faiz\w*|kredi\w*|mevduat\w*|enflasyon\w*|kur\w*)"
     r"[^.!?;]*\bekle(?:yin|yiniz|r\s+misin|meni|mek)?\b|"
     r"without\s+(disturbing|changing|breaking)|add\s+(a\s+)?(new\s+)?column|same\s+(table|chart))", re.I)
@@ -83,6 +85,57 @@ SINGLE_MONTH = re.compile(
     r"|\b(20\d{2})\s+(ocak|[şs]ubat|mart|nisan|may[ıi]s|haziran|temmuz|a[ğg]ustos|eyl[üu]l|ekim|kas[ıi]m|aral[ıi]k)\w*"  # 2024 Haziran
     r"|\b(ocak|[şs]ubat|mart|nisan|may[ıi]s|haziran|temmuz|a[ğg]ustos|eyl[üu]l|ekim|kas[ıi]m|aral[ıi]k)\w*\s+(20\d{2})\b",  # Haziran 2024
     re.I)
+
+
+# "202512 fiyatlariyla" / "2025 Aralik fiyatlariyla" / "2025 sonu fiyatlariyla":
+# the month whose prices a deflation is expressed in. Matched on the folded
+# question, so the case suffix and the dotted i do not matter. "son ay
+# fiyatlariyla" / "guncel fiyatlarla" mean the window's last month.
+_MONTHS = r"(?:ocak|subat|mart|nisan|mayis|haziran|temmuz|agustos|eylul|ekim|kasim|aralik)"
+BASE_PRICES = re.compile(
+    r"(?:(?P<ym>20\d{2})(?P<m>0[1-9]|1[0-2])"                          # 202512
+    r"|(?P<y2>20\d{2})[-/](?P<m2>0?[1-9]|1[0-2])"                       # 2025-12
+    r"|(?P<y3>20\d{2})\s+(?P<name3>" + _MONTHS + r")\w*"               # 2025 aralik
+    r"|(?P<name4>" + _MONTHS + r")\w*\s+(?P<y4>20\d{2})"               # aralik 2025
+    r"|(?P<y5>20\d{2})(?:'?n?in)?\s*(?:yili?n?i?n?\s*)?sonu\w*"        # 2025 sonu
+    r"|(?P<last>son\s+(?:ay|donem)\w*|guncel|bugunku|cari)"
+    r")\s+(?:sabit\s+)?fiyat\w*")
+
+
+# "reel hale getir", "enflasyondan arindir", "sabit fiyatlarla", "reel bazda":
+# the question asks for a deflation, whatever else it asks for.
+DEFLATION_REQUEST = re.compile(
+    r"reel\s+(?:hale|bazda|olarak|deger|tutar|fiyat)\w*|reelle\w*|"
+    r"enflasyon\w*\s+(?:etkisinden\s+)?ar[ıi]nd|sabit\s+fiyat|deflat|satin\s+alma\s+gucu", re.I)
+
+
+def wants_deflation(question: str) -> bool:
+    """"reel hale getir", "enflasyondan arindir", or any "... fiyatlariyla"
+    phrase, which names the prices to express a table in. "reel faiz" is a
+    concept, not a request, and does not count."""
+    from ..core.labels import fold
+    return bool(DEFLATION_REQUEST.search(fold(question or ""))) or extract_base_period(question) is not None
+
+
+def extract_base_period(question: str) -> Optional[str]:
+    """The base month of a "... fiyatlariyla" phrase as YYYY-MM-01, "end" for
+    "son ay / guncel fiyatlarla", None when the question names none."""
+    from ..core.labels import fold
+    hit = BASE_PRICES.search(fold(question or ""))
+    if not hit:
+        return None
+    g = hit.groupdict()
+    if g["last"]:
+        return "end"
+    if g["ym"]:
+        return f"{g['ym']}-{g['m']}-01"
+    if g["y2"]:
+        return f"{g['y2']}-{int(g['m2']):02d}-01"
+    if g["y5"]:
+        return f"{g['y5']}-12-01"
+    year, name = (g["y3"], g["name3"]) if g["y3"] else (g["y4"], g["name4"])
+    month = next(i + 1 for i, tr in enumerate(TR_MONTHS) if name.startswith(tr))
+    return f"{year}-{month:02d}-01"
 
 
 def extract_single_month(question: str):
@@ -254,6 +307,8 @@ class Route(BaseModel):
     wants_table: bool = False
     wants_analysis: List[str] = Field(default_factory=list)   # anomaly | changepoint | causality | decompose
     wants_footnotes: bool = False
+    base_period: Optional[str] = None   # "YYYY-MM-01" or "end": the prices a deflation is expressed in
+    wants_deflation: bool = False       # "reel hale getir" / "enflasyondan arindir"
     decided_by: str = "rules"
     reason: str = ""
 
@@ -370,7 +425,8 @@ def route(question: str, has_artifact: bool = False, client=None) -> Route:
     common = dict(start=start, end=end, is_followup=followup, presentation_only=presentation_only,
                   wants_clear=wants_clear,
                   wants_chart=wants_chart, wants_table=wants_table,
-                  wants_analysis=analyses, wants_footnotes=bool(FOOTNOTE_PATTERN.search(question)))
+                  wants_analysis=analyses, wants_footnotes=bool(FOOTNOTE_PATTERN.search(question)),
+                  base_period=extract_base_period(question), wants_deflation=wants_deflation(question))
 
     if urls:
         return Route(intent="url_analysis", urls=urls, reason="prompt contains a URL", **common)

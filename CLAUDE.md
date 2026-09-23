@@ -867,6 +867,31 @@ counts as a second monetary unit (it is a price, not an amount, and its change i
 points). Measured on the deposit question: TL share 35.5% → 65.1% and FX deposits 253 → 189
 billion USD over 2021-12..2024-12 -- the answer the question was after.
 
+**A deflation happens at the prices the question names, and a transform never overwrites its own
+input.** `router.extract_base_period` reads "202512 fiyatlarıyla" / "2025 Aralık fiyatlarıyla" /
+"son ay fiyatlarıyla" into `Route.base_period`, `router.wants_deflation` reads "reel hale getir" /
+"enflasyondan arındır" / any "... fiyatlarıyla", and `pipeline.apply_deflation` (after
+`apply_output_semantics`, so a net-change table is deflated as net changes) puts that base on every
+`deflate` step and adds the steps when the plan has none -- over the price index the plan fetched,
+else the CPI -- for every monetary column the turn shows; the real columns take the nominal ones'
+place in `output_columns` and the index stays visible. The executor's own default base is the
+window's FIRST month, the opposite of what "today's prices" means, which is why the router's read
+overrides the model's. Measured live before this: the model wrote `deflate(column=tl_toplam_net,
+as_name=tl_toplam_net)` six times, `add_column` replaced each nominal column in place, every produced
+column read as consumed, nothing was left to show and the composer told the user the CPI series did
+not exist. `Plan._rename_self_overwriting_transforms` drops such an alias and
+`pipeline._transform_name` names the result (`<column>_reel`) -- not `executor._column_name`, whose
+`step.column` fallback is the transform's *input*. "mevcut veri setiyle ... hizala" is follow-up
+phrasing (`FOLLOWUP_PATTERN`), and `deterministic_series_plan` skips a clause's first choice that
+scores under a fifth of the question's best match, because "mevcut veri setiyle" ranked a
+business-survey index named "Mevcut Durum". `unsupported_numbers` ignores YYYYMM period stamps.
+
+**"3 aya kadar / 3 aydan fazla" partitions the deposit line.** `repair_three_month_groups` puts
+`vadesiz` in the short group beside `bir_aya_kadar` and `bir_ay_uc_ay`, so short + long equals the
+line's `toplam` (pinned by a test); it reuses the model's own group names when it wrote one sum per
+group so a `net_change` over `short_term` still resolves, and names an unnamed sum for its group
+rather than after its inputs.
+
 **Dates are parsed in Python.** `router.extract_window` reads "2021 sonundan 2024 sonuna kadar" as
 2021-12..2024-12, "başı"/"ortası"/"ilk yarısı" likewise, a lone "2021 sonundan itibaren" as an
 open window from December and a bare year's case suffix the same way ("2021'den itibaren" opens

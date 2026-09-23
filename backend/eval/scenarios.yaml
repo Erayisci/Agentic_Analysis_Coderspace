@@ -62,8 +62,9 @@ scenarios:
     notes: >-
       The source is stock. net_change yields net balance changes, not gross deposits;
       January 2021 has no prior observation in this archive. The maturity table exposes
-      bir_aya_kadar + bir_ay_uc_ay and uc_ay_alti_ay + alti_ay_bir_yil + bir_yil;
-      sum_columns combines these. Vadesiz is separate from opening-term buckets.
+      vadesiz + bir_aya_kadar + bir_ay_uc_ay ("3 aya kadar") and uc_ay_alti_ay +
+      alti_ay_bir_yil + bir_yil ("3 aydan fazla"); sum_columns combines these, and the
+      two groups partition the line's total (short + long = toplam, pinned by a test).
       The deterministic fallback retrieves the named rows; the planner must choose
       the bucket fetches and transforms for this compound request.
 

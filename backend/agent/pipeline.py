@@ -315,10 +315,17 @@ def deterministic_series_plan(question: str, route_result: Route, limit: int = 3
             take(candidate)
     # Each clause's first choice first ("konut kredileri" -> the loan book,
     # "faiz oranlari" -> the rate), then the best of any corpus not yet seen.
+    # A clause that names no series still has a first choice -- "mevcut veri
+    # setiyle tarih bazinda hizala" ranked a business-survey index whose name
+    # says "Mevcut Durum" -- so a first choice far below the question's best
+    # match is a clause about something else and is not fetched.
+    best_score = max((c.get("score") or 0 for c in found["candidates"]), default=0)
     for clause, ranked in zip(found.get("concepts") or [], found.get("by_concept") or []):
         for identity in ranked[:1]:
             if identity in by_identity:
                 candidate = by_identity[identity]
+                if best_score and (candidate.get("score") or 0) < 0.2 * best_score:
+                    continue
                 if any(_same_measure_family(c, candidate["source"], candidate.get("dataset"), candidate["key"])
                        for c in roles.values()):
                     continue
@@ -459,23 +466,30 @@ def repair_three_month_groups(plan: Plan, question: str, discovery: dict, sessio
     metric identities to reconstruct the two sums instead of trusting those
     aliases or an invented bucket membership.
 
-    "3 aya kadar / 3 aydan fazla" is a split by OPENING MATURITY, and
-    `vadesiz` (demand deposits) has no maturity at all -- it is a distinct
-    category, not "0 ay vade", and stays out of both groups (see
-    `mentor_tp_yp_maturity` in scenarios.yaml).
+    "3 aya kadar / 3 aydan fazla" is a split of the WHOLE line by opening
+    maturity, so the two groups partition the published total: `vadesiz`
+    (demand deposits, no term) belongs to "3 aya kadar" together with the two
+    buckets up to three months, and the three buckets beyond go to "3 aydan
+    fazla". The check is arithmetic and pinned by a test: short + long must
+    equal the line's own `toplam`. The earlier reading -- "vadesiz has no
+    maturity at all, so it is in neither group" -- broke that identity and
+    understated the short group by the whole demand-deposit movement.
 
-    Measured live on a two-way (TP/YP) split: the model fetched 4 of the 5
+    Measured live on a two-way (TP/YP) split: the model fetched 4 of the
     relevant buckets for each currency, omitting `bir_aya_kadar` from both,
     and the old code required every bucket to already be fetched -- and only
     repaired the first matching address -- before it would act at all, so an
     incomplete model plan for either currency passed through untouched. This
     now fetches whatever bucket is missing and repairs every address the
-    question names, not just the first or only a complete one.
+    question names, not just the first or only a complete one. When the model
+    already wrote one sum per group, those sums keep their names and only
+    their membership is corrected, so a `net_change` the model wrote over
+    `short_term` still resolves after the repair.
     """
     words = fold(question)
     if not re.search(r"\b3\s*ay", words) or "fazla" not in words or "kadar" not in words:
         return plan
-    short = ("bir_aya_kadar", "bir_ay_uc_ay")
+    short = ("vadesiz", "bir_aya_kadar", "bir_ay_uc_ay")
     long = ("uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil")
     all_buckets = short + long
     groups: Dict[tuple, Dict[str, Step]] = {}
@@ -485,12 +499,31 @@ def repair_three_month_groups(plan: Plan, question: str, discovery: dict, sessio
             groups.setdefault(address, {})[step.metric] = step
     repaired_any = False
     for address, metrics in groups.items():
-        old_aliases = {step.as_name or step.key for step in metrics.values()}
+        alias_metrics: Dict[str, set] = {}
+        for metric, step in metrics.items():
+            alias_metrics.setdefault(step.as_name or step.key, set()).add(metric)
+        old_aliases = set(alias_metrics)
         model_sums = [step for step in plan.steps if step.op == "transform"
                       and step.operation == "sum_columns"
                       and any(name in old_aliases for name in step.columns or [])]
-        if set(metrics) == set(all_buckets) and len(model_sums) >= 2:
-            continue  # already a complete, correctly-scoped split
+        # Which group did each model sum mean? Judged by the buckets its
+        # inputs resolve to, so a sum the model called `short_term` keeps that
+        # name and any step downstream of it (a net_change, a chart) still
+        # finds its column. Two sums of distinct names, one per group, are
+        # reused; anything else (one sum over colliding aliases, three sums)
+        # gets the default names.
+        meant: Dict[str, str] = {}
+        grouping: Dict[int, str] = {}
+        for sum_step in model_sums:
+            votes = {"short": 0, "long": 0}
+            for name in sum_step.columns or []:
+                for metric in alias_metrics.get(name, ()):
+                    votes["short" if metric in short else "long"] += 1
+            if votes["short"] != votes["long"]:
+                group = "short" if votes["short"] > votes["long"] else "long"
+                grouping[id(sum_step)] = group
+                if sum_step.as_name:
+                    meant.setdefault(group, sum_step.as_name)
         # The entity's own currency role ("tl"/"fx") reads the same on this
         # address whichever way the question phrases it -- but the row label
         # does not always say it ("Döviz Tevdiat..." carries no recognised
@@ -503,6 +536,16 @@ def repair_three_month_groups(plan: Plan, question: str, discovery: dict, sessio
         if not role and len(groups) == 1:
             role, _ = extract_currency(question)
         prefix = (role or address[2].split("_")[0] or "vade").lower()
+        defaults = {"short": f"{prefix}_3aya_kadar", "long": f"{prefix}_3aydan_fazla"}
+        if set(metrics) == set(all_buckets) and len(model_sums) >= 2:
+            # A complete, correctly-scoped split. A sum the model left
+            # unnamed would otherwise be called after its inputs
+            # (`tl_vadesiz_plus_tl_1ay_plus_...`); name it for its group.
+            for sum_step in model_sums:
+                group = grouping.get(id(sum_step))
+                if not sum_step.as_name and group and defaults[group] not in meant.values():
+                    sum_step.as_name = defaults[group]
+            continue
         new_fetches = []
         for metric in all_buckets:
             as_name = f"{prefix}_{metric}"
@@ -512,12 +555,20 @@ def repair_three_month_groups(plan: Plan, question: str, discovery: dict, sessio
                 new_fetches.append(Step(op="fetch_series", source=address[0], dataset=address[1],
                                         key=address[2], metric=metric, currency=address[3],
                                         province=address[4], as_name=as_name))
+        bucket_aliases = {f"{prefix}_{m}" for m in all_buckets}
+        names = defaults
+        if (set(meant) == {"short", "long"} and meant["short"] != meant["long"]
+                and not set(meant.values()) & bucket_aliases):
+            names = meant
+        # The rebuilt sums take the place of the first model sum, so a step
+        # the model wrote after its sums (a net_change over them) still runs
+        # after the column exists.
+        at = next((i for i, step in enumerate(plan.steps) if step in model_sums), len(plan.steps))
         plan.steps = [step for step in plan.steps if step not in model_sums]
-        plan.steps.extend(new_fetches)
-        plan.steps.extend(
+        plan.steps[at:at] = new_fetches + [
             Step(op="transform", operation="sum_columns", columns=[f"{prefix}_{m}" for m in bucket],
-                 as_name=f"{prefix}_{suffix}")
-            for bucket, suffix in ((short, "3aya_kadar"), (long, "3aydan_fazla")))
+                 as_name=names[group])
+            for bucket, group in ((short, "short"), (long, "long"))]
         repaired_any = True
     if repaired_any:
         session.facts["maturity_group_repair"] = {"short": short, "long": long}
@@ -578,10 +629,14 @@ def apply_external_scope(plan: Plan, found: dict, landed: list, session: Session
 
 
 def remove_nested_totals(plan: Plan, session: Session, is_followup: bool) -> None:
-    """Published totals and demand deposits are separate from maturity buckets."""
+    """A published total is never summed with its own components.
+
+    `vadesiz` is a component like any maturity bucket -- it is the no-term
+    part of the same line, and `repair_three_month_groups` places it in the
+    "3 aya kadar" group -- so it is left in any sum the model wrote it into.
+    """
     series = {}
     grouped_datasets = set()
-    asks_for_demand = bool(session.turns and re.search(r"\bvadesiz\b", fold(session.turns[-1]["question"])))
     if is_followup:
         for name, line in session.view().lineage.items():
             if line.source == "derived":
@@ -597,20 +652,28 @@ def remove_nested_totals(plan: Plan, session: Session, is_followup: bool) -> Non
         elif step.op == "transform" and step.operation == "sum_columns" and step.columns:
             resolved = [(name, series.get(match_column(name, list(series)) or "")) for name in step.columns]
             components = {item[0] for _, item in resolved if item and item[1] != "toplam"}
-            term_components = {item[0] for _, item in resolved
-                               if item and item[1] not in ("toplam", "vadesiz")}
-            kept = [name for name, item in resolved if not (
-                item and ((item[1] == "toplam" and item[0] in components)
-                          or (item[1] == "vadesiz" and item[0] in term_components
-                              and not asks_for_demand)))]
+            kept = [name for name, item in resolved
+                    if not (item and item[1] == "toplam" and item[0] in components)]
             if len(kept) >= 2 and len(kept) < len(step.columns):
                 session.facts.setdefault("sum_input_repairs", []).append(
                     {"output": step.as_name, "removed": [name for name in step.columns if name not in kept]})
                 step.columns = kept
             grouped_datasets.update((item[0][0], item[0][1]) for _, item in resolved
-                                    if item and item[1] not in ("toplam", "vadesiz"))
+                                    if item and item[1] != "toplam")
     if grouped_datasets:
         session.facts["grouped_datasets"] = grouped_datasets
+
+
+def _transform_name(step: Step, default: str) -> str:
+    """The column a transform step will write.
+
+    Not `_column_name`: that helper falls back to `step.column`, which on a
+    transform is the INPUT, so an unnamed `deflate(column=tl_toplam_net)`
+    was named `tl_toplam_net` and replaced the nominal column in place --
+    the same defect `Plan._rename_self_overwriting_transforms` undoes when
+    the model writes the alias itself.
+    """
+    return re.sub(r"[^\w]+", "_", str(step.as_name or default)).strip("_") or default
 
 
 def apply_output_semantics(plan: Plan, semantics: QuerySemantics, session: Session,
@@ -672,7 +735,7 @@ def apply_output_semantics(plan: Plan, semantics: QuerySemantics, session: Sessi
             if step.operation in ("net_change", "change"):
                 default = (f"{inputs[0]}_net_change{step.periods or 1}" if step.operation == "net_change"
                            else f"{inputs[0]}_{'yoy' if step.periods == 12 else f'chg{step.periods or 1}'}_pct")
-                old_name = _column_name(step, default)
+                old_name = _transform_name(step, default)
                 if requested in ("level", "flow"):
                     aliases[old_name] = inputs[0]
                     continue
@@ -681,7 +744,14 @@ def apply_output_semantics(plan: Plan, semantics: QuerySemantics, session: Sessi
                 elif requested == "percent_change":
                     step.operation = "change"
                 step.as_name = old_name
-            if step.operation != "index_to_base":
+            if step.operation == "deflate":
+                # The nominal column is replaced by its real values; the
+                # price index stays on the table, because a reader checks a
+                # deflation against its index and the question that asks
+                # for one usually asks for the index too ("TUFE'yi getir ...
+                # reel hale getir").
+                consumed.add(inputs[0])
+            elif step.operation != "index_to_base":
                 consumed.update(inputs)
             output_semantics = {"net_change": "net_change", "change": "rate", "ratio": "ratio",
                                 "index_to_base": "index"}.get(step.operation, first["semantics"])
@@ -696,7 +766,7 @@ def apply_output_semantics(plan: Plan, semantics: QuerySemantics, session: Sessi
                     "ratio": f"{inputs[0]}_over_{inputs[-1]}",
                 }.get(step.operation)
             if default:
-                name = _column_name(step, default)
+                name = _transform_name(step, default)
                 step.as_name = name
                 columns[name] = dict(semantics=output_semantics,
                                      unit="%" if step.operation in ("change", "ratio") else first["unit"],
@@ -1076,6 +1146,103 @@ def apply_analysis(plan: Plan, route_result: Route, session: Session) -> Plan:
     return plan
 
 
+def apply_deflation(plan: Plan, route_result: Route, session: Session,
+                    discovery: Dict[str, Any]) -> Plan:
+    """A deflation the question asked for happens, at the prices it named.
+
+    Two guarantees, both read off the question's own words by the router:
+
+    * `base_period`: "202512 fiyatlariyla" is exact, and it beats whatever
+      the model wrote (or left empty -- the executor's default is the window's
+      FIRST month, which is the opposite of what a question about today's
+      prices means). Every `deflate` step in the plan gets it.
+    * `wants_deflation`: when the plan holds no `deflate` step at all, one is
+      added for every monetary column the turn shows -- on a follow-up the
+      table on screen, on a fresh question what the plan fetches -- over the
+      price index the plan fetched, or the CPI when it fetched none. The real
+      columns take the nominal ones' place in `output_columns`, and the price
+      index stays visible: the reader checks a deflation against its index.
+
+    Runs after `apply_output_semantics`, so a nominal column already turned
+    into its net change is deflated as the net change, which is what "reel
+    hale getir" means for a table of net changes.
+    """
+    deflates = [s for s in plan.steps if s.op == "transform" and s.operation == "deflate"]
+    base = route_result.base_period
+    if base == "end":
+        periods = session.view().periods() if session.has_artifact() else []
+        base = plan.end or (periods[-1] if periods else None)
+    if base:
+        for step in deflates:
+            step.base_period = base
+    if not route_result.wants_deflation or deflates:
+        return plan
+
+    outputs = session.facts.get("output_columns")
+    if outputs is None:
+        # No enforced output selection: the turn shows what the plan fetches
+        # and, on a follow-up, the table on screen -- the previous turn's
+        # visible columns, not every hidden bucket the artifact keeps.
+        outputs = list(session.view().lineage) if route_result.is_followup and session.has_artifact() else []
+        outputs += [c["name"] for c in _planned_columns(plan, session, include_existing=False)
+                    if c["name"] not in outputs]
+    if not outputs:
+        return plan
+    by_key = {(c["source"], c["key"]): c for c in discovery.get("candidates") or []}
+    lineage = session.artifact.lineage if session.has_artifact() else {}
+    produced: Dict[str, Step] = {s.as_name: s for s in plan.steps
+                                 if s.op in ("fetch_series", "transform") and s.as_name}
+
+    def describe(name: str) -> Dict[str, Any]:
+        step = produced.get(name)
+        if step is not None and step.op == "fetch_series":
+            c = by_key.get((step.source, _normalise_key(step.key))) or {}
+            return {"name": name, "source": step.source or "", "unit": c.get("unit") or step.unit or "",
+                    "semantics": c.get("temporal_semantics") or "", "key": step.key or ""}
+        if step is not None:
+            inner = describe(step.column or (step.columns or [""])[0])
+            unit = "%" if step.operation in ("change", "ratio") else inner["unit"]
+            return {**inner, "name": name, "unit": unit,
+                    "semantics": "rate" if step.operation in ("change", "ratio") else inner["semantics"]}
+        line = lineage.get(name)
+        if line is None:
+            return {"name": name, "source": "", "unit": "", "semantics": "", "key": ""}
+        return {"name": name, "source": line.source, "unit": line.unit or "",
+                "semantics": line.temporal_semantics or "", "key": line.key or ""}
+
+    described = [describe(name) for name in outputs]
+    price = next((c for c in described if _looks_like_price_index(c)), None)
+    if price is None:
+        price = next(({"name": name, "source": line.source, "unit": line.unit or "",
+                       "semantics": line.temporal_semantics or "", "key": line.key or ""}
+                      for name, line in lineage.items()
+                      if line.temporal_semantics == "index" and _looks_like_price_index(
+                          {"name": name, "key": line.key or "", "semantics": "index"})), None)
+    if price is None:
+        key, name = DEFAULT_DEFLATOR
+        insert_at = next((i + 1 for i, s in reversed(list(enumerate(plan.steps)))
+                          if s.op in ("fetch_series", "ingest_external")), 0)
+        plan.steps.insert(insert_at, Step(op="fetch_series", key=key, source="macro", as_name=name))
+        plan.reasoning = f"{plan.reasoning or ''} [deflation: {key} fetched as deflator]".strip()
+        price = {"name": name}
+        outputs = list(outputs) + [name]
+    targets = [c["name"] for c in described
+               if c["name"] != price["name"] and _looks_monetary(c) and not _looks_like_price_index(c)
+               and c["semantics"] not in ("rate", "ratio", "index")]
+    if not targets:
+        return plan
+    real: Dict[str, str] = {}
+    for target in targets:
+        name = f"{target}_reel"
+        plan.steps.append(Step(op="transform", operation="deflate", column=target,
+                               other_column=price["name"], base_period=base, as_name=name))
+        real[target] = name
+    session.facts["output_columns"] = [real.get(name, name) for name in outputs]
+    plan.reasoning = (f"{plan.reasoning or ''} [deflation: {', '.join(targets)} deflated by "
+                      f"{price['name']}{f' at {base[:7]} prices' if base else ''}]").strip()
+    return plan
+
+
 DATA_PRODUCING_OPS = ("fetch_series", "transform", "ingest_external", "ingest_source")
 
 
@@ -1264,7 +1431,8 @@ def make_plan(question: str, session: Session, route_result: Route,
             and not any(step.op in DATA_PRODUCING_OPS for step in plan.steps)):
         plan.steps.append(Step(op="discover", query=question))
     metadata = {**found, "candidates": found["candidates"] + landed}
-    return apply_output_semantics(plan, semantics, session, metadata, route_result.is_followup)
+    plan = apply_output_semantics(plan, semantics, session, metadata, route_result.is_followup)
+    return apply_deflation(plan, route_result, session, metadata)
 
 
 def _table_payload(session: Session) -> Dict[str, Any]:

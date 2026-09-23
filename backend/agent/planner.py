@@ -215,6 +215,33 @@ class Plan(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _rename_self_overwriting_transforms(self) -> "Plan":
+        """A transform whose output is named after its own input is renamed.
+
+        Measured live on "mevduat tutarlarini 202512 fiyatlariyla reel hale
+        getir": the model wrote `deflate(column=tl_toplam_net,
+        as_name=tl_toplam_net)` six times. The executor's `add_column`
+        replaced each nominal column with its real values in place, the
+        output-semantics pass then saw every produced column consumed as an
+        input, no column was left to show, and the composer told the user the
+        CPI series did not exist. Dropping the alias lets the executor name
+        the result the way it names an unnamed transform (`<column>_reel`,
+        `<column>_endeks`, ...), and the nominal column stays as lineage.
+        """
+        renamed = []
+        for step in self.steps:
+            if step.op != "transform" or not step.as_name:
+                continue
+            inputs = step.columns or [step.column, step.other_column]
+            if step.as_name in [c for c in inputs if c]:
+                renamed.append(f"{step.operation}({step.as_name})")
+                step.as_name = None
+        if renamed:
+            note = "output renamed, it was named after its own input: " + ", ".join(renamed)
+            self.reasoning = f"{self.reasoning or ''} [{note}]".strip()
+        return self
+
+    @model_validator(mode="after")
     def _not_empty(self) -> "Plan":
         # A follow-up that only re-presents the table ("tablo yap" over an
         # existing table) legitimately runs no step: the executor has nothing
@@ -246,7 +273,9 @@ Adimlar:
   sutunlarini topla; toplam ile alt kalemlerini birlikte toplama; eksik girdi eksik sonuc),
   ratio (other_column=payda), in_usd (TL tutari dolar bazina cevir, other_column=USD/TRY kuru).
   Vade gruplari icin adaylarin metrics alanindaki ayri kovalarini metric= ile fetch et,
-  sonra sum_columns uygula. Vadesiz, vadeli kovalarindan ayridir; vadesiz dahilse acikca belirt.
+  sonra sum_columns uygula. Vade gruplari satirin tamamini paylasir: her kova tam bir gruba
+  girer, hicbiri disarida kalmaz ve vadesiz en kisa vade grubuna dahildir (gruplarin toplami =
+  toplam satiri). Toplam satirini kovalarla birlikte toplama.
   Stoktan ayin net degisimi istenirse net_change kullan; change yuzdedir. Stoktan brut
   giris/akis elde edilemez. Onceki donem yoksa ilk net degisim eksiktir, sifir uretme.
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.

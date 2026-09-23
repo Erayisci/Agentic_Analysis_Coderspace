@@ -36,7 +36,9 @@ MIXED = ("2026-01-01–2026-02-28 döneminde hanehalkının bankalara olan konut
          "Bu iki ölçünün stok/akım farkını açıkla; aralarında nedensellik iddia etme.")
 TP = "tp_mevduat_katilim_fonlari_yurt_ici_yerlesik"
 YP = "doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik"
-BUCKETS = ["bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
+# "3 aya kadar" is the first three (demand deposits included), "3 aydan fazla" the last three.
+BUCKETS = ["vadesiz", "bir_aya_kadar", "bir_ay_uc_ay", "uc_ay_alti_ay", "alti_ay_bir_yil", "bir_yil"]
+SHORT, LONG = BUCKETS[:3], BUCKETS[3:]
 
 
 class Model:
@@ -65,8 +67,8 @@ def totals():
 def groups():
     return [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key="toplam_mevduat",
                  metric=b, as_name="tp_" + b) for b in BUCKETS] + [
-        Step(op="transform", operation="sum_columns", columns=["tp_" + b for b in BUCKETS[:2]], as_name="short_term"),
-        Step(op="transform", operation="sum_columns", columns=["tp_" + b for b in BUCKETS[2:]], as_name="long_term")]
+        Step(op="transform", operation="sum_columns", columns=["tp_" + b for b in SHORT], as_name="short_term"),
+        Step(op="transform", operation="sum_columns", columns=["tp_" + b for b in LONG], as_name="long_term")]
 
 
 def test_generic_currency_roles_repair_real_identities_and_values():
@@ -135,13 +137,16 @@ def test_maturity_followup_preserves_totals_window_and_exact_group_membership():
     pd.testing.assert_frame_equal(session.view().frame[previous.columns], previous)
     assert len(result["table"]["rows"]) == 60
     fetches = [s for s in result["plan"]["steps"] if s["op"] == "fetch_series"]
-    assert len(fetches) == 5 and {s["key"] for s in fetches} == {TP}
-    for name, buckets in [("short_term", BUCKETS[:2]), ("long_term", BUCKETS[2:])]:
+    assert len(fetches) == 6 and {s["key"] for s in fetches} == {TP}
+    for name, buckets in [("short_term", SHORT), ("long_term", LONG)]:
         gold = sum(series.load_series(TP, dataset="mevduat_vade", metric=b,
                    start="2021-01-01", end="2025-12-01").values for b in buckets)
         pd.testing.assert_series_equal(session.view().frame[name], gold, check_names=False)
         assert [i["metric"] for i in quotable_numbers(session)["group_definitions"][name]["inputs"]] == buckets
-    assert "vadesiz" not in result["summary"]
+    # The two groups partition the line: their sum is the published total.
+    frame = session.view().frame
+    pd.testing.assert_series_equal(frame["short_term"] + frame["long_term"], frame["tp_toplam"],
+                                   check_names=False)
 
 
 def test_followup_removes_published_total_from_its_component_sum():
@@ -157,15 +162,15 @@ def test_followup_removes_published_total_from_its_component_sum():
     assert result["table"]["columns"] == ["tp_toplam", "yp_toplam", "short_term", "long_term"]
     pd.testing.assert_frame_equal(session.view().frame[previous.columns], previous)
     long = next(s for s in result["plan"]["steps"] if s.get("as_name") == "long_term")
-    assert long["columns"] == ["tp_" + b for b in BUCKETS[2:]]
+    assert long["columns"] == ["tp_" + b for b in LONG]
     gold = sum(series.load_series(TP, dataset="mevduat_vade", metric=b,
-               start="2021-01-01", end="2025-12-01").values for b in BUCKETS[2:])
+               start="2021-01-01", end="2025-12-01").values for b in LONG)
     pd.testing.assert_series_equal(session.view().frame["long_term"], gold, check_names=False)
 
 
-def test_followup_excludes_demand_deposits_and_hides_old_bucket_inputs():
+def test_followup_keeps_demand_deposits_in_the_short_group_and_hides_old_bucket_inputs():
     session = Session()
-    metrics = ["toplam", "vadesiz", *BUCKETS]
+    metrics = ["toplam", *BUCKETS]
     initial = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=key,
                     metric=metric, as_name=f"{prefix}_{metric}")
                for prefix, key in [("tp", TP), ("yp", YP)] for metric in metrics]
@@ -182,10 +187,10 @@ def test_followup_excludes_demand_deposits_and_hides_old_bucket_inputs():
     assert result["table"]["columns"] == ["tp_toplam", "yp_toplam", "short_term", "long_term"]
     pd.testing.assert_frame_equal(session.view().frame[before.columns], before)
     short = next(s for s in result["plan"]["steps"] if s.get("as_name") == "short_term")
-    assert short["columns"] == ["tp_bir_aya_kadar", "tp_bir_ay_uc_ay"]
+    assert short["columns"] == ["tp_vadesiz", "tp_bir_aya_kadar", "tp_bir_ay_uc_ay"]
     assert "tp_vadesiz" in session.artifact.frame and "yp_vadesiz" in session.artifact.frame
     gold = sum(series.load_series(TP, dataset="mevduat_vade", metric=b,
-               start="2021-01-01", end="2025-12-01").values for b in BUCKETS[:2])
+               start="2021-01-01", end="2025-12-01").values for b in SHORT)
     pd.testing.assert_series_equal(session.view().frame["short_term"], gold, check_names=False)
 
 
@@ -195,7 +200,7 @@ def test_followup_repairs_colliding_metric_aliases_from_model_plan():
                       requested_output="level", currencies=["TL", "FX"]), compose_answer=False)
     previous = session.view().frame.copy()
     steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=TP,
-                  metric=metric, as_name="tp_3aya_kadar" if metric in BUCKETS[:2] else "tp_3aydan_fazla")
+                  metric=metric, as_name="tp_3aya_kadar" if metric in SHORT else "tp_3aydan_fazla")
              for metric in BUCKETS]
     steps.append(Step(op="transform", operation="sum_columns",
                       columns=["tp_3aya_kadar", "tp_3aydan_fazla"], as_name="tp_3aya_kadar"))
@@ -204,11 +209,26 @@ def test_followup_repairs_colliding_metric_aliases_from_model_plan():
         preserve_existing_window=True), compose_answer=False)
     assert result["table"]["columns"] == ["tp_toplam", "yp_toplam", "tl_3aya_kadar", "tl_3aydan_fazla"]
     pd.testing.assert_frame_equal(session.view().frame[previous.columns], previous)
-    for name, buckets in [("tl_3aya_kadar", BUCKETS[:2]), ("tl_3aydan_fazla", BUCKETS[2:])]:
+    for name, buckets in [("tl_3aya_kadar", SHORT), ("tl_3aydan_fazla", LONG)]:
         gold = sum(series.load_series(TP, dataset="mevduat_vade", metric=b,
                    start="2021-01-01", end="2025-12-01").values for b in buckets)
         pd.testing.assert_series_equal(session.view().frame[name], gold, check_names=False)
     assert len([s for s in result["plan"]["steps"] if s.get("operation") == "sum_columns"]) == 2
+
+
+def test_complete_split_with_unnamed_sums_gets_group_names_not_input_lists():
+    # Measured live: the model fetched all six buckets and summed them
+    # correctly but left both sums unnamed, so the executor called the column
+    # `tl_vadesiz_plus_tl_1ay_plus_tl_1_3ay`.
+    q = next(s["question"] for s in load_scenarios() if s["id"] == "mentor_tp_yp_maturity")
+    steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=TP,
+                  metric=b, as_name="tl_" + b) for b in BUCKETS]
+    steps += [Step(op="transform", operation="sum_columns", columns=["tl_" + b for b in SHORT]),
+              Step(op="transform", operation="sum_columns", columns=["tl_" + b for b in LONG])]
+    result = pipeline.run_turn(q, client=Model(Plan(intent="series_analysis", steps=steps),
+                               requested_output="absolute_change", currencies=["TL"]), compose_answer=False)
+    assert result["table"]["columns"] == ["tl_3aya_kadar_net", "tl_3aydan_fazla_net"]
+    assert len([s for s in result["plan"]["steps"] if s["op"] == "fetch_series"]) == 6
 
 
 def test_long_mentor_omitted_differences_and_false_reasoning_are_repaired():
@@ -222,7 +242,7 @@ def test_long_mentor_omitted_differences_and_false_reasoning_are_repaired():
     assert "No transformations needed" not in result["plan"]["reasoning"]
     assert result["plan_diagnostics"]["raw_model_reasoning"] == "No transformations needed"
     assert len([s for s in result["plan"]["steps"] if s.get("operation") == "net_change"]) == 4
-    assert len([s for s in result["plan"]["steps"] if s["op"] == "fetch_series"]) == 7
+    assert len([s for s in result["plan"]["steps"] if s["op"] == "fetch_series"]) == 8
 
 
 def test_flow_like_classification_with_explicit_stock_rejection_gets_net_changes():
@@ -252,14 +272,132 @@ def test_new_analysis_cannot_read_an_unfetched_stale_column():
     assert not result["audit"][-1]["ok"]
 
 
+# --- turn 2 of the mentor conversation: CPI, aligned, at 202512 prices -------
+
+DEFLATE_Q = ("TCMB EVDS üzerinden 202101–202512 dönemine ait aylık TÜFE Genel Endeks verisini getir, "
+             "mevcut veri setiyle tarih bazında hizala ve mevduat tutarlarını 202512 fiyatlarıyla reel "
+             "hale getirerek enflasyon etkisinden arındır.")
+NET = ["tl_toplam_net", "yp_toplam_net", "tl_3aya_kadar_net", "tl_3aydan_fazla_net"]
+CPI = "TP.GENENDEKS.T1"
+
+
+def _maturity_table() -> Session:
+    """Turn 1 the way the live model plans it: a complete split, named net changes."""
+    steps = [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=key, metric="toplam", as_name=name)
+             for key, name in [(TP, "tl_toplam"), (YP, "yp_toplam")]]
+    steps += [Step(op="fetch_series", source="bulletin", dataset="mevduat_vade", key=TP, metric=b, as_name="tl_" + b)
+              for b in BUCKETS]
+    steps += [Step(op="transform", operation="sum_columns", columns=["tl_" + b for b in SHORT], as_name="tl_3aya_kadar"),
+              Step(op="transform", operation="sum_columns", columns=["tl_" + b for b in LONG], as_name="tl_3aydan_fazla")]
+    steps += [Step(op="transform", operation="net_change", column=c[:-4], as_name=c) for c in NET]
+    session = Session()
+    q = next(s["question"] for s in load_scenarios() if s["id"] == "mentor_tp_yp_maturity")
+    pipeline.run_turn(q, session, client=Model(Plan(intent="series_analysis", steps=steps),
+                      requested_output="absolute_change", currencies=["TL", "FX"]), compose_answer=False)
+    assert session.view().column_names() == NET
+    return session
+
+
+def _real_gold(nominal: pd.Series, base: str = "2025-12-01") -> pd.Series:
+    """nominal_t * CPI_base / CPI_t, from the lakehouse in SQL."""
+    from backend.core.config import DUCKDB_PATH
+    with duckdb.connect(str(DUCKDB_PATH), read_only=True) as con:
+        cpi = con.execute("SELECT period, value FROM macro_observations WHERE series_code=? ORDER BY period",
+                          [CPI]).df()
+    cpi = cpi.set_index(pd.to_datetime(cpi["period"]))["value"]
+    return nominal * (cpi[pd.Timestamp(base)] / cpi.reindex(nominal.index))
+
+
+def _followup(plan: Plan):
+    return Model(plan, requested_output="absolute_change", interaction="extend_previous", preserve_existing_window=True)
+
+
+@pytest.mark.parametrize("phrase,expected", [
+    ("202512 fiyatlarıyla reel hale getir", "2025-12-01"),
+    ("2025-12 fiyatlariyla", "2025-12-01"),
+    ("2025 Aralık fiyatlarıyla", "2025-12-01"),
+    ("Aralık 2025 sabit fiyatlarıyla", "2025-12-01"),
+    ("2024 yılı sonu fiyatlarıyla", "2024-12-01"),
+    ("son ay fiyatlarıyla", "end"),
+    ("güncel fiyatlarla göster", "end"),
+    ("enflasyondan arındır", None),
+])
+def test_base_prices_phrase_is_read_in_python(phrase, expected):
+    from backend.agent.router import extract_base_period, wants_deflation
+    assert extract_base_period(phrase) == expected
+    assert wants_deflation(phrase)
+    assert not wants_deflation("reel faiz oranı")       # a concept, not a request
+
+
+def test_deflation_question_is_a_followup_that_names_its_base_month():
+    from backend.agent.router import route
+    r = route(DEFLATE_Q, has_artifact=True)
+    assert r.is_followup and r.base_period == "2025-12-01" and r.wants_deflation
+    assert (r.start, r.end) == ("2021-01-01", "2025-12-01")
+
+
+def test_self_overwriting_deflate_from_the_model_gets_its_own_column():
+    # Measured live: the model named every deflate output after its input, the
+    # nominal column was replaced in place, no column was left to show and
+    # the composer said the CPI series did not exist.
+    session = _maturity_table()
+    plan = Plan(intent="followup", steps=[Step(op="fetch_series", source="macro", key=CPI, as_name="tufe")] + [
+        Step(op="transform", operation="deflate", column=c, other_column="tufe", base_period="2025-12", as_name=c)
+        for c in NET])
+    assert all(s.as_name is None for s in plan.steps if s.operation == "deflate")
+    result = pipeline.run_turn(DEFLATE_Q, session, client=_followup(plan), compose_answer=False)
+    assert result["table"]["columns"] == ["tufe"] + [c + "_reel" for c in NET]
+    assert len(result["table"]["rows"]) == 60 and result["verification"]["passed"]
+    frame = session.view().frame
+    for c in NET:
+        assert session.artifact.lineage[c + "_reel"].transform == f"deflate({c}, by=tufe, base=2025-12)"
+        pd.testing.assert_series_equal(frame[c + "_reel"], _real_gold(session.artifact.frame[c]), check_names=False)
+    # At the base month real equals nominal; the nominal columns are still there for the audit.
+    assert frame.loc["2025-12-01", "tl_toplam_net_reel"] == session.artifact.frame.loc["2025-12-01", "tl_toplam_net"]
+    assert all(c in session.artifact.frame for c in NET)
+
+
+def test_router_base_month_beats_the_models_missing_one():
+    session = _maturity_table()
+    plan = Plan(intent="followup", steps=[
+        Step(op="fetch_series", source="macro", key=CPI, as_name="tufe"),
+        Step(op="transform", operation="deflate", column="tl_toplam_net", other_column="tufe", as_name="tl_reel")])
+    result = pipeline.run_turn(DEFLATE_Q, session, client=_followup(plan), compose_answer=False)
+    step = next(s for s in result["plan"]["steps"] if s.get("operation") == "deflate")
+    assert step["base_period"] == "2025-12-01"          # not the window's first month, the executor's default
+    pd.testing.assert_series_equal(session.view().frame["tl_reel"],
+                                   _real_gold(session.artifact.frame["tl_toplam_net"]), check_names=False)
+    assert "tufe" in result["table"]["columns"]          # the index the question asked for stays visible
+
+
+def test_deflation_is_guaranteed_without_a_model():
+    session = _maturity_table()
+    result = pipeline.run_turn(DEFLATE_Q, session, client=None, compose_answer=False)
+    deflates = [s for s in result["plan"]["steps"] if s.get("operation") == "deflate"]
+    assert {s["column"] for s in deflates} == set(NET)
+    assert {s["base_period"] for s in deflates} == {"2025-12-01"}
+    fetched = [s["key"] for s in result["plan"]["steps"] if s["op"] == "fetch_series"]
+    assert fetched == [CPI]                              # "mevcut veri setiyle" must not fetch "Mevcut Durum"
+    assert set(result["table"]["columns"]) == {"TP_GENENDEKS_T1"} | {c + "_reel" for c in NET}
+    assert result["verification"]["passed"]
+    pd.testing.assert_series_equal(session.view().frame["tl_3aya_kadar_net_reel"],
+                                   _real_gold(session.artifact.frame["tl_3aya_kadar_net"]), check_names=False)
+
+
+def test_period_stamps_in_prose_are_not_unsupported_numbers():
+    from backend.agent.verifier import unsupported_numbers
+    assert unsupported_numbers("202101–202512 dönemi, 202512 fiyatlarıyla; 2023 yılı", {}) == []
+    assert unsupported_numbers("tutar 202513 oldu", {}) == [202513.0]
+
+
 def test_generated_group_title_cannot_claim_unexecuted_bucket():
     steps = totals() + groups()
-    steps[-2].title = "vadesiz dahil"
+    steps[-2].title = "bir_yil dahil"
     result = pipeline.run_turn(GENERIC + FOLLOWUP, client=Model(
         Plan(intent="series_analysis", steps=steps), requested_output="level"))
     title = next(s["title"] for s in result["plan"]["steps"] if s.get("as_name") == "short_term")
-    assert "vadesiz" not in title
-    assert all(metric in title for metric in BUCKETS[:2])
+    assert "bir_yil" not in title
+    assert all(metric in title for metric in SHORT)
 
 
 @pytest.fixture
