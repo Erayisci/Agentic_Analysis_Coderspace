@@ -368,23 +368,23 @@ QUALIFIERS = {
     "bilgi": ("bilgi",),
     "verilen_faizler": ("verilen", "odenen", "gider"),
     "alinan_faizler": ("alinan", "gelir"),
-    # EVDS publishes each loan-rate concept twice -- a flow ("Akim", new
-    # lending that month) and a stock ("Stok", the whole book's average) --
-    # and only the flow series carries the "KTF" code the "faiz" alias
-    # rewards (+6, see ALIASES above), so "Taşıt Kredisi (TL, **Stok**, %)"
-    # named verbatim, four times, still lost to the Akim series on score.
-    # Symmetric qualifiers alone were not enough to close that gap (the
-    # "ktf" bonus outweighs one -6 penalty); each direction is also boosted
-    # when it is what was asked for, mirroring RATIO_WORDS' own +3/-3 shape.
-    "akim": ("akim", "flow"),
-    "stok": ("stok", "stock"),
 }
 
-# The "akim"/"stok" QUALIFIERS entries only penalise the WRONG one; a
-# candidate asked for by name still has to outscore the "ktf" alias bonus
-# the other one gets for free. This adds the missing other half: a
-# candidate matching the stock/flow word the query used is boosted, not
-# merely left unpenalised, when the query names the other one's opposite
+# EVDS publishes each loan-rate concept twice -- a flow ("Akim", new lending
+# that month) and a stock ("Stok", the whole book's average) -- and only the
+# flow series carries the "KTF" code the "faiz" alias rewards (+6, see
+# ALIASES above), so "Taşıt Kredisi (TL, **Stok**, %)" named verbatim, four
+# times, still lost to the Akim series on score. This is NOT a QUALIFIERS
+# entry on purpose: QUALIFIERS penalises a candidate whenever ITS OWN word
+# is not in the query, regardless of the query's own wording -- correct for
+# a genuinely rare sub-bucket ("diger", "ipotekli") where the generic bucket
+# should win by default, wrong here, where Akim IS the default the "ktf"
+# alias was built for. Measured: adding "akim"/"stok" as QUALIFIERS demoted
+# every legitimate Akim match on any query that simply never said the word
+# "akim" ("mortgage interest rate" among them) -- recall@3 dropped from
+# 92.6% to 87.9%. The block below only fires when the query explicitly
+# names ONE of the two, and boosts the one asked for rather than only
+# penalising the other, mirroring RATIO_WORDS' own +3/-3 shape.
 # is present in some candidate the query did not ask for.
 AKIM_STOK = {
     "akim": re.compile(r"(?<!\w)(akim|akım|flow)(?!\w)", re.I),
