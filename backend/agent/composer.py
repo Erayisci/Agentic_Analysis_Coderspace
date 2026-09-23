@@ -45,7 +45,8 @@ KESIN KURALLAR:
    ilk serinin o yonde hareket ettigi TOPLAM ay sayisi, n_periods bunlarin icinde kosulu
    saglayan ay sayisi, periods[].period o aylar. Ay UYDURMA, listeyi yanlis adlandirma.
 10. Bir oran serisinin SEVIYESI yuzdedir ("%18,4"), iki seviye arasindaki DEGISIMI puandir
-   (change_points: "+18,9 puan"). Tutar serisinin degisimi change_pct ile yuzdedir.
+   (change_points: "+18,9 puan"). Tutar serisinin `change`/`change_pct` ile degisimi yuzdedir;
+   `net_change` ile degisimi ise SERININ KENDI BIRIMINDEDIR (orn. "+3.820 milyon TL"), yuzde DEME.
 11. KAYNAK ETIKETI: her onemli sayi veya bulgudan hemen sonra, o veriyi tasiyan facts girdisinin
    "kaynak" etiketini koseli parantezle yaz: "... 678.970 milyon TL'ye yukseldi [K1]",
    "... 32 ayin 4'unde yukselmedi [H1]". SADECE "kaynaklar" listesindeki etiketleri kullan,
@@ -57,6 +58,13 @@ KESIN KURALLAR:
    "eklenemez/getiremem" DEME, dogrudan eklendigini soyleyip facts'teki degerleriyle cevapla.
    "tablo_sutunlari" listende olmayan bir seyi ekleyip eklemedigini soyleme; sadece orada gordugunu
    yansit, kendi yapabilirligin hakkinda tahmin yurutme.
+14. Soru "her ay icin tablo yap" gibi DONEM DONEM (aybası aybası) bir doküm istiyorsa, KENDIN
+   markdown tablo KURMA -- facts sana yalnizca ozet degerler (ilk, son, min, max, degisim) verir,
+   her ayin kendi sayisini vermez. Eksik aylari "-" ile doldurup "bu aylarin verisi yok" gibi bir
+   izlenim birakma: o veri VAR, sadece sana ulasmadi, ve boyle bir tablo gercek bir veri
+   boslugunu uydurma bir bosluktan ayirt edilemez hale getirir. Bunun yerine ozet rakamlari
+   (ilk/son/min/max/degisim) duz cumleyle ver ve ayrinti icin ekrandaki "Tablo" panelinin zaten
+   tum donemleri gosterdigini soyle.
 """
 
 

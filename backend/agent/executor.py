@@ -421,6 +421,8 @@ class Executor:
             name = T.deflate(artifact, column, deflator, step.base_period or plan.start, step.as_name)
         elif step.operation == "change":
             name = T.change(artifact, column, step.periods or 1, step.as_name)
+        elif step.operation == "net_change":
+            name = T.net_change(artifact, column, step.periods or 1, step.as_name)
         elif step.operation == "ratio":
             denominator = self._resolve_column(step.other_column, required="ratio needs other_column")
             name = T.ratio(artifact, column, denominator, step.as_name)

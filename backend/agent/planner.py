@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Intent = Literal["series_analysis", "followup", "url_analysis", "search", "metadata", "unsupported"]
 Op = Literal["discover", "fetch_series", "transform", "analyze", "find_periods",
              "read_url", "search", "chart", "ingest_source", "ingest_external", "clear_table", "footnotes"]
-Operation = Literal["index_to_base", "deflate", "change", "ratio", "in_usd"]
+Operation = Literal["index_to_base", "deflate", "change", "net_change", "ratio", "in_usd"]
 Method = Literal["anomaly", "changepoint", "causality", "decompose"]
 Kind = Literal["auto", "level", "trend", "volatility"]          # changepoint: what kind of change
 Sensitivity = Literal["low", "medium", "high"]                  # changepoint: how eager to cut
@@ -232,8 +232,10 @@ Adimlar:
   adi (orn. "İSTANBUL") verilirse sadece o ile filtrelenir. Kullanici bir il/sehir adi
   soylediyse province'i MUTLAKA doldur; soylemediyse finturk yerine aylik bulletin serisini sec.
 - transform: index_to_base (2021-01=100 gibi), deflate (enflasyondan arindirma, other_column=TUFE serisi),
-  change (periods=1 aylik, 12 yillik), ratio (other_column=payda), in_usd (TL tutari dolar bazina
-  cevir, other_column=USD/TRY kuru).
+  change (periods=1 aylik, 12 yillik -- YUZDE doner), net_change (change ile ayni periods mantigi
+  ama SERININ KENDI BIRIMINDE mutlak fark doner, orn. milyon TL -- "sadece o ayin degisimini goster,
+  yuzde/stok degil" gibi bir istekte bunu kullan, change'i degil), ratio (other_column=payda),
+  in_usd (TL tutari dolar bazina cevir, other_column=USD/TRY kuru).
 - find_periods: bir sutunun dustugu/yukseldigi donemleri bul; against ile ikinci sutunla karsilastir.
 - analyze: method + column (+against). Hangi method:
   anomaly     "anomali/aykiri/olagandisi hareket"       -> tek seri; column=ana seri.

@@ -368,6 +368,27 @@ QUALIFIERS = {
     "bilgi": ("bilgi",),
     "verilen_faizler": ("verilen", "odenen", "gider"),
     "alinan_faizler": ("alinan", "gelir"),
+    # EVDS publishes each loan-rate concept twice -- a flow ("Akim", new
+    # lending that month) and a stock ("Stok", the whole book's average) --
+    # and only the flow series carries the "KTF" code the "faiz" alias
+    # rewards (+6, see ALIASES above), so "Taşıt Kredisi (TL, **Stok**, %)"
+    # named verbatim, four times, still lost to the Akim series on score.
+    # Symmetric qualifiers alone were not enough to close that gap (the
+    # "ktf" bonus outweighs one -6 penalty); each direction is also boosted
+    # when it is what was asked for, mirroring RATIO_WORDS' own +3/-3 shape.
+    "akim": ("akim", "flow"),
+    "stok": ("stok", "stock"),
+}
+
+# The "akim"/"stok" QUALIFIERS entries only penalise the WRONG one; a
+# candidate asked for by name still has to outscore the "ktf" alias bonus
+# the other one gets for free. This adds the missing other half: a
+# candidate matching the stock/flow word the query used is boosted, not
+# merely left unpenalised, when the query names the other one's opposite
+# is present in some candidate the query did not ask for.
+AKIM_STOK = {
+    "akim": re.compile(r"(?<!\w)(akim|akım|flow)(?!\w)", re.I),
+    "stok": re.compile(r"(?<!\w)(stok|stock)(?!\w)", re.I),
 }
 
 STOPWORDS = {
@@ -582,6 +603,25 @@ def _score(candidate, terms, province_named: bool = False) -> float:
             score += 3.0
         elif str(candidate.get("unit") or "").endswith("TL"):
             score -= 3.0
+
+    # EVDS's flow ("Akim")/stock ("Stok") split of the same loan-rate concept:
+    # the "ktf" alias above (+6, "faiz" -> "KTF") only reaches the flow series,
+    # since the stock ones are coded "BKR.TRY.*" -- so a query naming "Stok"
+    # four times still lost to the flow series on score alone, and the QUALIFIERS
+    # entries above (penalising whichever was NOT asked) still were not enough
+    # on their own to close a "ktf"-sized gap. This is the other half: the one
+    # actually named is also boosted, not merely left unpenalised.
+    asked_akim, asked_stok = bool(AKIM_STOK["akim"].search(query_text)), bool(AKIM_STOK["stok"].search(query_text))
+    if asked_akim != asked_stok:  # exactly one named; both or neither leaves this alone
+        is_akim, is_stok = bool(AKIM_STOK["akim"].search(name)), bool(AKIM_STOK["stok"].search(name))
+        if asked_stok and is_akim:
+            score -= 8.0
+        elif asked_stok and is_stok:
+            score += 4.0
+        elif asked_akim and is_stok:
+            score -= 8.0
+        elif asked_akim and is_akim:
+            score += 4.0
 
     # "Konut kredileri" is an amount; "konut satislari" is a count. Both match
     # the word "konut", and EVDS publishes the sales count under a name that
