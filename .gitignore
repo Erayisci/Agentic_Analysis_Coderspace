@@ -1,9 +1,14 @@
-# Derived data - fully reproducible with: python -m backend.lakehouse.build
+# Derived data - reproducible with: python -m backend.lakehouse.build -- except
+# data/external/ (demo-day sources landed at runtime) and data/research.duckdb
+# (the log of web evidence): back those two up before deleting data/.
 data/
 
 # Spreadsheet lock files (created while a workbook is open)
 **/~$*.xlsx
 **/.~lock.*#
+
+# macOS Finder metadata
+.DS_Store
 
 # BDDK workbooks are a derived rendering of bddk_aylik_bulten/_raw_json/, which
 # is the source of truth and IS committed. Regenerate them without network via:
@@ -19,3 +24,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Secrets (EVDS_API_KEY lives here; see backend/core/config.py)
+.env
+
+# Editor state: the DuckDB extension rewrites this with machine-specific paths
+.vscode/

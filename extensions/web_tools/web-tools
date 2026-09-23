@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Run the optional extension using only the host Python standard library."""
+import runpy
+from pathlib import Path
+
+runpy.run_path(str(Path(__file__).resolve().with_name("manage.py")), run_name="__main__")

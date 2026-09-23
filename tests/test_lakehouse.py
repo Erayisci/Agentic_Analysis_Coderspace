@@ -9,7 +9,7 @@ Run:  pytest tests/ -q          (requires a completed `python -m backend.lakehou
 import duckdb
 import pytest
 
-from backend.core.config import DUCKDB_PATH
+from backend.core.config import DUCKDB_PATH, SCHEMA_CARD_PATH
 
 JUNE_2026 = "2026-06-01"
 
@@ -224,9 +224,132 @@ def test_no_generic_npl_metric_exists(connection):
     assert count == 0
 
 
+def test_the_three_series_indexes_share_one_semantics_vocabulary(connection):
+    """`metrics` used to say 'period_end_stock' where the other two say 'stock'.
+
+    The agent learns the vocabulary once from the schema card; a synonym in one
+    table means a filter that silently returns nothing.
+    """
+    words = connection.execute(
+        "SELECT DISTINCT temporal_semantics FROM metrics UNION "
+        "SELECT DISTINCT temporal_semantics FROM bulletin_metrics UNION "
+        "SELECT DISTINCT temporal_semantics FROM macro_series"
+    ).df().iloc[:, 0].tolist()
+    assert set(words) == {"stock", "flow", "rate", "index", "cumulative_ytd", "ratio"}
+
+
+def test_the_two_bddk_paths_spell_their_shared_unit_the_same_way(connection):
+    """`observations` and `bulletin_observations` read the same BDDK table 05.
+
+    They therefore hold the same unit, and a query filtering on it must reach
+    both -- 'bin_TL' in one and 'bin TL' in the other excluded one silently.
+    """
+    units = connection.execute(
+        "SELECT DISTINCT unit FROM observations UNION "
+        "SELECT DISTINCT unit FROM bulletin_observations WHERE dataset='sektorel_kredi_dagilimi'"
+    ).df().iloc[:, 0].tolist()
+    assert units == ["bin TL"]
+
+
 def test_all_validation_checks_recorded_and_passed(connection):
     total, passed = connection.execute(
         "SELECT count(*), sum(CASE WHEN passed THEN 1 ELSE 0 END) FROM data_quality_report"
     ).fetchone()
     assert total >= 25
     assert passed == total
+
+
+# --------------------------------------------------------------------- #
+# The agent's context window
+# --------------------------------------------------------------------- #
+
+def schema_card_queries():
+    """Every SQL statement in the card's '## Query patterns' section.
+
+    The card tells a model these 'run as written'. That claim is only worth
+    something if it is enforced: a renamed column or a retired entity_key would
+    otherwise leave the agent copying SQL that errors, which is worse than
+    giving it no examples at all.
+    """
+    if not SCHEMA_CARD_PATH.exists():
+        pytest.fail("schema_card.md not found - run `python -m backend.lakehouse.build` first")
+    text = SCHEMA_CARD_PATH.read_text(encoding="utf-8")
+    section = text.split("## Query patterns")[1].split("\n## ")[0]
+    body = "\n".join(line for line in section.splitlines() if not line.strip().startswith("--"))
+    return [statement.strip() for statement in body.split(";") if statement.strip()]
+
+
+def test_schema_card_documents_the_query_patterns():
+    queries = schema_card_queries()
+    assert len(queries) == 9, f"expected 9 worked examples, card has {len(queries)}"
+
+
+@pytest.mark.parametrize("n", range(9))
+def test_every_schema_card_query_runs_and_returns_rows(connection, n):
+    sql = schema_card_queries()[n]
+    frame = connection.execute(sql).df()
+    assert not frame.empty, f"card query {n + 1} returned no rows:\n{sql}"
+
+
+def test_the_bulletin_entity_index_covers_every_published_series(connection):
+    """bulletin_entities is the discovery surface: a line item missing from it
+    is a line item the agent cannot find, however correct the fact table is."""
+    indexed, published = connection.execute(
+        "SELECT (SELECT count(*) FROM bulletin_entities), "
+        "(SELECT count(*) FROM (SELECT DISTINCT dataset, entity_key FROM bulletin_observations))"
+    ).fetchone()
+    assert indexed == published == 519
+
+
+def test_the_entity_index_agrees_with_the_facts_it_indexes(connection):
+    """Every indexed attribute is a fact about the series, not a guess."""
+    mismatches = connection.execute("""
+        SELECT count(*) FROM bulletin_entities e JOIN (
+            SELECT dataset, entity_key, min(unit) AS unit, min(entity_name) AS entity_name,
+                   min(temporal_semantics) AS semantics, count(DISTINCT period) AS n_periods
+            FROM bulletin_observations GROUP BY 1, 2
+        ) o USING (dataset, entity_key)
+        WHERE e.unit IS DISTINCT FROM o.unit OR e.entity_name IS DISTINCT FROM o.entity_name
+           OR e.temporal_semantics IS DISTINCT FROM o.semantics OR e.n_periods <> o.n_periods
+    """).fetchone()[0]
+    assert mismatches == 0
+
+
+def test_entity_keys_are_ascii_so_turkish_search_is_case_safe(connection):
+    """The card tells the agent to ILIKE on entity_key rather than entity_name.
+
+    That advice only holds while the keys stay ASCII: 'İ'.lower() is not 'i',
+    so a Turkish character in a key would make the documented search miss rows.
+    """
+    non_ascii = connection.execute(
+        "SELECT entity_key FROM bulletin_entities WHERE NOT regexp_matches(entity_key, '^[a-z0-9_/]+$')"
+    ).df()
+    assert non_ascii.empty, non_ascii.entity_key.tolist()
+
+
+# --------------------------------------------------------------------- #
+# The external zone
+# --------------------------------------------------------------------- #
+
+def test_the_external_zone_views_exist_and_bind(connection):
+    """The build creates five views over data/external/*/; the seed files make
+    every glob match, so the views bind even when nothing has landed yet."""
+    from backend.lakehouse.external_store import VIEWS
+    for view in VIEWS:
+        assert connection.execute(f"SELECT count(*) FROM {view}").fetchone()[0] >= 0
+    kinds = dict(connection.execute(
+        "SELECT table_name, table_type FROM information_schema.tables WHERE table_name LIKE 'external_%'"
+    ).fetchall())
+    assert set(kinds) == set(VIEWS) and set(kinds.values()) == {"VIEW"}
+
+
+def test_the_external_index_uses_the_shared_vocabulary(connection):
+    """A fifth series index, same words: a synonym here would be a filter that
+    reaches the base corpora and silently misses a landed source."""
+    semantics = connection.execute("SELECT DISTINCT temporal_semantics FROM external_series").df().iloc[:, 0]
+    assert set(semantics) <= {"stock", "flow", "rate", "index", "ratio", "cumulative_ytd", "unknown"}
+    rules = connection.execute("SELECT DISTINCT monthly_rule FROM external_series").df().iloc[:, 0]
+    assert set(rules) <= {"last", "avg", "sum"}
+    non_ascii = connection.execute(
+        "SELECT series_key FROM external_series WHERE NOT regexp_matches(series_key, '^[a-z0-9_/]+$')").df()
+    assert non_ascii.empty, non_ascii.series_key.tolist()

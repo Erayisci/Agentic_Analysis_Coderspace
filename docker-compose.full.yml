@@ -1,0 +1,109 @@
+# The full demo-day stack in one command: the core app (backend + frontend,
+# same images as docker-compose.yml) plus the optional web-tools search stack
+# (extensions/web_tools/compose.yaml) -- SearXNG + a sandboxed crawler/egress
+# pair -- with web search and research mode turned on by default.
+#
+#   docker compose -f docker-compose.full.yml up --build
+#
+# `include` (not `-f docker-compose.yml -f extensions/web_tools/compose.yaml`)
+# because Compose resolves a merged file's relative paths against the current
+# directory, not each file's own location -- extensions/web_tools/compose.yaml's
+# `context: ../..` would then mean two directories above the repo root, not
+# the repo root. `include` resolves each included file's paths against its
+# own directory instead, which is the only way to reuse it correctly from
+# here. The backend/frontend services are duplicated from docker-compose.yml
+# (not `extends`, which has had uneven support for depends_on/healthcheck
+# across Compose versions) with web search turned on by default instead of
+# off -- keep the two in sync if either changes.
+#
+# Needs a one-time secret before its first run (a shared, committed secret
+# would defeat the point of a secret): `python extensions/web_tools/web-tools
+# setup` once, from the repo root. Without it, the included `searxng` service
+# refuses to start rather than run insecurely configured -- see
+# extensions/web_tools/compose.yaml. That's the only manual step left; use
+# plain docker-compose.yml (no `include`) to skip it entirely and run without
+# web search.
+include:
+  - path: extensions/web_tools/compose.yaml
+    env_file: extensions/web_tools/.env
+
+services:
+  # The crawler container reports its OWN "agent" capability on its /health
+  # endpoint (extensions/web_tools/research.py checks it directly), read from
+  # its own WEB_AGENT_ENABLED -- a different flag from this backend's, and
+  # extensions/web_tools/.env ships it false by default (that project's own
+  # safe default). Override it here so research works without hand-editing a
+  # teammate's env file for this compose file's purpose.
+  #
+  # `target: crawler-assets`, not compose.yaml's default `crawler`: worker.py
+  # readiness() requires pypdf/pdfplumber/openpyxl/xlrd/pypdfium2 importable
+  # whenever documents, images OR agent is enabled (`AssetConfig.needs_image`
+  # is an OR of all three), but the plain `crawler` target's image never
+  # installs them -- only `crawler-assets` does. The extension's own launcher
+  # (`extensions/web_tools/web-tools start`) picks the right target for you;
+  # calling `docker compose up` directly, as this file does, bypasses that
+  # and needs the target named explicitly, or `agent: true` on /health is
+  # true while every actual request still 503s ("unavailable") with no log
+  # line explaining why -- measured getting this file working.
+  crawler:
+    build:
+      target: crawler-assets
+    environment:
+      WEB_AGENT_ENABLED: "true"
+      # The research loop's model calls run inside the crawler container, via
+      # its OWN Kloudeks client -- a third, separate key from this backend's
+      # KLOUDEKS_API_KEY and from extensions/web_tools/.env's (empty by
+      # default) WEB_KLOUDEKS_API_KEY. Reuse the same repo-root key rather
+      # than asking for it twice; it's the same Kloudeks account either way.
+      WEB_KLOUDEKS_API_KEY: "${KLOUDEKS_API_KEY:-}"
+    # The container's root filesystem is read_only (compose.yaml), and
+    # /opt/web-tools-cache (AssetStore's SQLite cache + model-call counter,
+    # backend/extensions/web_tools/asset_cache.py) is the one path meant to
+    # stay writable -- compose.assets.yaml mounts this same volume there for
+    # exactly that reason. Without it, sqlite3.connect() raises
+    # OperationalError: unable to open database file; that exception isn't
+    # one of asset_worker.py's specifically-caught types (it doesn't subclass
+    # OSError), so its catch-all turns it into a misleading "parse_error"
+    # ("file is malformed") with the real traceback silently discarded
+    # (stdout/stderr both redirected to devnull by design) -- measured by
+    # calling agent_protocol.model_decision() directly inside the container,
+    # bypassing that redirect, to see the real exception underneath it.
+    volumes:
+      - asset-cache:/opt/web-tools-cache
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - KLOUDEKS_API_KEY=${KLOUDEKS_API_KEY:-}
+      - EVDS_API_KEY=${EVDS_API_KEY:-}
+      - WEB_TOOLS_ENABLED=true
+      - WEB_AGENT_ENABLED=true
+      - WEB_SEARXNG_URL=http://host.docker.internal:8888
+      - WEB_CRAWLER_URL=http://host.docker.internal:8932
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  asset-cache: {}

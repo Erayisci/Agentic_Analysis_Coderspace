@@ -1,0 +1,239 @@
+# Discovery benchmark: does a concept, however it is phrased, reach its key?
+#
+# Discovery is the tool everything downstream depends on, and until this file
+# existed its quality was an anecdote: the ranking was pinned by a handful of
+# tests, each written after a specific failure, with no number saying whether a
+# change helped in general. Demo day is explicitly run on questions the team has
+# not seen, so the metric that matters is not "does the demo question work" but
+# "does an unseen phrasing of a concept we hold still find it".
+#
+# Each family is one concept the corpus genuinely publishes, `expect` is the key
+# that answers it, and `phrasings` are ways a user could ask. They are meant to
+# be realistic, not adversarial: a synonym the regulator does not use, an
+# abbreviation, English, a Turkish morphological variant, the concept named
+# together with its source. `accept` lists other keys that are also a correct
+# answer (a currency variant of the same series, an equally canonical row).
+#
+# `absent` at the bottom is the opposite test: concepts the corpus does NOT
+# hold. The right behaviour there is to say so, not to return the nearest
+# neighbour with a confident tone -- which is what the system does today.
+
+cases:
+  - family: tasit_kredisi_stok_faizi
+    expect: TP.BKR.TRY.17
+    phrasings:
+      - Taşıt Kredisi (TL, Stok, %)
+      - EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle
+      - Taşıt Kredisi (TL, Stok, %) faiz oranı
+
+  - family: tasit_kredisi_akim_faizi
+    expect: TP.KTF11
+    phrasings:
+      - Taşıt Kredisi (TL, Akım, %)
+      - EVDS Taşıt Kredisi (TL, Akım, %) faiz oranı
+
+  - family: konut_kredisi_stok
+    expect: tuketici_kredileri_konut
+    phrasings:
+      - konut kredileri
+      - konut kredisi bakiyesi
+      - konut kredilerinin tutari
+      - mortgage loans
+      - ev kredisi hacmi
+      - BDDK bultenindeki konut kredileri
+
+  - family: konut_kredisi_faizi
+    expect: TP.KTF12
+    phrasings:
+      - konut kredisi faiz orani
+      - konut kredisi faizleri
+      - mortgage interest rate
+      - konut kredilerine uygulanan faiz
+      - EVDS'deki konut kredisi faiz oranlari
+
+  # The failure that started this: "faiz" appears in no KTF series name. The
+  # phrase the question uses lives in the data group's title.
+  - family: ticari_kredi_faizi
+    expect: TP.KTF17
+    accept: [TP.KTF18]
+    phrasings:
+      - ticari kredi faizi
+      - Agirlikli Ortalama Ticari Kredi Faizleri
+      - ticari kredilere uygulanan faiz orani
+      - commercial loan interest rate
+      - EVDS'deki ticari kredi faiz oranlari
+
+  # Three entities share the words "takipteki alacaklar": a stock, a provision
+  # and a ratio. The only word that separates them is the one the ranker does
+  # not read.
+  - family: npl_orani
+    expect: takipteki_alacaklar_brut_toplam_nakdi_krediler
+    phrasings:
+      - takipteki alacaklar orani
+      - TGA orani
+      - NPL orani
+      - sorunlu alacak rasyosu
+      - batik kredi orani
+      - takipteki krediler / toplam krediler
+      - non-performing loan ratio
+
+  - family: takipteki_alacaklar_stok
+    expect: takipteki_alacaklar
+    phrasings:
+      - takipteki alacaklar
+      - takipteki alacak tutari
+      - sorunlu alacaklarin buyuklugu
+      - non-performing loans amount
+
+  - family: takipteki_konut_kredileri
+    expect: takipteki_konut_kredileri
+    phrasings:
+      - takipteki konut kredileri
+      - batik konut kredileri
+      - donmus konut kredisi tutari
+      - non-performing housing loans
+
+  - family: enflasyon
+    expect: TP.GENENDEKS.T1
+    phrasings:
+      - enflasyon
+      - TUFE
+      - tuketici fiyat endeksi
+      - inflation
+      - CPI
+
+  - family: konut_fiyat_endeksi
+    expect: TP.KFE.TR
+    phrasings:
+      - konut fiyat endeksi
+      - KFE
+      - house price index
+      - konut fiyatlari endeksi
+
+  - family: politika_faizi
+    expect: TP.APIFON4
+    phrasings:
+      - politika faizi
+      - TCMB fonlama maliyeti
+      - policy rate
+      - merkez bankasi agirlikli ortalama fonlama maliyeti
+
+  - family: mevduat_stok
+    expect: mevduat_katilim_fonu
+    phrasings:
+      - mevduat
+      - toplam mevduat buyuklugu
+      - mevduat ve katilim fonu
+      - total deposits
+
+  - family: mevduat_faizi
+    expect: TP.TRY.MT06
+    phrasings:
+      - mevduat faizi
+      - mevduat faiz oranlari
+      - TL mevduata verilen faiz
+      - deposit interest rate
+
+  - family: sermaye_yeterliligi
+    expect: sermaye_yeterliligi_standart_rasyosu
+    phrasings:
+      - sermaye yeterlilik rasyosu
+      - SYR
+      - sermaye yeterliligi orani
+      - capital adequacy ratio
+
+  - family: kredi_mevduat_orani
+    expect: toplam_nakdi_krediler_toplam_mevduat
+    phrasings:
+      - kredi mevduat orani
+      - krediler / mevduat rasyosu
+      - loan to deposit ratio
+      - mevduatin ne kadari krediye donusmus
+
+  - family: ozkaynak_karliligi
+    expect: donem_net_ka_ri_zarari_ortalama_ozkaynaklar
+    phrasings:
+      - ozkaynak karliligi
+      - ROE
+      - return on equity
+      - ozkaynak getirisi
+
+  - family: donem_net_kari
+    expect: donem_net_kari_zarari
+    phrasings:
+      - donem net kari
+      - bankacilik sektoru kari
+      - net kar tutari
+      - net profit
+
+  - family: konut_satislari
+    expect: TP.AKONUTSAT1.KTRTOPLAM
+    phrasings:
+      - konut satislari
+      - Turkiye'de kac konut satildi
+      - house sales
+      - toplam konut satis adedi
+
+  - family: ipotekli_satis_payi
+    expect: DERIVED.IPOTEKLI_PAY.KTRTOPLAM
+    phrasings:
+      - ipotekli konut satislarinin payi
+      - ipotekli satis orani
+      - mortgaged sales share
+
+  # KKM is published in both corpora: the weekly bulletin carries it as an
+  # informational line, and EVDS publishes the TCMB aggregate. Either answers
+  # the question, so both are accepted -- the gold was narrower than the data
+  # until the group titles entered the search and the EVDS rows outranked the
+  # weekly one, correctly.
+  - family: kur_korumali_mevduat
+    expect: '5872'
+    accept: [TP.KKM.K4, TP.KKM.K1]
+    phrasings:
+      - kur korumali mevduat
+      - KKM
+      - kur korumali TL mevduat buyuklugu
+
+  - family: haftalik_toplam_krediler
+    expect: '5687'
+    phrasings:
+      - haftalik bultene gore toplam krediler
+      - haftalik kredi buyuklugu
+      - BDDK haftalik bulten toplam kredi
+
+  - family: usd_kuru
+    expect: TP.DK.USD.A.YTL
+    accept: [TP.DK.USD.S.YTL]
+    phrasings:
+      - dolar kuru
+      - USD/TRY
+      - amerikan dolari kuru
+      - exchange rate
+
+# Concepts the corpus does not hold. A correct system reports the gap; today it
+# returns the nearest lexical neighbour and the composer presents it as data.
+# Scored separately -- these are not counted in recall.
+  # BDDK FinTurk: the same concepts as the bulletin, quarterly and by province.
+  # A FinTurk row is the answer only when the question names a province or
+  # the grain; the plain phrasings of the families above must keep reaching
+  # the monthly line, which the multiplier in `tools.lakehouse._score` does.
+  - family: finturk_konut_kredisi_il
+    expect: konut_kredisi
+    phrasings:
+      - illere gore konut kredisi
+      - il bazinda konut kredisi
+      - İstanbul'da konut kredisi
+      - Ankara konut kredileri
+      - sehir bazli konut kredisi hacmi
+      - FinTurk konut kredisi
+
+  - family: finturk_nakdi_krediler_il
+    expect: toplam_nakdi_krediler
+    accept: [nakdi_krediler]            # the same table's cash-loan line without the memo items
+    phrasings:
+      - il bazinda toplam nakdi krediler
+      - illere gore nakdi kredi tutari
+      - il bazinda kredi dagilimi        # misses: "dagilim" names no row, the per-capita line wins
+
+absent:
+  - banka bazinda karlilik             # taraf=10001 is fixed; no bank breakdown is pulled

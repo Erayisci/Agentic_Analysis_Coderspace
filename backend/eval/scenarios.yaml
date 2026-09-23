@@ -1,0 +1,265 @@
+# Evaluation scenarios for the KKB agent.
+#
+# Every `expect_values` number here was computed by SQL against the lakehouse
+# (see the `gold_sql` field, which is the query that produced it) -- never taken
+# from the kick-off deck's chart. That chart's four labelled end-values do not
+# co-occur at any single month in the published data, so it is a shape to match
+# rather than a numeric target.
+#
+# tolerance_pct is per-scenario: a stock read straight from a table must match
+# exactly, while a derived index can legitimately differ in the last decimal.
+
+meta:
+  corpus_window: [2021-01-01, 2026-07-01]
+  lakehouse: data/lakehouse.duckdb
+
+scenarios:
+
+  - id: mentor_vehicle_first_six_months
+    conversation: mentor_vehicle
+    turn: 1
+    question: >-
+      BDDK Aylık Bülten verilerini kullanarak Tüketici Kredileri - Taşıt kredilerinin
+      2026 yılı ilk 6 ay verisi ile bir veri seti oluştur.
+    expect_intent: series_analysis
+    expect_window: [2026-01-01, 2026-06-01]
+    expect_rows: 6
+    expect_keys: [tuketici_kredileri_tasit]
+    expect_units: ["milyon TL"]
+
+  - id: mentor_vehicle_stock_rate_followup
+    conversation: mentor_vehicle
+    turn: 2
+    question: >-
+      Taşıt kredisi tutarlarına faiz oranlarını ekle. Veri setine aynı aylara denk
+      gelecek şekilde EVDS, Taşıt Kredisi (TL, Stok, %) verisini ekle.
+    expect_intent: followup
+    expect_window: [2026-01-01, 2026-06-01]
+    expect_rows: 6
+    expect_keys: [tuketici_kredileri_tasit, TP.BKR.TRY.17]
+    expect_preserves_columns: true
+    expect_units: ["milyon TL", "%"]
+
+  - id: mentor_tp_yp_maturity
+    question: >-
+      BDDK Aylık Bülten verilerini kullanarak 202101–202512 döneminde Türk parası (TP)
+      ve yabancı para (YP) mevduatların gelişimini ve vade yapısını incelemek üzere aylık
+      bir veri seti oluştur.
+      Oluşturulacak veri seti sadece o aydaki mevduat verisini göstermeli stok veri olmamalı.
+      TP ve YP mevduatları ayrı ayrı getir. TP Mevduatları ayrıca açılış vadelerine göre
+      3 aya kadar ve 3 aydan fazla olacak şekilde iki grupta topla ve tüm serileri aynı
+      aylık tarih ekseninde hizala.
+      Verilerin alınacağı ilgili satırlar, TP için TP Mevduat / Katılım Fonları - Yurt İçi
+      Yerleşik YP için Döviz Tevdiat Hesabı / Katılım Fonları - Yurt İçi Yerleşik
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_keys:
+      - tp_mevduat_katilim_fonlari_yurt_ici_yerlesik
+      - doviz_tevdiat_hesabi_katilim_fonlari_yurt_ici_yerlesik
+    expect_units: ["milyon TL"]
+    expect_semantics: [net_change]
+    notes: >-
+      The source is stock. net_change yields net balance changes, not gross deposits;
+      January 2021 has no prior observation in this archive. The maturity table exposes
+      bir_aya_kadar + bir_ay_uc_ay and uc_ay_alti_ay + alti_ay_bir_yil + bir_yil;
+      sum_columns combines these. Vadesiz is separate from opening-term buckets.
+      The deterministic fallback retrieves the named rows; the planner must choose
+      the bucket fetches and transforms for this compound request.
+
+  # --- the three canonical demo turns, as one conversation ------------------
+  - id: demo_turn1_loans_and_rate
+    conversation: reference_demo
+    turn: 1
+    question: >-
+      2021-2025 yillari arasindaki 60 aylik veriden Turkiye'de kullanilan toplam konut
+      kredilerinin dagilimini aylik olarak gosteriniz. Buna ek olarak konut kredisi faiz
+      oranlarini da gosteriniz. Faiz oranlarinin dustugu donemlerde kredi miktari nasil
+      degisim gostermis, faiz orani dustugu halde kredi miktarinin yukselmedigi donemler
+      olmus mu?
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    expect_units: ["milyon TL", "%"]
+    expect_semantics: [stock, rate]
+    expect_values:
+      konut_kredisi_first: 276785.0
+      konut_kredisi_last: 678970.0
+      faiz_first: 18.388
+      faiz_last: 37.29
+      faiz_max: 44.72
+    tolerance_pct: 0.5
+    gold_sql: >-
+      SELECT period, value FROM bulletin_observations WHERE dataset='tuketici_kredileri'
+      AND entity_key='tuketici_kredileri_konut' AND currency='total'
+      AND period BETWEEN DATE '2021-01-01' AND DATE '2025-12-01' ORDER BY period
+    notes: >-
+      The question says "kullanilan" (extended), but the only monthly housing-loan
+      figure BDDK publishes is the period-end outstanding STOCK. The answer must say so.
+
+  - id: demo_turn2_deflate_without_disturbing
+    conversation: reference_demo
+    turn: 2
+    question: >-
+      Konut kredisi ve faiz oranlari tablosunu bozmadan sadece konut kredisi tutarlarini
+      enflasyondan arindirir misin?
+    expect_intent: followup
+    expect_rows: 60
+    expect_preserves_columns: true
+    expect_keys: [TP.GENENDEKS.T1]
+    expect_values:
+      konut_kredisi_reel_last: 99182.8
+    tolerance_pct: 1.0
+    gold_sql: >-
+      WITH loan AS (SELECT period, value FROM bulletin_observations WHERE dataset='tuketici_kredileri'
+      AND entity_key='tuketici_kredileri_konut' AND currency='total'),
+      cpi AS (SELECT period, value FROM macro_observations WHERE series_code='TP.GENENDEKS.T1')
+      SELECT l.value * (first_value(c.value) OVER (ORDER BY l.period) / c.value) AS real
+      FROM loan l JOIN cpi c USING (period) WHERE l.period = DATE '2025-12-01'
+    notes: The table must keep its existing columns and its 60-row window.
+
+  - id: demo_turn3_add_house_price_index
+    conversation: reference_demo
+    turn: 3
+    question: >-
+      Bu tabloyu hic bozmadan yeni bir sutun olarak konut fiyat endeksini getirebilir misin?
+      Faiz oranlarinin dustugu halde kredilerin artmamasinin sebebi fiyat artisi olabilir mi?
+    expect_intent: followup
+    expect_rows: 60
+    expect_preserves_columns: true
+    expect_keys: [TP.KFE.TR]
+    expect_units: ["endeks"]
+    expect_wants_analysis: [decompose]
+    expect_analysis: {method: decompose, fields: [nominal_pct, price_pct, real_pct, description]}
+    expect_find_periods: true
+    expect_values:
+      kfe_first: 16.49
+      kfe_last: 204.36
+      nominal_pct: 145.3
+      price_pct: 1139.3
+      real_pct: -80.2
+    tolerance_pct: 1.0
+    gold_sql: >-
+      SELECT period, value FROM macro_observations WHERE series_code='TP.KFE.TR'
+      AND period BETWEEN DATE '2021-01-01' AND DATE '2025-12-01' ORDER BY period
+    gold_python: >-
+      nominal = 678970/276785-1 (+145.3%), price = 204.36/16.49-1 (+1139.3%),
+      real = (1+nominal)/(1+price)-1 (-80.2%) -- backend.tools.transforms.decompose_growth
+    notes: >-
+      "Sebebi fiyat artisi olabilir mi" is a decomposition question, not a Granger one:
+      the answer is that nominal growth fell far short of price growth, so the real stock
+      shrank -- consistent with the price explanation. The three numbers used to reach the
+      composer as unrelated facts; `decompose` states the relation.
+
+  # --- single-turn coverage of the rest of the surface ----------------------
+  - id: discovery_english_alias
+    question: Show monthly mortgage loan volumes and the mortgage interest rate for 2022-2024.
+    expect_intent: series_analysis
+    expect_window: [2022-01-01, 2024-12-01]
+    expect_rows: 36
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    notes: The corpus is published only in Turkish; an English question must still resolve.
+
+  - id: unit_trap_sectoral_vs_bulletin
+    question: 2024 yilinda imalat sanayi sektorune kullandirilan nakdi kredileri goster.
+    expect_intent: series_analysis
+    expect_window: [2024-01-01, 2024-12-01]
+    expect_rows: 12
+    expect_units: ["bin TL"]
+    notes: >-
+      The sectoral table is the corpus's only bin TL table. Reporting it as milyon TL
+      is a 1000x error, so the unit must survive into the answer.
+
+  - id: cumulative_profit_flow
+    question: 2025 ve 2026 icin bankacilik sektorunun donem net karini aylik olarak goster.
+    expect_intent: series_analysis
+    expect_semantics: [cumulative_ytd]
+    expect_values:
+      ocak_2026_flow: 87249.0
+    tolerance_pct: 0.5
+    gold_sql: >-
+      SELECT value_flow FROM bulletin_observations WHERE dataset='kar_zarar'
+      AND entity_key='donem_net_kari_zarari' AND currency='total' AND period=DATE '2026-01-01'
+    notes: >-
+      kar_zarar is year-to-date and resets every January. A month-over-month change on
+      the published value is arithmetic nonsense; value_flow is the month's own figure.
+
+  - id: anomaly_on_housing_loans
+    question: Konut kredilerinde olagandisi hareketler var mi? Anomali analizi yap.
+    expect_intent: series_analysis
+    expect_wants_analysis: [anomaly]
+    expect_analysis: {method: anomaly, min_count: 1, contains_period: "2023-03"}
+    expect_keys: [tuketici_kredileri_konut]
+    gold_python: >-
+      backend.tools.anomaly.detect_anomalies("tuketici_kredileri_konut"): monthly % change
+      of the stock, trailing 12-month baseline, |z|>=3 AND IQR x1.5 -> 2023-03 (+6.49%, z 3.57)
+      and 2024-10 (+3.26%, z 3.54). Pinned by period, not count: new months may add flags.
+    notes: Must score the change, not the level, and report the unit.
+
+  - id: changepoint_on_rate
+    question: Konut kredisi faiz oranlarinda rejim degisikligi oldugu donemleri bul.
+    expect_intent: series_analysis
+    expect_wants_analysis: [changepoint]
+    expect_analysis: {method: changepoint, contains_period: "2023-07"}
+    expect_keys: [TP.KTF12]
+    gold_python: >-
+      backend.tools.change_detection.detect_change_points_for("TP.KTF12", source="macro"): PELT l2
+      on the z-scored level (kind=level for a rate), pen = 2 ln n at medium sensitivity -> 2023-07
+      (the post-election policy shift), found at every sensitivity, so graded "solid".
+
+  - id: causality_rate_leads_loans
+    question: >-
+      2021-2025 arasinda konut kredisi faizi konut kredilerini onculuyor mu? Nedensellik testi yap.
+    expect_intent: series_analysis
+    expect_window: [2021-01-01, 2025-12-01]
+    expect_rows: 60
+    expect_wants_analysis: [causality]
+    expect_analysis: {method: causality, fields: [directions, verdict, correlation_diff, description]}
+    expect_keys: [tuketici_kredileri_konut, TP.KTF12]
+    expect_values:
+      correlation_diff: -0.298
+    tolerance_pct: 5.0
+    gold_python: >-
+      backend.tools.causality.granger_both_directions on the 60 aligned months: both I(1),
+      differenced; VAR BIC lag 1; faiz->konut p 0.164, konut->faiz p 0.199 at lag 1 (min-p
+      over six lags was 0.069 / 0.096 -- the multiple-testing artefact this replaces);
+      correlation of the differences -0.30 (levels +0.79, the shared trend).
+    notes: >-
+      Neither direction is predictive at the 5% level on 60 months; the answer must say
+      "does not help predict", not "no relationship", and must quote the differenced
+      correlation with its sign.
+
+  - id: weekly_latest_credit
+    question: BDDK haftalik bultenine gore en guncel toplam kredi buyuklugu nedir?
+    expect_intent: series_analysis
+    expect_values:
+      latest_total_credit: 28128197.3
+    tolerance_pct: 1.0
+    gold_sql: >-
+      SELECT o.value FROM weekly_observations o JOIN weekly_items i USING (dataset, entity_key)
+      WHERE i.retired_on IS NULL AND o.currency='total' AND o.entity_name ILIKE '%Toplam Krediler%'
+      AND o.period=(SELECT max(period) FROM weekly_observations)
+    notes: Must filter retired items, or the superseded definition double-counts.
+
+  - id: metadata_what_exists
+    question: Lakehouse'da hangi konut ile ilgili seriler var? Listele.
+    expect_intent: metadata
+    expect_keys: [tuketici_kredileri_konut]
+    expect_verified: true
+    notes: >-
+      Discovery only; no table is required, and the verifier must not report the empty
+      table as an error. The composer sees each candidate's period span.
+
+  - id: footnotes_sectoral_table
+    question: >-
+      Sektorel kredi dagilimi tablosunda imalat sanayi nakdi kredileri; bu tablonun dipnotu
+      ve metodoloji notu ne diyor?
+    expect_intent: series_analysis
+    expect_keys: [imalat_sanayi]
+    expect_footnotes: true
+    gold_sql: >-
+      SELECT footnote FROM bulletin_footnotes WHERE dataset='sektorel_kredi_dagilimi'
+    notes: >-
+      Table 05's note says "Bankalara Kullandirilan Krediler" is published outside the
+      table's totals -- the one kind of lakehouse fact no arithmetic check can surface.

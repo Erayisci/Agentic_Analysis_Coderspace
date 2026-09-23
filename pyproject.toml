@@ -12,10 +12,48 @@ dependencies = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
     "pyarrow>=14.0.0",
+    # Analysis tools: change detection, causality/stationarity tests.
+    "ruptures>=1.1.0",
+    "statsmodels>=0.14.0",
+    # Web URL agent tool: fetch, PDF and HTML extraction.
+    "requests>=2.31.0",
+    "pypdf>=4.0.0",
+    "beautifulsoup4>=4.12.0",
+    # Web URL agent tool: headless render for JS-rendered pages (optional at
+    # runtime -- read_url falls back to the static fetch with no browser
+    # installed; `playwright install chromium` is a separate, one-time step).
+    "playwright>=1.40.0",
+    # Agent layer: Kloudeks HTTP client, typed plan DSL, charts, eval scenarios.
+    "httpx>=0.27.0",
+    "pydantic>=2.6.0",
+    "plotly>=5.20.0",
+    "PyYAML>=6.0",
+    # API service.
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "flake8>=6.0.0"]
+# The in-process route of demo-day source ingestion (backend/ingestion/external)
+# runs the web-tools extension's extractor inside the API process; these are
+# the same parser packages extensions/web_tools/requirements-assets.in installs
+# in its container. Without them the API still starts and the container route
+# still works; only in-process PDF/XLS/image extraction is unavailable.
+# Dense retrieval for discovery (backend/tools/vector_store.py). The brief
+# names LanceDB, so it is the backend when installed; without it the store
+# falls back to a NumPy matrix plus a JSON sidecar under data/vectors/, and
+# without an index at all discovery uses lexical ranking only. Nothing here is
+# needed to build the lakehouse or run the agent.
+vector = ["lancedb>=0.13.0"]
+ingest = [
+    "pdfplumber>=0.11.0",
+    "xlrd>=2.0.0",
+    "pypdfium2>=4.0.0",
+    "Pillow>=10.0.0",
+    "defusedxml>=0.7.0",
+    "lxml>=5.0.0",
+]
 
 [project.scripts]
 kkb-build = "backend.lakehouse.build:main"
@@ -24,4 +62,8 @@ kkb-build = "backend.lakehouse.build:main"
 include = ["backend*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# extensions/web_tools/tests is perhat's unittest suite (15 of its tests skip without
+# WEB_TOOLS_TEST_ASSETS / WEB_TOOLS_TEST_BROWSER). importlib mode: both dirs hold a
+# `test_tools.py` and neither is a package, so the default import mode collides.
+testpaths = ["tests", "extensions/web_tools/tests"]
+addopts = "--import-mode=importlib"
